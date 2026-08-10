@@ -38,6 +38,14 @@ datas = [
 # failure — it's a hard crash the instant the wake-word listener starts,
 # found by actually launching the packaged build, not by static review.
 datas += collect_data_files("openwakeword")
+# eth_account.hdaccount reads its BIP-39 wordlist .txt files (english.txt,
+# etc.) off disk at runtime for wallet/mnemonic generation — same
+# non-code-data blind spot as openwakeword above. Missing this doesn't
+# fail at import time (eth_account.hdaccount is already a hiddenimport
+# below); it only surfaces the instant a wallet is actually created,
+# which is exactly how this was found — a real "create wallet" click in
+# the packaged trader panel throwing FileNotFoundError.
+datas += collect_data_files("eth_account")
 
 hiddenimports = [
     # plyer dispatches to platform backends via importlib at runtime —

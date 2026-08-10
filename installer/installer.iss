@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define AppName "S.E.R.A.P.H"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.0"
 #define AppPublisher "Kondux"
 #define AppURL "https://kondux.io"
 #define AppExeName "S.E.R.A.P.H.exe"
@@ -16,7 +16,16 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
-DefaultDirName={autopf}\{#AppName}
+; Per-user install, not Program Files: the app writes its config
+; (API keys), logs, memory, certs, and trader ledger directly next to the
+; exe (see main.py's BASE_DIR / get_base_dir()) on every run, not just
+; during setup. An admin-elevated, Program-Files install only works for
+; the installer's own post-install launch (which inherits the elevation);
+; every later double-click from the Start Menu / desktop runs as the
+; plain user and hits PermissionError writing to Program Files. Installing
+; per-user sidesteps this entirely — matches how VS Code, Slack, etc.
+; default their Windows installers.
+DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=output
 OutputBaseFilename={#AppName}-Setup-{#AppVersion}
@@ -24,7 +33,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern dark
 SetupIconFile=..\assets\icon.ico
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
