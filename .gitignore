@@ -1,0 +1,44 @@
+# Virtual environment — huge, machine-specific, never committed
+.venv312/
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Inno Setup output
+installer/output/
+
+# Personal/runtime config — created fresh by the app on first run.
+# Never commit: Gemini API key, Claude Code CLI paths, self-signed cert
+# private key, MCP server keys, OpenAI/Anthropic keys, trader ledger.
+config/api_keys.json
+config/settings.json
+config/theme.json
+config/voice.json
+config/certs/
+config/trader/
+
+# Personal memory state (name, private vault path, notes) — created fresh
+# by the app, same reasoning as config/* above.
+memory/long_term.json
+
+# Logs / debug artifacts
+*.log
+_debug_*
+_pkg_*
+_promo_*
+_settings_*
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
