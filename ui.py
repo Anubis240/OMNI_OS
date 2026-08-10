@@ -18,9 +18,9 @@ from PyQt6.QtCore import (
     QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QFontDatabase,
-    QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen,
-    QPixmap, QRadialGradient, QShortcut,
+    QBrush, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
+    QFontDatabase, QImage, QKeySequence, QLinearGradient, QPainter,
+    QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -1414,6 +1414,22 @@ class SetupOverlay(QWidget):
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
         """)
         layout.addWidget(self._key_input)
+
+        get_key_btn = QPushButton("Get a free Gemini API key ↗")
+        get_key_btn.setFont(QFont("Courier New", 8))
+        get_key_btn.setFixedHeight(22)
+        get_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        get_key_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.ACC2};
+                border: none; text-align: left; padding: 2px 0;
+            }}
+            QPushButton:hover {{ color: {C.PRI}; text-decoration: underline; }}
+        """)
+        get_key_btn.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl("https://aistudio.google.com/api-keys?project=gen-lang-client-0368720913")
+        ))
+        layout.addWidget(get_key_btn)
         layout.addSpacing(12)
 
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
@@ -1606,7 +1622,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         cw = self.centralWidget()
         if self._overlay and self._overlay.isVisible():
-            ow, oh = 460, 390
+            ow, oh = 460, 420
             self._overlay.setGeometry(
                 (cw.width()  - ow) // 2,
                 (cw.height() - oh) // 2,

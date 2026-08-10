@@ -68,6 +68,113 @@ _CONFIG_FIELDS = [
 ]
 
 
+class McpKeySetupOverlay(QWidget):
+    """First-use popup asking for the Seraph MCP API key, shown over the
+    trader panel when no key was found (neither in the Seraph Guardian
+    app's settings nor previously saved by save_seraph_api_key). Only
+    appears once — mcp_client.save_seraph_api_key persists the key so
+    later sessions never hit this again."""
+
+    done = pyqtSignal(str)
+
+    def __init__(self, C, parent=None):
+        super().__init__(parent)
+        self._C = C
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            McpKeySetupOverlay {{
+                background: rgba(0, 6, 10, 245);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 20, 28, 20)
+        layout.setSpacing(8)
+
+        def _lbl(txt, font_size=9, bold=False, color=C.PRI):
+            w = QLabel(txt)
+            w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            w.setFont(QFont("Courier New", font_size, QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            return w
+
+        layout.addWidget(_lbl("◈  SERAPH MCP KEY REQUIRED", 12, True))
+        layout.addWidget(_lbl("The trader needs a Seraph API key to gate and execute trades.", 8, color=C.PRI_DIM))
+        layout.addSpacing(6)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
+        layout.addSpacing(4)
+
+        self._key_input = QLineEdit()
+        self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._key_input.setPlaceholderText("Seraph API key…")
+        self._key_input.setFont(QFont("Courier New", 10))
+        self._key_input.setFixedHeight(32)
+        self._key_input.setStyleSheet(f"""
+            QLineEdit {{
+                background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+        """)
+        layout.addWidget(self._key_input)
+
+        get_key_btn = QPushButton("Get a Seraph API key ↗")
+        get_key_btn.setFont(QFont("Courier New", 8))
+        get_key_btn.setFixedHeight(22)
+        get_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        get_key_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.ACC2};
+                border: none; text-align: left; padding: 2px 0;
+            }}
+            QPushButton:hover {{ color: {C.PRI}; text-decoration: underline; }}
+        """)
+        get_key_btn.clicked.connect(lambda: webbrowser.open(mcp_client.SERAPH_KEY_SIGNUP_URL))
+        layout.addWidget(get_key_btn)
+        layout.addSpacing(10)
+
+        submit_btn = QPushButton("▸  SAVE KEY")
+        submit_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        submit_btn.setFixedHeight(36)
+        submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        submit_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
+            }}
+            QPushButton:hover {{
+                background: {C.PRI_GHO_BG}; border: 1px solid {C.PRI};
+            }}
+        """)
+        submit_btn.clicked.connect(self._submit)
+        layout.addWidget(submit_btn)
+
+        skip_btn = QPushButton("Skip for now")
+        skip_btn.setFont(QFont("Courier New", 8))
+        skip_btn.setFixedHeight(20)
+        skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        skip_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_DIM}; border: none; }}
+            QPushButton:hover {{ color: {C.TEXT}; }}
+        """)
+        skip_btn.clicked.connect(self.hide)
+        layout.addWidget(skip_btn)
+
+    def _submit(self):
+        key = self._key_input.text().strip()
+        if not key:
+            self._key_input.setStyleSheet(
+                self._key_input.styleSheet() +
+                f" QLineEdit {{ border: 1px solid {self._C.RED}; }}"
+            )
+            return
+        self.done.emit(key)
+
+
 class TraderPanel(QWidget):
     _event_sig = pyqtSignal(object)
     # Carries a zero-arg callable — lets any background thread schedule a
@@ -105,6 +212,41 @@ class TraderPanel(QWidget):
         self._refresh_positions()
         self._refresh_watchlist()
         self._load_config_into_ui()
+
+        self._mcp_key_overlay: "McpKeySetupOverlay | None" = None
+        if not mcp_client.get_default_client().api_key:
+            self._show_mcp_key_setup()
+
+    # ---------- Seraph MCP key first-use setup ----------
+
+    def _show_mcp_key_setup(self):
+        ov = McpKeySetupOverlay(self._C, self)
+        ov.done.connect(self._on_mcp_key_submitted)
+        self._position_mcp_key_overlay(ov)
+        ov.show()
+        ov.raise_()
+        self._mcp_key_overlay = ov
+
+    def _position_mcp_key_overlay(self, ov: "McpKeySetupOverlay"):
+        ow, oh = 440, 260
+        ov.setGeometry(
+            (self.width()  - ow) // 2,
+            (self.height() - oh) // 2,
+            ow, oh,
+        )
+
+    def _on_mcp_key_submitted(self, key: str):
+        mcp_client.save_seraph_api_key(key)
+        if self._mcp_key_overlay:
+            self._mcp_key_overlay.hide()
+            self._mcp_key_overlay = None
+        if self._key_warn_lbl:
+            self._key_warn_lbl.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._mcp_key_overlay is not None and self._mcp_key_overlay.isVisible():
+            self._position_mcp_key_overlay(self._mcp_key_overlay)
 
     # ---------- engine event bridge (background thread -> Qt thread) ----------
 
@@ -223,11 +365,12 @@ class TraderPanel(QWidget):
         self._mode_lbl.setStyleSheet(f"color: {C.ACC2}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 8px;")
         header.addWidget(self._mode_lbl)
 
+        self._key_warn_lbl = None
         if not mcp_client.get_default_client().api_key:
-            key_warn = QLabel("⚠ no Seraph API key found — trades will fail closed")
-            key_warn.setFont(QFont("Courier New", 8))
-            key_warn.setStyleSheet(f"color: {C.RED}; background: transparent;")
-            header.addWidget(key_warn)
+            self._key_warn_lbl = QLabel("⚠ no Seraph API key found — trades will fail closed")
+            self._key_warn_lbl.setFont(QFont("Courier New", 8))
+            self._key_warn_lbl.setStyleSheet(f"color: {C.RED}; background: transparent;")
+            header.addWidget(self._key_warn_lbl)
 
         self._start_btn = self._make_button("▶ START", self._on_start_stop)
         header.addWidget(self._start_btn)

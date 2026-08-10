@@ -21,8 +21,10 @@ import requests
 
 SERAPH_MCP_URL = "https://seraph.kondux.io/mcp"
 SERAPH_SERVER_ID = "seraph-kondux"
+SERAPH_KEY_SIGNUP_URL = "https://seraph.kondux.io/"
 
 _GUARDIAN_SETTINGS_PATH = Path(os.environ.get("APPDATA", "")) / "Seraph Guardian" / "settings.json"
+_APP_API_KEYS_PATH = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
 
 TOOLS_CACHE_SECONDS = 10 * 60
 
@@ -32,10 +34,32 @@ def _load_seraph_api_key() -> str:
         data = json.loads(_GUARDIAN_SETTINGS_PATH.read_text(encoding="utf-8"))
         for server in data.get("mcpServers", []):
             if server.get("id") == SERAPH_SERVER_ID:
-                return server.get("apiKey") or ""
+                key = server.get("apiKey") or ""
+                if key:
+                    return key
     except Exception:
         pass
-    return ""
+    # Fall back to a key the user entered directly into this app (see
+    # save_seraph_api_key) — covers machines without Seraph Guardian installed.
+    try:
+        data = json.loads(_APP_API_KEYS_PATH.read_text(encoding="utf-8"))
+        return data.get("seraph_mcp_api_key") or ""
+    except Exception:
+        return ""
+
+
+def save_seraph_api_key(key: str) -> None:
+    """Persists a user-entered Seraph MCP key into this app's own config
+    (config/api_keys.json) and applies it to the live default client
+    immediately, so the trader panel doesn't need a restart to pick it up."""
+    _APP_API_KEYS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(_APP_API_KEYS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    data["seraph_mcp_api_key"] = key
+    _APP_API_KEYS_PATH.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    get_default_client().api_key = key
 
 
 class McpClient:
