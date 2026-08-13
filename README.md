@@ -6,7 +6,7 @@ Omni-OS is a local-first, JARVIS-style desktop assistant built on Google's Gemin
 for real-time voice, vision, and system control. On top of that it runs a **multi-companion
 system**: your main assistant can create and manage its own named sub-agents (e.g. "Bob",
 "Ivy"), each backed by the Claude Agent SDK, to handle coding and project work — visualized
-live in a **World view** node graph, in the same spirit as multi-agent products like Zoey OS.
+live in a **World view** node graph.
 A built-in **Integrations tab** connects 30+ third-party services (GitHub, Slack, Notion,
 Google Workspace, Microsoft 365, Jira/Confluence, Zoom, Dropbox, and more) as tools any
 companion can call. An optional built-in crypto trading panel, guarded by pre-trade risk
