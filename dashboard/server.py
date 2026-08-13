@@ -776,6 +776,9 @@ class DashboardServer:
         self._phone_audio_in_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._audio_clients: set["WebSocket"] = set()
         self._use_ssl = False  # flipped True in serve() once a cert is ready
+        self.running = False  # True once the HTTP(S) listener is actually up
+        self.start_error: str | None = None  # set if serve() fails to start
+        self._error_callback = None
         # Files Seraph has created that the phone can fetch by an opaque id —
         # avoids exposing raw filesystem paths; only explicitly-shared files
         # are servable, not arbitrary paths off a URL parameter.
@@ -783,6 +786,15 @@ class DashboardServer:
 
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
+
+    def set_error_callback(self, fn) -> None:
+        """fn(message: str) -> None, called if the dashboard fails to start
+        (most commonly: the port is already held by another running copy of
+        Omni-OS). Without this, a bind failure inside serve()'s
+        fire-and-forget asyncio task fails completely silently — the app
+        looks fine, Remote Control still shows a URL/QR code, and nothing
+        ever explains to the user why their phone can't connect."""
+        self._error_callback = fn
 
     def set_trader_state_callback(self, fn) -> None:
         """fn() -> dict | None, called synchronously from the request handler
@@ -865,8 +877,8 @@ class DashboardServer:
             html = _APP_HTML.replace("__TRADER_ENABLED__", "true" if trader_enabled else "false")
             return HTMLResponse(html)
 
-        # Static background — a single still frame of the Leda avatar, not
-        # gated behind auth (it's just a decorative image, no assistant data).
+        # Static background — the Omni-OS logo mark, not gated behind auth
+        # (it's just a decorative image, no assistant data).
         @app.get("/static/avatar_bg.jpg")
         async def avatar_bg():
             if AVATAR_BG_FILE.exists():
@@ -1051,10 +1063,19 @@ class DashboardServer:
 
         return app
 
+    def _fail(self, message: str) -> None:
+        self.running = False
+        self.start_error = message
+        print(f"[Dashboard] ERROR: {message}")
+        if self._error_callback:
+            try:
+                self._error_callback(message)
+            except Exception:
+                pass
+
     async def serve(self) -> None:
         if not _DEPS_OK:
-            print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
-            print('[Dashboard] Run:  pip install fastapi "uvicorn[standard]"')
+            self._fail('fastapi/uvicorn not installed — run: pip install fastapi "uvicorn[standard]"')
             return
 
         app = self._build_app()
@@ -1068,6 +1089,25 @@ class DashboardServer:
             print("[Dashboard] Phone mic won't work over HTTP (mobile browsers require HTTPS "
                   "for microphone access); everything else will. Run: pip install cryptography")
 
+        # uvicorn.Server.startup() swallows bind errors internally (logs them
+        # via its own logger, which the GUI never shows) and converts them to
+        # a bare sys.exit(3) with no error text attached — by the time that
+        # reaches us below there's no way to recover *why* it failed. Doing
+        # our own bind attempt first gets the real OSError (e.g. "[WinError
+        # 10048] ... normally permitted" for a port already in use) while
+        # it's still available, so the failure the user sees is specific
+        # instead of a silent no-op.
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("0.0.0.0", PORT))
+            probe.close()
+        except OSError as e:
+            self._fail(
+                f"couldn't bind port {PORT} ({e.strerror or e}) — is another copy of "
+                "Omni-OS already running? Remote Control won't work until this is freed."
+            )
+            return
+
         cfg = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning", **ssl_kwargs)
         print(f"[Dashboard] {self.get_url()}")
         print("[Dashboard] Press 'Remote Control' in the Omni-OS UI to get a pairing QR code.")
@@ -1076,4 +1116,23 @@ class DashboardServer:
                   "tap 'proceed anyway' / 'visit site' once, it won't ask again.")
         print("[Dashboard] Phone must be on the same Wi-Fi/LAN. If it can't connect, allow "
               "Python through Windows Firewall on your Private network.")
-        await uvicorn.Server(cfg).serve()
+        try:
+            self.running = True
+            await uvicorn.Server(cfg).serve()
+        except asyncio.CancelledError:
+            raise  # normal shutdown path — not a failure, must propagate
+        except BaseException as e:
+            # Catches SystemExit too (uvicorn's own startup-failure path,
+            # e.g. sys.exit(3) on a bind error) — deliberately NOT re-raised:
+            # asyncio.Task specially re-raises SystemExit/KeyboardInterrupt
+            # instead of absorbing them like other exceptions, which would
+            # blow up the whole shared event loop (voice, Claude sub-agents,
+            # everything) over what should be an isolated dashboard failure.
+            # The pre-flight probe above handles the common case (port
+            # already in use) with a specific message; this is the fallback
+            # for anything else (cert load failure, permission error, the
+            # port getting grabbed in the narrow race between the probe and
+            # this call, ...).
+            self._fail(f"failed to start ({e})")
+        finally:
+            self.running = False

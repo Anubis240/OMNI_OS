@@ -40,20 +40,54 @@ if sys.platform == "win32":
     if _console_hwnd:
         ctypes.windll.user32.ShowWindow(_console_hwnd, 0)  # SW_HIDE
 
+import os
+import ssl
+
 import sounddevice as sd
 
 # Some machines run SSL-inspecting antivirus/corporate proxies (Norton, Zscaler,
 # etc.) that re-sign HTTPS traffic with a locally-generated root CA. Windows
 # trusts that root (it's in the OS certificate store), but google-genai's
-# client pins its SSL context to the certifi package's public CA bundle
-# (see google/genai/_api_client.py), which can never contain a private,
-# machine-specific MITM root — so the Gemini Live websocket fails to verify
-# and can never connect. truststore patches ssl.SSLContext to verify against
-# the OS trust store instead, which already has whatever root the local
-# security software installed. Must run before any module below opens an
-# SSL connection.
-import truststore
-truststore.inject_into_ssl()
+# client pins its outbound SSL context to the certifi package's public CA
+# bundle unless SSL_CERT_FILE is set (see google/genai/_api_client.py:
+# `cafile=os.environ.get('SSL_CERT_FILE', certifi.where())`), and certifi can
+# never contain a private, machine-specific MITM root — so the Gemini Live
+# websocket fails to verify and can never connect.
+#
+# Tried `truststore.inject_into_ssl()` here first — it replaces ssl.SSLContext
+# process-wide, which fixed the Gemini connection but also broke the Remote
+# dashboard's own HTTPS server (dashboard/server.py's uvicorn instance), since
+# truststore's context only implements client-side verification and silently
+# kills the TLS handshake when used server-side (confirmed: phone connections
+# failed with "server closed abruptly (missing close_notify)" whenever this
+# was active). Building an explicit merged CA file and pointing SSL_CERT_FILE
+# at it only affects code that reads that env var (google-genai does; the
+# dashboard's self-signed cert setup never touches it), so it can't leak into
+# unrelated server-side TLS the way a global monkeypatch does.
+def _write_merged_ca_bundle() -> None:
+    if os.environ.get("SSL_CERT_FILE"):
+        return  # user/deployment already set one explicitly — don't override
+    import certifi
+    parts = [Path(certifi.where()).read_bytes()]
+    if sys.platform == "win32":
+        try:
+            seen = set()
+            for der, _encoding, _trust in ssl.enum_certificates("ROOT"):
+                if der not in seen:
+                    seen.add(der)
+                    parts.append(ssl.DER_cert_to_PEM_cert(der).encode("ascii"))
+        except Exception:
+            pass  # fall back to certifi-only bundle rather than fail startup
+    # get_base_dir() isn't defined until later in this file — inline the same
+    # frozen-vs-source logic rather than reordering the whole module.
+    base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    bundle_path = base_dir / "config" / "ca_bundle.pem"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_bytes(b"\n".join(parts))
+    os.environ["SSL_CERT_FILE"] = str(bundle_path)
+
+
+_write_merged_ca_bundle()
 
 from google import genai
 from google.genai import types
@@ -749,6 +783,13 @@ class JarvisLive:
                 'SYS: Dashboard unavailable. Run: pip install fastapi "uvicorn[standard]" qrcode[pil]'
             )
             return None
+        if not self._dashboard.running:
+            # Handing out a key/QR code for a server that never actually
+            # bound its port would just fail silently on the phone with no
+            # clue why — tell the user the real reason up front instead.
+            reason = self._dashboard.start_error or "hasn't started yet — try again in a moment."
+            self.ui.write_log(f"SYS: Remote Dashboard isn't running: {reason}")
+            return None
         key  = self._dashboard.new_key()
         url  = self._dashboard.get_url()
         return url, key, f"{url}/auto-login?key={key}"
@@ -1425,6 +1466,9 @@ class JarvisLive:
             self._dashboard.set_connect_callback(self._on_phone_connected)
             self._dashboard.set_trader_state_callback(self.ui.get_trader_state)
             self._dashboard.set_trader_action_callback(self.ui.run_trader_action)
+            self._dashboard.set_error_callback(
+                lambda msg: self.ui.write_log(f"SYS: Remote Dashboard {msg}")
+            )
             asyncio.create_task(self._dashboard.serve())
             asyncio.create_task(self._process_dashboard_commands())
             asyncio.create_task(self._relay_phone_audio())

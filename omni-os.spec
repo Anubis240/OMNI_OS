@@ -30,6 +30,10 @@ datas = [
     (str(PROJECT_DIR / "leda_idle_timeline1.mp4"), "."),
     (str(PROJECT_DIR / "leda_speaking.mp4"), "."),
     (str(PROJECT_DIR / "dashboard" / "static" / "avatar_bg.jpg"), "dashboard/static"),
+    # Per-service brand icons for the Integrations tab — integrations_panel.py
+    # resolves these relative to its own frozen module dir at runtime, same
+    # BASE_DIR pattern as everything else in this spec.
+    (str(PROJECT_DIR / "assets" / "integration_icons"), "assets/integration_icons"),
 ]
 # eth_account.hdaccount reads its BIP-39 wordlist .txt files (english.txt,
 # etc.) off disk at runtime for wallet/mnemonic generation — same
@@ -92,8 +96,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(PROJECT_DIR / "assets" / "icon.ico"),
-    # TODO: swap for an Omni-OS-branded .ico — kept the inherited S.E.R.A.P.H
-    # icon for now since v1 is prioritizing functional work over visuals.
     # PyInstaller 6.x defaults onedir builds to a separate "_internal"
     # subfolder for everything but the .exe itself. This app's own
     # frozen-mode BASE_DIR (see get_base_dir()/_base_dir() in main.py/

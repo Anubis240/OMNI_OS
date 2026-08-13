@@ -27,6 +27,7 @@ config/theme.json
 config/voice.json
 config/certs/
 config/trader/
+config/ca_bundle.pem
 *.realbak
 
 # Personal memory state (name, private vault path, notes) — created fresh

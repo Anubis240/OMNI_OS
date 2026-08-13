@@ -37,4 +37,3 @@ claude-agent-sdk
 google-auth-oauthlib
 google-api-python-client
 msal
-truststore
