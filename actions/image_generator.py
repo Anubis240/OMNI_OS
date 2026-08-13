@@ -8,8 +8,8 @@ import requests
 
 # Generated images are shown from a temp folder, not saved to Downloads —
 # opening the file lets the user view it and choose to "Save As" themselves
-# rather than Seraph deciding every generation is a keeper.
-OUTPUT_DIR  = Path(tempfile.gettempdir()) / "Seraph Images"
+# rather than Omni deciding every generation is a keeper.
+OUTPUT_DIR  = Path(tempfile.gettempdir()) / "Omni Images"
 IMAGE_MODEL = "flux"  # pollinations.ai model — no API key required
 
 

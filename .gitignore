@@ -1,5 +1,7 @@
 # Virtual environment — huge, machine-specific, never committed
 .venv312/
+.venv_full/
+.venv_preview/
 .venv/
 venv/
 

@@ -11,6 +11,7 @@ different user servers exposing a same-named tool never collide.
 
 from __future__ import annotations
 
+from core import settings_store
 from trader.mcp_client import McpClient
 
 _clients: dict[str, McpClient] = {}
@@ -20,7 +21,11 @@ def _client_for(server: dict) -> McpClient:
     sid = server["id"]
     client = _clients.get(sid)
     if client is None or client.url != server.get("url"):
-        client = McpClient(url=server.get("url", ""), api_key=server.get("apiKey") or None)
+        # apiKey may be a literal secret or a {{CUSTOM_KEY_NAME}} placeholder
+        # pointing at Settings -> API Keys -> custom keys (see
+        # settings_store.resolve_key_placeholders) — either works.
+        api_key = settings_store.resolve_key_placeholders(server.get("apiKey") or "") or None
+        client = McpClient(url=server.get("url", ""), api_key=api_key)
         _clients[sid] = client
     return client
 

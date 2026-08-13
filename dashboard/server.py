@@ -1,9 +1,9 @@
 """
-dashboard/server.py — Seraph Remote Dashboard
+dashboard/server.py — Omni-OS Remote Dashboard
 
-A small local HTTP server that lets a phone on the same LAN pair with Seraph
+A small local HTTP server that lets a phone on the same LAN pair with Omni
 via a QR code (or a 6-character manual key), then send it text commands, talk
-to it with its mic, and hear Seraph's replies. Deliberately scoped down from
+to it with its mic, and hear Omni's replies. Deliberately scoped down from
 a "full" remote-control surface: no file transfer, no automatic firewall
 configuration. Pairing is gated by a short-lived one-time key; once paired,
 requests carry a per-session bearer token.
@@ -133,116 +133,116 @@ def _local_ip() -> str:
 
 _APP_HTML = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Seraph Remote</title>
+<title>Omni-OS Remote</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
-    margin: 0; color: #d6f0ff;
-    font-family: "Courier New", monospace;
+    margin: 0; color: #f0f0f0;
+    font-family: "Segoe UI", sans-serif;
     display: flex; flex-direction: column; height: 100vh;
     background:
       linear-gradient(rgba(6,13,22,0.70), rgba(6,13,22,0.70)),
       url('/static/avatar_bg.jpg') center 15%/cover no-repeat;
-    background-color: #060d16;
+    background-color: #000000;
   }
   header {
-    padding: 14px 16px; border-bottom: 1px solid #1c3a52;
-    font-weight: bold; letter-spacing: 2px; color: #2fb6ff;
+    padding: 14px 16px; border-bottom: 1px solid #2a2a2e;
+    font-weight: bold; letter-spacing: 2px; color: #ff8c42;
     display: flex; justify-content: space-between; align-items: center;
   }
-  #status { font-size: 11px; color: #5a7f99; }
-  #status.live { color: #3ddc97; }
+  #status { font-size: 11px; color: #575757; }
+  #status.live { color: #06d6a0; }
   #log {
     flex: 1; overflow-y: auto; padding: 12px 16px;
     font-size: 14px; line-height: 1.5;
   }
   #log div { margin-bottom: 8px; white-space: pre-wrap; word-break: break-word; }
-  .you { color: #7ee8fa; }
-  .seraph { color: #d6f0ff; }
-  .sys { color: #5a7f99; font-style: italic; font-size: 12px; }
-  #log img { max-width: 100%; border-radius: 8px; margin-bottom: 8px; display: block; border: 1px solid #1c3a52; }
+  .you { color: #48cae4; }
+  .seraph { color: #f0f0f0; }
+  .sys { color: #575757; font-style: italic; font-size: 12px; }
+  #log img { max-width: 100%; border-radius: 8px; margin-bottom: 8px; display: block; border: 1px solid #2a2a2e; }
   .file-link {
     display: inline-block; margin-bottom: 8px; padding: 10px 14px;
-    background: #0f2638; color: #2fb6ff; border: 1px solid #1a7bb3;
+    background: #1a0f08; color: #ff8c42; border: 1px solid #b35a1f;
     border-radius: 8px; text-decoration: none; font-size: 13px;
   }
-  .file-link:active { background: #1a7bb3; color: #0a1826; }
+  .file-link:active { background: #b35a1f; color: #000000; }
   .force-sell-row {
     display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
     flex-wrap: wrap;
   }
   .force-sell-btn {
     padding: 5px 10px; font-size: 11px; font-weight: bold; border-radius: 4px;
-    background: #0a1826; color: #ff5570; border: 1px solid #ff5570; font-family: inherit;
+    background: #000000; color: #ef476f; border: 1px solid #ef476f; font-family: inherit;
   }
-  .force-sell-btn:active { background: #ff5570; color: #0a1826; }
+  .force-sell-btn:active { background: #ef476f; color: #000000; }
   #voicebar {
     display: flex; align-items: center; gap: 10px; padding: 8px 16px;
-    border-top: 1px solid #1c3a52; background: #0a1522; font-size: 11px; color: #5a7f99;
+    border-top: 1px solid #2a2a2e; background: #0a0a0c; font-size: 11px; color: #575757;
   }
   #mic-btn {
     width: 46px; height: 46px; border-radius: 50%; flex-shrink: 0;
-    background: #0f2638; color: #2fb6ff; border: 1px solid #1a7bb3;
+    background: #1a0f08; color: #ff8c42; border: 1px solid #b35a1f;
     font-size: 20px; display: flex; align-items: center; justify-content: center;
   }
-  #mic-btn.recording { background: #ff5570; color: #0a1826; border-color: #ff5570; animation: pulse 1s ease-in-out infinite; }
+  #mic-btn.recording { background: #ef476f; color: #000000; border-color: #ef476f; animation: pulse 1s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
   form {
     display: flex; gap: 8px; padding: 10px 12px;
-    border-top: 1px solid #1c3a52; background: #0d1b2a;
+    border-top: 1px solid #2a2a2e; background: #0a0a0c;
   }
   input {
-    flex: 1; background: #0a1826; color: #d6f0ff;
-    border: 1px solid #1c3a52; border-radius: 6px;
+    flex: 1; background: #000000; color: #f0f0f0;
+    border: 1px solid #2a2a2e; border-radius: 6px;
     padding: 10px 12px; font-size: 15px; font-family: inherit;
   }
-  input:focus { outline: none; border-color: #2fb6ff; }
+  input:focus { outline: none; border-color: #ff8c42; }
   button {
-    background: #0f2638; color: #2fb6ff; border: 1px solid #1a7bb3;
+    background: #1a0f08; color: #ff8c42; border: 1px solid #b35a1f;
     border-radius: 6px; padding: 0 18px; font-weight: bold; font-family: inherit;
   }
-  button:active { background: #1a7bb3; color: #0a1826; }
+  button:active { background: #b35a1f; color: #000000; }
   #trader-btn { padding: 0 10px; font-size: 12px; margin-left: 8px; }
-  #trader-btn.open { background: #1a7bb3; color: #0a1826; }
+  #trader-btn.open { background: #b35a1f; color: #000000; }
   #trader-panel {
     display: none; flex: 1; overflow-y: auto; padding: 12px 16px;
-    font-size: 13px; background: rgba(6,13,22,0.92); border-bottom: 1px solid #1c3a52;
+    font-size: 13px; background: rgba(6,13,22,0.92); border-bottom: 1px solid #2a2a2e;
   }
   #trader-panel.show { display: block; }
   #trader-panel .row { display: flex; justify-content: space-between; gap: 10px; }
   #trader-stats {
     display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 16px;
-    margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #1c3a52;
+    margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #2a2a2e;
   }
-  #trader-stats div { font-size: 11px; color: #5a7f99; }
-  #trader-stats b { display: block; font-size: 16px; color: #d6f0ff; margin-top: 2px; }
-  #trader-stats b.neg { color: #ff5570; }
-  #trader-stats b.pos { color: #3ddc97; }
+  #trader-stats div { font-size: 11px; color: #575757; }
+  #trader-stats b { display: block; font-size: 16px; color: #f0f0f0; margin-top: 2px; }
+  #trader-stats b.neg { color: #ef476f; }
+  #trader-stats b.pos { color: #06d6a0; }
   .pos-row {
     display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-    gap: 6px; padding: 8px 0; border-bottom: 1px solid #14293a; font-size: 12px;
+    gap: 6px; padding: 8px 0; border-bottom: 1px solid #1c1c1f; font-size: 12px;
   }
-  .pos-row .sym { color: #2fb6ff; font-weight: bold; }
-  .pos-empty { color: #5a7f99; font-style: italic; font-size: 12px; }
+  .pos-row .sym { color: #ff8c42; font-weight: bold; }
+  .pos-empty { color: #575757; font-style: italic; font-size: 12px; }
   .trader-section-title {
-    font-size: 11px; color: #5a7f99; letter-spacing: 1px; margin: 14px 0 6px;
+    font-size: 11px; color: #575757; letter-spacing: 1px; margin: 14px 0 6px;
   }
   .mini-btn {
     padding: 4px 10px; font-size: 10px; font-weight: bold; border-radius: 4px;
-    background: #0a1826; font-family: inherit;
+    background: #000000; font-family: inherit;
   }
-  .mini-btn.buy { color: #3ddc97; border: 1px solid #1a7bb3; }
-  .mini-btn.sell { color: #ff5570; border: 1px solid #1a7bb3; }
-  .mini-btn.tp { color: #ffb020; border: 1px solid #1a7bb3; }
-  .mini-btn.remove { color: #5a7f99; border: 1px solid #1a7bb3; }
+  .mini-btn.buy { color: #06d6a0; border: 1px solid #b35a1f; }
+  .mini-btn.sell { color: #ef476f; border: 1px solid #b35a1f; }
+  .mini-btn.tp { color: #e9c46a; border: 1px solid #b35a1f; }
+  .mini-btn.remove { color: #575757; border: 1px solid #b35a1f; }
   .pct-picker { display: none; gap: 6px; width: 100%; margin-top: 6px; }
   .pct-picker.show { display: flex; }
   .pct-picker button { flex: 1; padding: 6px 0; font-size: 10px; }
 </style></head>
 <body>
   <header>
-    <span>◈ SERAPH REMOTE</span>
+    <span>◈ OMNI-OS REMOTE</span>
     <span style="display:flex;align-items:center">
       <span id="status">connecting…</span>
       <button id="trader-btn" type="button">◈ TRADER</button>
@@ -262,8 +262,9 @@ _APP_HTML = """<!DOCTYPE html>
     <button id="mic-btn" type="button">🎤</button>
     <span id="voice-status">tap to enable voice, tap again to talk</span>
   </div>
-  <form id="f"><input id="t" autocomplete="off" placeholder="Message Seraph…"><button>SEND</button></form>
+  <form id="f"><input id="t" autocomplete="off" placeholder="Message Omni…"><button>SEND</button></form>
 <script>
+  var TRADER_ENABLED = __TRADER_ENABLED__;
   var token = sessionStorage.getItem('seraph_token');
   if (!token) { location.replace('/login'); }
   var logEl = document.getElementById('log');
@@ -332,7 +333,7 @@ _APP_HTML = """<!DOCTYPE html>
   ws.onmessage = function(ev) {
     var msg = JSON.parse(ev.data);
     if (msg.type === 'you') addLine('you', 'You: ' + msg.text);
-    else if (msg.type === 'seraph') addLine('seraph', 'Seraph: ' + msg.text);
+    else if (msg.type === 'seraph') addLine('seraph', 'Omni: ' + msg.text);
     else if (msg.type === 'sys') addLine('sys', msg.text);
     else if (msg.type === 'image') addImage(msg.data);
     else if (msg.type === 'link') addLink(msg.url, msg.label);
@@ -477,6 +478,7 @@ _APP_HTML = """<!DOCTYPE html>
 
   // ── Trader view (read-only — phone can never place a trade) ────────────
   var traderBtn = document.getElementById('trader-btn');
+  if (!TRADER_ENABLED) { traderBtn.style.display = 'none'; }
   var traderPanel = document.getElementById('trader-panel');
   var traderStatsEl = document.getElementById('trader-stats');
   var traderPosEl = document.getElementById('trader-positions');
@@ -687,7 +689,7 @@ _APP_HTML = """<!DOCTYPE html>
     traderPanel.classList.toggle('show', show);
     traderBtn.classList.toggle('open', show);
     document.getElementById('t').placeholder = show
-      ? 'Trader command… (buy SYM:0xADDR, sell SYM, help)' : 'Message Seraph…';
+      ? 'Trader command… (buy SYM:0xADDR, sell SYM, help)' : 'Message Omni…';
     if (show) {
       fetchTraderState();
       traderTimer = setInterval(fetchTraderState, 4000);
@@ -701,30 +703,30 @@ _APP_HTML = """<!DOCTYPE html>
 
 _LOGIN_HTML = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Seraph Remote — Connect</title>
+<title>Omni-OS Remote — Connect</title>
 <style>
   :root { color-scheme: dark; }
   body {
-    margin: 0; background: #060d16; color: #d6f0ff; font-family: "Courier New", monospace;
+    margin: 0; background: #000000; color: #f0f0f0; font-family: "Segoe UI", sans-serif;
     display: flex; align-items: center; justify-content: center; height: 100vh; text-align: center;
   }
-  h2 { color: #2fb6ff; letter-spacing: 2px; }
+  h2 { color: #ff8c42; letter-spacing: 2px; }
   input {
-    background: #0a1826; color: #d6f0ff; border: 1px solid #1c3a52; border-radius: 6px;
+    background: #000000; color: #f0f0f0; border: 1px solid #2a2a2e; border-radius: 6px;
     padding: 12px; font-size: 22px; letter-spacing: 6px; text-align: center;
     text-transform: uppercase; width: 200px; font-family: inherit;
   }
   button {
-    display: block; margin: 14px auto 0; background: #0f2638; color: #2fb6ff;
-    border: 1px solid #1a7bb3; border-radius: 6px; padding: 10px 24px;
+    display: block; margin: 14px auto 0; background: #1a0f08; color: #ff8c42;
+    border: 1px solid #b35a1f; border-radius: 6px; padding: 10px 24px;
     font-weight: bold; font-family: inherit;
   }
-  #err { color: #ff5570; font-size: 13px; margin-top: 10px; min-height: 16px; }
+  #err { color: #ef476f; font-size: 13px; margin-top: 10px; min-height: 16px; }
 </style></head>
 <body>
   <div>
-    <h2>◈ SERAPH REMOTE</h2>
-    <p style="color:#5a7f99;font-size:13px">Enter the 6-character key shown on Seraph's screen</p>
+    <h2>◈ OMNI-OS REMOTE</h2>
+    <p style="color:#575757;font-size:13px">Enter the 6-character key shown on Omni-OS's screen</p>
     <input id="pin" maxlength="6" autocomplete="off" autocapitalize="characters">
     <button id="go">CONNECT</button>
     <div id="err"></div>
@@ -858,7 +860,10 @@ class DashboardServer:
 
         @app.get("/", response_class=HTMLResponse)
         async def index():
-            return HTMLResponse(_APP_HTML)
+            from core import settings_store
+            trader_enabled = settings_store.load_settings()["trader"]["enabled"]
+            html = _APP_HTML.replace("__TRADER_ENABLED__", "true" if trader_enabled else "false")
+            return HTMLResponse(html)
 
         # Static background — a single still frame of the Leda avatar, not
         # gated behind auth (it's just a decorative image, no assistant data).
@@ -889,10 +894,10 @@ class DashboardServer:
             now = time.time()
             if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
                 return HTMLResponse(
-                    "<body style='background:#07090f;color:#dde3ed;font-family:sans-serif;"
+                    "<body style='background:#000000;color:#f0f0f0;font-family:sans-serif;"
                     "display:flex;align-items:center;justify-content:center;height:100vh;"
-                    "margin:0;text-align:center'><div><h2 style='color:#f87171'>Link Expired</h2>"
-                    "<p style='color:#5e6a7e'>Press Remote Control on Seraph for a new QR code.</p>"
+                    "margin:0;text-align:center'><div><h2 style='color:#ef476f'>Link Expired</h2>"
+                    "<p style='color:#575757'>Press Remote Control on Omni-OS for a new QR code.</p>"
                     "</div></body>"
                 )
             del self._pending_keys[key]
@@ -902,11 +907,11 @@ class DashboardServer:
                 self._connect_callback()
             await self.broadcast({"type": "sys", "text": "Remote connection established via QR code."})
             return HTMLResponse(
-                "<body style='background:#07090f;color:#dde3ed;font-family:sans-serif;"
+                "<body style='background:#000000;color:#f0f0f0;font-family:sans-serif;"
                 "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
                 f"<script>sessionStorage.setItem('seraph_token','{tok}');"
                 "setTimeout(function(){location.replace('/')}, 300);</script>"
-                "<p>Connecting to Seraph…</p></body>"
+                "<p>Connecting to Omni-OS…</p></body>"
             )
 
         @app.get("/f/{file_id}")
@@ -1065,7 +1070,7 @@ class DashboardServer:
 
         cfg = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning", **ssl_kwargs)
         print(f"[Dashboard] {self.get_url()}")
-        print("[Dashboard] Press 'Remote Control' in the Seraph UI to get a pairing QR code.")
+        print("[Dashboard] Press 'Remote Control' in the Omni-OS UI to get a pairing QR code.")
         if self._use_ssl:
             print("[Dashboard] First connection will show a certificate warning (self-signed) — "
                   "tap 'proceed anyway' / 'visit site' once, it won't ask again.")

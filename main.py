@@ -41,7 +41,20 @@ if sys.platform == "win32":
         ctypes.windll.user32.ShowWindow(_console_hwnd, 0)  # SW_HIDE
 
 import sounddevice as sd
-import numpy as np
+
+# Some machines run SSL-inspecting antivirus/corporate proxies (Norton, Zscaler,
+# etc.) that re-sign HTTPS traffic with a locally-generated root CA. Windows
+# trusts that root (it's in the OS certificate store), but google-genai's
+# client pins its SSL context to the certifi package's public CA bundle
+# (see google/genai/_api_client.py), which can never contain a private,
+# machine-specific MITM root — so the Gemini Live websocket fails to verify
+# and can never connect. truststore patches ssl.SSLContext to verify against
+# the OS trust store instead, which already has whatever root the local
+# security software installed. Must run before any module below opens an
+# SSL connection.
+import truststore
+truststore.inject_into_ssl()
+
 from google import genai
 from google.genai import types
 from ui import JarvisUI
@@ -70,13 +83,13 @@ from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.image_generator   import generate_image
 from actions.launch_trader     import launch_trader
+from actions.integrations      import registry as integration_registry
 from core import settings_store, mcp_registry
 
 
-def _play_wake_chime():
-    """Short ascending beep so the user knows Seraph heard the wake word,
-    even if they aren't looking at the screen. Runs on its own thread so it
-    never blocks the mic-capture callback."""
+def _play_listen_chime():
+    """Short ascending beep confirming listening mode turned on. Runs on its
+    own thread so it never blocks the mic-capture callback."""
     try:
         import winsound
         for freq in (700, 1000):
@@ -95,7 +108,7 @@ BASE_DIR        = get_base_dir()
 (BASE_DIR / "config").mkdir(parents=True, exist_ok=True)  # first-run on a packaged install: config/ doesn't ship in the bundle
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
-WAKE_MODEL_PATH = BASE_DIR / "wakeword_models" / "seraph.onnx"  # custom-trained wake word
+SHARED_RULES_PATH = BASE_DIR / "core" / "shared_rules.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
@@ -146,15 +159,45 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
+_TRADER_SECTION_RE = re.compile(r"\[TRADER_SECTION\](.*?)\[/TRADER_SECTION\]", re.DOTALL)
+
+def _apply_trader_section(prompt: str, trader_enabled: bool) -> str:
+    """core/shared_rules.txt wraps trader-only routing/safety text in
+    [TRADER_SECTION]...[/TRADER_SECTION] markers — strip the markers (and
+    keep the text) when the trader add-on is on, or drop it entirely
+    (markers + text) when it's off, so a customer who never enabled trading
+    never sees launch_trader mentioned as an available tool."""
+    if trader_enabled:
+        return _TRADER_SECTION_RE.sub(r"\1", prompt)
+    return _TRADER_SECTION_RE.sub("", prompt)
+
+
 def _load_system_prompt() -> str:
+    """The default companion's identity block (core/prompt.txt) — used as
+    the system prompt's identity half whenever no companion is active, or
+    a companion has no system_prompt of its own. Always combined with
+    _load_shared_rules() (see _build_config()); this function alone is
+    NOT a complete system prompt."""
     try:
         return PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are Seraph — Secure Environment Response Agent & Personal Host. "
+            "You are Omni — the default companion of Omni-OS. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
+
+
+def _load_shared_rules() -> str:
+    """Tool-routing, safety, and execution rules that apply to EVERY
+    companion — default or custom. Kept separate from the per-companion
+    identity block so a custom companion's system_prompt only needs to
+    define its persona; it can't accidentally drop the trading safety
+    rule or tool-routing behavior by omitting text it never had to write."""
+    try:
+        return SHARED_RULES_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
@@ -369,7 +412,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "dev_agent",
-        "description": "Builds a BRAND NEW project from scratch that does not exist yet: plans, writes files, installs deps, opens VSCode, runs and fixes errors. Do NOT use this for any EXISTING project (OMNI-TRADE, JUNO, Seraph, Ruflo, or anything already in the user's files) — use claude_agent for those instead.",
+        "description": "Builds a BRAND NEW project from scratch that does not exist yet: plans, writes files, installs deps, opens VSCode, runs and fixes errors. Do NOT use this for any EXISTING project already in the user's files — use claude_agent for those instead.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -385,8 +428,8 @@ TOOL_DECLARATIONS = [
         "name": "claude_agent",
         "description": (
             "Delegates to Claude (Anthropic), running as a real coding agent with access to "
-            "the user's Obsidian second-brain vault, his active projects (OMNI-TRADE, JUNO, "
-            "Seraph, Ruflo, etc.), and file/tool access. Use this instead of answering directly "
+            "the user's Obsidian second-brain vault, his active projects, and file/tool "
+            "access. Use this instead of answering directly "
             "whenever the request is: real coding or project work, anything referencing the "
             "user's notes/memory/vault, or a task requiring multi-step file edits or tool use. "
             "Do NOT use this for small talk, general knowledge questions, or anything you can "
@@ -503,11 +546,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "launch_trader",
         "description": (
-            "Opens the Seraph Trader app — a separate crypto trading app with wallet "
-            "connect and live trade execution. Call this whenever the user asks to open, "
-            "launch, or start the trader, trading app, or crypto trader. Seraph itself "
+            "Opens the built-in trader panel — an optional crypto trading feature with "
+            "wallet connect and live trade execution. Call this whenever the user asks to "
+            "open, launch, or start the trader, trading app, or crypto trader. Omni itself "
             "never places trades — actual buy/sell commands must be typed directly into "
-            "that app's own command bar, never through voice."
+            "the trader panel's own command bar, never through voice."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -515,9 +558,29 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "delegate_to_agent",
+        "description": (
+            "Hands a task off to a named specialized sub-agent to work on in the "
+            "background while you keep talking to the user — for coding, research, or "
+            "multi-step work that fits a specific sub-agent's specialty better than you "
+            "handling it directly. Returns immediately with an acknowledgement; the "
+            "sub-agent works asynchronously and you'll be told its result afterward so "
+            "you can report back. Only call this with a sub-agent name from the list "
+            "you were given — never invent one."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "agent_name": {"type": "STRING", "description": "The sub-agent's exact name to delegate to"},
+                "task": {"type": "STRING", "description": "Clear, self-contained instructions for what the sub-agent should do"},
+            },
+            "required": ["agent_name", "task"],
+        },
+    },
+    {
         "name": "share_file",
         "description": (
-            "Gives the user a clickable web link to a local file Seraph just created "
+            "Gives the user a clickable web link to a local file Omni just created "
             "(e.g. an HTML page, document, or generated file), so it can be opened from "
             "the phone dashboard. ALWAYS call this instead of reciting a file:// path or "
             "local filesystem path when the user asks for 'a link' or when a phone is "
@@ -536,7 +599,7 @@ TOOL_DECLARATIONS = [
         "description": (
             "Shuts down the assistant completely. "
             "Call this when the user expresses intent to end the conversation, "
-            "close the assistant, say goodbye, or stop Seraph. "
+            "close the assistant, say goodbye, or stop Omni. "
             "The user can say this in ANY language."
         ),
         "parameters": {
@@ -654,6 +717,9 @@ class JarvisLive:
         self.ui             = ui
         self.session        = None
         self._custom_tool_dispatch: dict = {}  # populated by _build_config(); {prefixed_name: (server, tool_name)}
+        self._companion: dict | None = None  # active gemini_live companion (see _resolve_active_companion);
+                                              # None means the original single-companion behavior
+        self._live_model    = LIVE_MODEL     # overridden by _build_config() from companion["model"]
         self.audio_in_queue = None
         self.out_queue      = None
         self._loop          = None
@@ -665,13 +731,12 @@ class JarvisLive:
                                       # to SPEAKING while we're silently waiting on a tool
         self.ui.on_text_command = self._on_text_command
         self.ui.on_voice_change = self._on_voice_change
+        self.ui.on_companions_changed = self._on_companions_changed
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_trader_clicked = lambda: launch_trader(player=self.ui)
+        self.ui.on_always_listening_toggled = self._on_always_listening_toggled
         self._reconnect_event = asyncio.Event()
         self._turn_done_event: asyncio.Event | None = None
-        self._woke        = False   # wake-word gate: only forward mic audio to Gemini after "Seraph"
-        self._wake_time    = 0.0
-        self._wake_spoke   = False  # whether Seraph has responded at least once since waking
         self._session_log: list[str] = []  # "You: ..." / "Seraph: ..." lines for this connection,
                                             # summarized and saved to memory on disconnect/shutdown
         self._dashboard = None      # DashboardServer | None — remote/phone control, started once in run()
@@ -738,7 +803,6 @@ class JarvisLive:
                         break
                     await asyncio.sleep(0.1)
                 if self.session:
-                    self._woke = True  # a phone command counts as "waking" Seraph, same as the wake word
                     await self.session.send_client_content(
                         turns={"parts": [{"text": text}]},
                         turn_complete=True,
@@ -765,15 +829,26 @@ class JarvisLive:
                 self._phone_active = False  # no audio for 1s — give the PC mic back
                 continue
             self._phone_active = True
-            self._woke = True  # tapping the phone mic counts as waking Seraph
-            self._wake_time = self._loop.time() if self._loop else 0.0
             if self.session and self.out_queue and not self.ui.muted:
                 try:
                     self.out_queue.put_nowait({"data": chunk, "mime_type": "audio/pcm"})
                 except asyncio.QueueFull:
                     pass
 
+    def _on_always_listening_toggled(self, is_on: bool) -> None:
+        if is_on:
+            _play_listen_chime()
+
     def _on_voice_change(self, name: str):
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._reconnect_event.set)
+
+    def _on_companions_changed(self):
+        """A companion was added/edited (e.g. a new World-view sub-agent) —
+        reconnect immediately so _build_config() re-reads settings and the
+        lead's delegate_to_agent directory picks it up right away, instead
+        of the user having no idea why "Ask X to do Y" fails until whatever
+        next triggers a natural reconnect."""
         if self._loop:
             self._loop.call_soon_threadsafe(self._reconnect_event.set)
 
@@ -783,7 +858,19 @@ class JarvisLive:
         raise _ReconnectRequested()
 
     def _on_text_command(self, text: str):
-        if not self._loop or not self.session:
+        if not self._loop:
+            return
+        # A claude_agent-backend companion has no live voice session to route
+        # into (see _resolve_active_companion's docstring) — its interaction
+        # surface is this same text box, just routed to its own Claude
+        # conversation instead of the Gemini Live session below.
+        settings = settings_store.load_settings()
+        active_id = settings.get("active_companion_id")
+        companion = next((c for c in settings.get("companions", []) if c.get("id") == active_id), None)
+        if companion and companion.get("backend") == "claude_agent" and companion.get("enabled", True):
+            asyncio.run_coroutine_threadsafe(self._handle_claude_companion_text(companion, text), self._loop)
+            return
+        if not self.session:
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
@@ -793,20 +880,46 @@ class JarvisLive:
             self._loop
         )
 
+    async def _handle_claude_companion_text(self, companion: dict, text: str) -> None:
+        from actions.claude_companion import send as claude_companion_send
+        self.ui.write_log(f"SYS: {companion['name']} is thinking…")
+        reply = await claude_companion_send(companion, text)
+        self.ui.write_log(f"{companion['name']}: {reply}")
+
+    def _delegate_to_agent(self, agent_name: str, task: str) -> str:
+        """Handles delegate_to_agent tool calls — looks up the named
+        claude_agent-backend companion and kicks off the work as a
+        background asyncio task on the live event loop, so the voice
+        session isn't blocked waiting for it (a sub-agent turn can easily
+        take longer than a voice turn should)."""
+        if not agent_name or not task:
+            return "Both an agent name and a task are required."
+        settings = settings_store.load_settings()
+        companion = next(
+            (c for c in settings["companions"]
+             if c.get("backend") == "claude_agent" and c["name"].lower() == agent_name.lower()),
+            None,
+        )
+        if not companion:
+            return f"No sub-agent named '{agent_name}' found."
+
+        asyncio.run_coroutine_threadsafe(self._run_delegation(companion, task), self._loop)
+        return f"Delegating to {companion['name']} now — I'll let you know when it's done."
+
+    async def _run_delegation(self, companion: dict, task: str) -> None:
+        from actions.claude_companion import send as claude_companion_send
+        self.ui.write_log(f"SYS: {companion['name']} started: {task[:80]}")
+        result = await claude_companion_send(companion, task)
+        self.ui.write_log(f"{companion['name']}: {result}")
+        self.speak(f"{companion['name']} finished — {result[:300]}")
+
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
         if value:
             if not self._tool_running:
                 self.ui.set_state("SPEAKING")
-            if self._woke:
-                self._wake_spoke = True
         else:
-            if self._woke and self._wake_spoke and not self.ui.always_listening:
-                # Jarvis finished responding to the woken exchange — close the gate again.
-                self._woke      = False
-                self._wake_spoke = False
-                self.ui.write_log("SYS: Wake gate closed. Say 'Seraph' to talk again.")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
 
@@ -848,26 +961,87 @@ class JarvisLive:
             )
             summary = (resp.text or "").strip()
             if summary:
-                save_session_summary(summary)
+                namespace = self._companion.get("memory_namespace") if self._companion else None
+                save_session_summary(summary, namespace=namespace)
         except Exception as e:
             print(f"[Memory] ⚠️ Session summary failed: {e}")
+
+    def _resolve_active_companion(self, settings: dict) -> dict | None:
+        """Returns the active companion dict, or None to fall back to the
+        original single-companion behavior (core/prompt.txt, unnamespaced
+        memory, self.ui.voice, LIVE_MODEL). Only backend "gemini_live"
+        companions are usable in this realtime voice loop — an active
+        "claude_agent" companion (turn-based, see Phase 3) also falls back
+        here, since that backend has no live audio session to drive."""
+        active_id = settings.get("active_companion_id")
+        if not active_id:
+            return None
+        for c in settings.get("companions", []):
+            if c.get("id") == active_id and c.get("enabled", True) and c.get("backend") == "gemini_live":
+                return c
+        return None
 
     async def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
 
-        memory     = load_memory()
+        settings = settings_store.load_settings()
+        companion = self._resolve_active_companion(settings)
+        self._companion = companion
+        namespace = companion.get("memory_namespace") if companion else None
+        self._live_model = (companion.get("model") if companion else None) or LIVE_MODEL
+
+        memory     = load_memory(namespace)
         mem_str    = format_memory_for_prompt(memory)
         vault_str  = _load_vault_memory_index()
-        sys_prompt = _load_system_prompt()
+        identity   = (companion.get("system_prompt") if companion else None) or _load_system_prompt()
+        # Every companion gets the same tool-routing/safety rules appended —
+        # a custom companion's system_prompt only ever defines its persona,
+        # never the mechanics of how tools/safety rules work (see
+        # _load_shared_rules()'s docstring).
+        sys_prompt = identity.rstrip() + "\n\n" + _load_shared_rules()
 
-        settings = settings_store.load_settings()
+        trader_enabled = settings["trader"]["enabled"]
         enabled_skills = [s for s in settings["skills"] if s.get("enabled")]
+        sys_prompt = _apply_trader_section(sys_prompt, trader_enabled)
+        # Sub-agents: claude_agent-backend companions the active (voice)
+        # companion can hand work off to via delegate_to_agent — see
+        # actions/claude_companion.py. A companion delegating to itself
+        # would just be a slower version of answering directly, so it's
+        # excluded from its own directory.
+        sub_agents = [
+            c for c in settings["companions"]
+            if c.get("backend") == "claude_agent" and c.get("enabled", True)
+            and (companion is None or c.get("id") != companion.get("id"))
+        ]
+        base_tool_declarations = TOOL_DECLARATIONS
+        if not trader_enabled:
+            base_tool_declarations = [t for t in base_tool_declarations if t["name"] != "launch_trader"]
+        if sub_agents:
+            directory = "\n".join(
+                f"- {c['name']}: {c.get('specialty') or 'general-purpose coding/research assistant'}"
+                for c in sub_agents
+            )
+            sys_prompt += (
+                f"\n\n[SUB-AGENTS AVAILABLE]\nYou can delegate tasks to these specialized "
+                f"sub-agents via delegate_to_agent — pick whichever best fits the task:\n{directory}"
+            )
+        else:
+            base_tool_declarations = [t for t in base_tool_declarations if t["name"] != "delegate_to_agent"]
+        # Custom MCP servers are scoped per-companion once one is active
+        # (companion["mcp_server_ids"], possibly empty — a fresh companion
+        # starts with no extra tools); with no active companion, every
+        # configured server applies, matching the original behavior.
+        mcp_servers = settings["mcp_servers"]
+        if companion is not None:
+            allowed_ids = set(companion.get("mcp_server_ids") or [])
+            mcp_servers = [s for s in mcp_servers if s.get("id") in allowed_ids]
         # Real network calls (each custom server's tools/list) — never run
         # directly on this shared event loop (voice, dashboard, everything
         # else would freeze for as long as a slow/offline server takes).
         custom_tool_declarations, self._custom_tool_dispatch = await asyncio.to_thread(
-            mcp_registry.gather_custom_tool_declarations, settings["mcp_servers"]
+            mcp_registry.gather_custom_tool_declarations, mcp_servers
         )
+        integration_tool_declarations = integration_registry.get_active_tool_declarations(settings)
 
         now      = datetime.now()
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
@@ -881,7 +1055,7 @@ class JarvisLive:
         if mem_str:
             parts.append(mem_str)
 
-        last = pop_last_session()  # consumed here so it's never mentioned twice
+        last = pop_last_session(namespace)  # consumed here so it's never mentioned twice
         if last:
             try:
                 delta = (now - datetime.strptime(last["date"], "%Y-%m-%d")).days
@@ -898,7 +1072,10 @@ class JarvisLive:
         parts.append(sys_prompt)
 
         if enabled_skills:
-            skills_block = "\n\n".join(f"### {s['name']}\n{s['content']}" for s in enabled_skills)
+            skills_block = "\n\n".join(
+                f"### {s['name']}\n{settings_store.resolve_key_placeholders(s['content'], settings)}"
+                for s in enabled_skills
+            )
             parts.append(f"[SKILLS — additional instructions the user configured]\n{skills_block}")
 
         return types.LiveConnectConfig(
@@ -906,12 +1083,12 @@ class JarvisLive:
             output_audio_transcription={},
             input_audio_transcription={},
             system_instruction="\n".join(parts),
-            tools=[{"function_declarations": TOOL_DECLARATIONS + custom_tool_declarations}],
+            tools=[{"function_declarations": base_tool_declarations + custom_tool_declarations + integration_tool_declarations}],
             session_resumption=types.SessionResumptionConfig(),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=self.ui.voice
+                        voice_name=(companion.get("voice") if companion else None) or self.ui.voice
                     )
                 )
             ),
@@ -930,7 +1107,8 @@ class JarvisLive:
             key      = args.get("key", "")
             value    = args.get("value", "")
             if key and value:
-                update_memory({category: {key: {"value": value}}})
+                namespace = self._companion.get("memory_namespace") if self._companion else None
+                update_memory({category: {key: {"value": value}}}, namespace=namespace)
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
             self._tool_running = False
             if not self.ui.muted:
@@ -948,6 +1126,10 @@ class JarvisLive:
                 server, tool_name = self._custom_tool_dispatch[name]
                 r = await loop.run_in_executor(None, lambda: mcp_registry.call_custom_tool(server, tool_name, args))
                 result = r.get("text") if r.get("ok") else f"[{server.get('name')}] error: {r.get('error')}"
+
+            elif integration_registry.is_integration_tool(name):
+                r = await loop.run_in_executor(None, lambda: integration_registry.dispatch(name, args, self.ui))
+                result = r or "Done."
             elif name == "open_app":
                 r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
                 result = r or f"Opened {args.get('app_name')}."
@@ -1003,7 +1185,7 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "claude_agent":
-                r = await loop.run_in_executor(None, lambda: claude_agent(parameters=args, player=self.ui, speak=self.speak))
+                r = await claude_agent(parameters=args, player=self.ui, speak=self.speak)
                 result = r or "Done."
 
             elif name == "agent_task":
@@ -1057,6 +1239,9 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: launch_trader(player=self.ui))
                 result = r or "Done."
 
+            elif name == "delegate_to_agent":
+                result = self._delegate_to_agent(args.get("agent_name", ""), args.get("task", ""))
+
             elif name == "shutdown_seraph":
                 self.ui.write_log("SYS: Shutdown requested.")
                 await self._save_session_summary()
@@ -1094,48 +1279,14 @@ class JarvisLive:
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
-        from openwakeword.model import Model as _WakeModel
-        wake_model = _WakeModel(wakeword_models=[str(WAKE_MODEL_PATH)], inference_framework="onnx")
-        WAKE_THRESHOLD = 0.5
-        WAKE_TIMEOUT_S = 15.0  # auto-close the gate if nothing happens after waking
-
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if jarvis_speaking or self.ui.muted or self._phone_active:
                 return
 
-            if self.ui.always_listening and not self._woke:
-                self._woke      = True
-                self._wake_time = loop.time()
-
-            if not self._woke:
-                # Gate closed: audio never leaves this device. Only run local
-                # wake-word inference (onnxruntime, fully offline) on it.
-                scores = wake_model.predict(np.frombuffer(indata.tobytes(), dtype=np.int16))
-                if scores.get("seraph", 0.0) > WAKE_THRESHOLD:
-                    self._woke      = True
-                    self._wake_time = loop.time()
-                    # Clear the model's rolling audio-feature buffer so the
-                    # tail of this utterance can't re-trigger a detection
-                    # once the gate re-opens after the timeout.
-                    wake_model.reset()
-                    threading.Thread(target=_play_wake_chime, daemon=True).start()
-                    loop.call_soon_threadsafe(
-                        lambda: (self.ui.write_log("SYS: Wake word detected — listening."),
-                                 self.ui.set_state("LISTENING"))
-                    )
-                return
-
-            if (
-                not self.ui.always_listening
-                and loop.time() - self._wake_time > WAKE_TIMEOUT_S
-                and not self._wake_spoke
-            ):
-                self._woke = False
-                loop.call_soon_threadsafe(
-                    lambda: self.ui.write_log("SYS: Wake gate closed (timed out).")
-                )
+            if not self.ui.always_listening:
+                # Listening toggle is off: mic audio never leaves this device.
                 return
 
             data = indata.tobytes()
@@ -1200,10 +1351,10 @@ class JarvisLive:
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
-                                self.ui.write_log(f"Seraph: {full_out}")
-                                self._session_log.append(f"Seraph: {full_out}")
+                                self.ui.write_log(f"Omni: {full_out}")
+                                self._session_log.append(f"Omni: {full_out}")
                                 if self._dashboard:
-                                    asyncio.create_task(self._dashboard.broadcast({"type": "seraph", "text": full_out}))
+                                    asyncio.create_task(self._dashboard.broadcast({"type": "seraph", "text": full_out}))  # NOTE: "type" is a wire-protocol key matched by dashboard/server.py's JS — kept as "seraph" intentionally, do not rename without updating that JS too
                             out_buf = []
 
                     if response.tool_call:
@@ -1288,7 +1439,7 @@ class JarvisLive:
                 config = await self._build_config()
 
                 async with (
-                    client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
+                    client.aio.live.connect(model=self._live_model, config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session        = session
@@ -1299,7 +1450,7 @@ class JarvisLive:
 
                     print("[JARVIS] ✅ Connected.")
                     self.ui.set_state("LISTENING")
-                    self.ui.write_log("SYS: SERAPH online.")
+                    self.ui.write_log("SYS: OMNI-OS online.")
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())

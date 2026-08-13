@@ -2,7 +2,7 @@
 the old separate Electron window (see MainWindow.open_trader_panel()).
 
 Phase 1: paper-mode trading only, using trader/engine.py's TraderEngine.
-Reuses the app's existing Leda palette (class C in ui.py) directly — no
+Reuses the app's existing color palette (class C in ui.py) directly — no
 new theme, no background video. `from ui import C, qcol` is a deferred
 import (done inside __init__, not at module load time) so this module can
 be imported by ui.py without a circular-import at load time; ui.py itself
@@ -85,7 +85,7 @@ class McpKeySetupOverlay(QWidget):
             McpKeySetupOverlay {{
                 background: rgba(0, 6, 10, 245);
                 border: 1px solid {C.BORDER_B};
-                border-radius: 6px;
+                border-radius: 1px;
             }}
         """)
 
@@ -96,7 +96,7 @@ class McpKeySetupOverlay(QWidget):
         def _lbl(txt, font_size=9, bold=False, color=C.PRI):
             w = QLabel(txt)
             w.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            w.setFont(QFont("Courier New", font_size, QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setFont(QFont("Segoe UI", font_size, QFont.Weight.Bold if bold else QFont.Weight.Normal))
             w.setStyleSheet(f"color: {color}; background: transparent;")
             return w
 
@@ -111,19 +111,19 @@ class McpKeySetupOverlay(QWidget):
         self._key_input = QLineEdit()
         self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self._key_input.setPlaceholderText("Seraph API key…")
-        self._key_input.setFont(QFont("Courier New", 10))
+        self._key_input.setFont(QFont("Segoe UI", 10))
         self._key_input.setFixedHeight(32)
         self._key_input.setStyleSheet(f"""
             QLineEdit {{
                 background: #000d12; color: {C.TEXT};
-                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
+                border: 1px solid {C.BORDER}; border-radius: 1px; padding: 4px 8px;
             }}
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
         """)
         layout.addWidget(self._key_input)
 
         get_key_btn = QPushButton("Get a Seraph API key ↗")
-        get_key_btn.setFont(QFont("Courier New", 8))
+        get_key_btn.setFont(QFont("Segoe UI", 8))
         get_key_btn.setFixedHeight(22)
         get_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         get_key_btn.setStyleSheet(f"""
@@ -138,13 +138,13 @@ class McpKeySetupOverlay(QWidget):
         layout.addSpacing(10)
 
         submit_btn = QPushButton("▸  SAVE KEY")
-        submit_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        submit_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         submit_btn.setFixedHeight(36)
         submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         submit_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; color: {C.PRI};
-                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
+                border: 1px solid {C.PRI_DIM}; border-radius: 1px;
             }}
             QPushButton:hover {{
                 background: {C.PRI_GHO_BG}; border: 1px solid {C.PRI};
@@ -154,7 +154,7 @@ class McpKeySetupOverlay(QWidget):
         layout.addWidget(submit_btn)
 
         skip_btn = QPushButton("Skip for now")
-        skip_btn.setFont(QFont("Courier New", 8))
+        skip_btn.setFont(QFont("Segoe UI", 8))
         skip_btn.setFixedHeight(20)
         skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         skip_btn.setStyleSheet(f"""
@@ -354,24 +354,32 @@ class TraderPanel(QWidget):
         root.setSpacing(8)
 
         header = QHBoxLayout()
-        title = QLabel("◆ SERAPH TRADER")
-        title.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
+        title = QLabel("◆ OMNI TRADER")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         header.addWidget(title)
         header.addStretch()
 
         self._mode_lbl = QLabel("PAPER")
-        self._mode_lbl.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
-        self._mode_lbl.setStyleSheet(f"color: {C.ACC2}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 8px;")
+        self._mode_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._mode_lbl.setStyleSheet(f"color: {C.ACC2}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 8px;")
         header.addWidget(self._mode_lbl)
 
         self._key_warn_lbl = None
         if not mcp_client.get_default_client().api_key:
             self._key_warn_lbl = QLabel("⚠ no Seraph API key found — trades will fail closed")
-            self._key_warn_lbl.setFont(QFont("Courier New", 8))
+            self._key_warn_lbl.setFont(QFont("Segoe UI", 8))
             self._key_warn_lbl.setStyleSheet(f"color: {C.RED}; background: transparent;")
             header.addWidget(self._key_warn_lbl)
 
+        # Toggled via MainWindow, which owns the actual config panel widget
+        # (a floating overlay over the orb/trader view — see
+        # left_panel_widget() / MainWindow._toggle_trader_config()). Not
+        # shown by default: it used to float permanently and covered this
+        # panel's own wallet/live-mode controls underneath it.
+        self.on_config_toggle = None
+        config_btn = self._make_button("⚙ CONFIG", lambda: self.on_config_toggle and self.on_config_toggle())
+        header.addWidget(config_btn)
         self._start_btn = self._make_button("▶ START", self._on_start_stop)
         header.addWidget(self._start_btn)
         scan_btn = self._make_button("⟳ SCAN NOW", lambda: self._run_command("/scan"))
@@ -385,10 +393,10 @@ class TraderPanel(QWidget):
                             ("trades", "TRADES TODAY"), ("positions", "OPEN POSITIONS")]:
             box = QVBoxLayout()
             lbl = QLabel(label)
-            lbl.setFont(QFont("Courier New", 7))
+            lbl.setFont(QFont("Segoe UI", 7))
             lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             val = QLabel("—")
-            val.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+            val.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
             val.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             box.addWidget(lbl)
             box.addWidget(val)
@@ -405,7 +413,7 @@ class TraderPanel(QWidget):
 
         pos_col = QVBoxLayout()
         pos_hdr = QLabel("▸ OPEN POSITIONS")
-        pos_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        pos_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         pos_hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         pos_col.addWidget(pos_hdr)
         self._positions_scroll = QScrollArea()
@@ -424,7 +432,7 @@ class TraderPanel(QWidget):
 
         watch_col = QVBoxLayout()
         watch_hdr = QLabel("▸ WATCHLIST")
-        watch_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        watch_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         watch_hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         watch_col.addWidget(watch_hdr)
         self._watchlist_scroll = QScrollArea()
@@ -444,7 +452,7 @@ class TraderPanel(QWidget):
         root.addLayout(mid)
 
         feed_hdr = QLabel("▸ EVENT FEED")
-        feed_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        feed_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         feed_hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         root.addWidget(feed_hdr)
 
@@ -464,9 +472,9 @@ class TraderPanel(QWidget):
         cmd_row = QHBoxLayout()
         self._cmd_input = QLineEdit()
         self._cmd_input.setPlaceholderText("buy SYM:0x... · sell SYM · watch SYM:0x... · help")
-        self._cmd_input.setFont(QFont("Courier New", 9))
+        self._cmd_input.setFont(QFont("Segoe UI", 9))
         self._cmd_input.setStyleSheet(
-            f"background: {C.PANEL_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 6px;"
+            f"background: {C.PANEL_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 6px;"
         )
         self._cmd_input.returnPressed.connect(self._on_command_submit)
         cmd_row.addWidget(self._cmd_input, stretch=1)
@@ -495,28 +503,28 @@ class TraderPanel(QWidget):
         col.setSpacing(6)
 
         hdr = QLabel("▸ TRADER CONFIG")
-        hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
         col.addWidget(hdr)
 
         for key, label in _CONFIG_FIELDS:
             lbl = QLabel(label)
-            lbl.setFont(QFont("Courier New", 7))
+            lbl.setFont(QFont("Segoe UI", 7))
             lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             col.addWidget(lbl)
             inp = QLineEdit()
-            inp.setFont(QFont("Courier New", 8))
-            inp.setStyleSheet(f"background: {C.PANEL_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 4px;")
+            inp.setFont(QFont("Segoe UI", 8))
+            inp.setStyleSheet(f"background: {C.PANEL_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 4px;")
             self._config_inputs[key] = inp
             col.addWidget(inp)
 
         chains_lbl = QLabel("Chains (paper scan)")
-        chains_lbl.setFont(QFont("Courier New", 7))
+        chains_lbl.setFont(QFont("Segoe UI", 7))
         chains_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; margin-top: 4px;")
         col.addWidget(chains_lbl)
         for key, info in chains_mod.CHAINS.items():
             cb = QCheckBox(info["name"])
-            cb.setFont(QFont("Courier New", 7))
+            cb.setFont(QFont("Segoe UI", 7))
             cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             self._chain_checks[key] = cb
             col.addWidget(cb)
@@ -538,19 +546,19 @@ class TraderPanel(QWidget):
         one-time toggle — both are re-checked at the moment of the click."""
         C = self._C
         wrap = QWidget()
-        wrap.setStyleSheet(f"background: {C.PANEL_BG}; border: 1px solid {C.BORDER}; border-radius: 4px;")
+        wrap.setStyleSheet(f"background: {C.PANEL_BG}; border: 1px solid {C.BORDER}; border-radius: 1px;")
         outer = QVBoxLayout(wrap)
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
         row1 = QHBoxLayout()
         wallet_hdr = QLabel("▸ WALLET (app-managed, local signing — real funds, no per-trade approval)")
-        wallet_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        wallet_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         wallet_hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
         row1.addWidget(wallet_hdr)
         row1.addStretch()
         self._wallet_status_lbl = QLabel("not connected")
-        self._wallet_status_lbl.setFont(QFont("Courier New", 8))
+        self._wallet_status_lbl.setFont(QFont("Segoe UI", 8))
         self._wallet_status_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         row1.addWidget(self._wallet_status_lbl)
         outer.addLayout(row1)
@@ -558,18 +566,18 @@ class TraderPanel(QWidget):
         row2 = QHBoxLayout()
         self._risk_ack_input = QLineEdit()
         self._risk_ack_input.setPlaceholderText('type "I OWN THIS RISK" to enable create/import/export below')
-        self._risk_ack_input.setFont(QFont("Courier New", 8))
+        self._risk_ack_input.setFont(QFont("Segoe UI", 8))
         self._risk_ack_input.setFixedWidth(260)
-        self._risk_ack_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 5px;")
+        self._risk_ack_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 5px;")
         row2.addWidget(self._risk_ack_input)
         row2.addWidget(self._make_button("CREATE", self._on_wallet_create))
         self._import_input = QLineEdit()
         self._import_input.setPlaceholderText("private key or recovery phrase to import")
-        self._import_input.setFont(QFont("Courier New", 8))
+        self._import_input.setFont(QFont("Segoe UI", 8))
         # Masked (password-style) — this field holds real key material;
         # never echo it in cleartext on screen.
         self._import_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self._import_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 5px;")
+        self._import_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 5px;")
         row2.addWidget(self._import_input, stretch=1)
         row2.addWidget(self._make_button("IMPORT", self._on_wallet_import))
         row2.addWidget(self._make_button("EXPORT", self._on_wallet_export))
@@ -582,14 +590,14 @@ class TraderPanel(QWidget):
         row3.addSpacing(20)
 
         live_hdr = QLabel("▸ LIVE MODE")
-        live_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        live_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         live_hdr.setStyleSheet(f"color: {C.RED}; background: transparent;")
         row3.addWidget(live_hdr)
         self._live_confirm_input = QLineEdit()
         self._live_confirm_input.setPlaceholderText('type "LIVE" to arm')
-        self._live_confirm_input.setFont(QFont("Courier New", 8))
+        self._live_confirm_input.setFont(QFont("Segoe UI", 8))
         self._live_confirm_input.setFixedWidth(140)
-        self._live_confirm_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 5px;")
+        self._live_confirm_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 5px;")
         row3.addWidget(self._live_confirm_input)
         self._arm_btn = self._make_button("⚠ ARM LIVE", self._on_arm_live)
         row3.addWidget(self._arm_btn)
@@ -720,21 +728,21 @@ class TraderPanel(QWidget):
         return f"""
             QTextBrowser, QScrollArea {{
                 background: {C.PANEL_BG}; color: {C.TEXT};
-                border: 1px solid {C.BORDER}; border-radius: 4px;
+                border: 1px solid {C.BORDER}; border-radius: 1px;
             }}
             QScrollBar:vertical {{ background: {C.BG}; width: 8px; border: none; }}
-            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 4px; min-height: 20px; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 1px; min-height: 20px; }}
         """
 
     def _make_button(self, text: str, cb) -> QPushButton:
         C = self._C
         btn = QPushButton(text)
-        btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(f"""
             QPushButton {{
                 color: {C.ACC2}; background: {C.PANEL2_BG};
-                border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 5px 10px;
+                border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 10px;
             }}
             QPushButton:hover {{ color: {C.PRI}; border: 1px solid {C.BORDER_B}; }}
         """)
@@ -746,7 +754,7 @@ class TraderPanel(QWidget):
     def _append_feed_text(self, text: str):
         C = self._C
         lbl = QLabel(text)
-        lbl.setFont(QFont("Courier New", 8))
+        lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
         self._feed_layout.insertWidget(self._feed_layout.count() - 1, lbl)
@@ -775,18 +783,18 @@ class TraderPanel(QWidget):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(text)
-        lbl.setFont(QFont("Courier New", 8))
+        lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
         lay.addWidget(lbl, stretch=1)
 
         def _tx_button(label: str, cb):
             btn = QPushButton(label)
-            btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFixedWidth(64)
             btn.setStyleSheet(f"""
-                QPushButton {{ color: {C.PRI}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; }}
+                QPushButton {{ color: {C.PRI}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; }}
                 QPushButton:hover {{ border: 1px solid {C.BORDER_B}; }}
             """)
             btn.clicked.connect(cb)
@@ -811,7 +819,7 @@ class TraderPanel(QWidget):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(text)
-        lbl.setFont(QFont("Courier New", 8))
+        lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
         lay.addWidget(lbl, stretch=1)
@@ -819,11 +827,11 @@ class TraderPanel(QWidget):
         url = chains_mod.dexscreener_url(event.get("chain") or chains_mod.DEFAULT_CHAIN, event.get("address") or "")
         if url:
             btn = QPushButton("VIEW")
-            btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFixedWidth(64)
             btn.setStyleSheet(f"""
-                QPushButton {{ color: {C.PRI}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; }}
+                QPushButton {{ color: {C.PRI}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; }}
                 QPushButton:hover {{ border: 1px solid {C.BORDER_B}; }}
             """)
             btn.clicked.connect(lambda: webbrowser.open(url))
@@ -832,10 +840,10 @@ class TraderPanel(QWidget):
         symbol, address, chain = event.get("symbol"), event.get("address"), event.get("chain")
         if not event.get("approved") and symbol and address:
             force_btn = QPushButton(f"⚠ FORCE BUY {symbol}")
-            force_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            force_btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
             force_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             force_btn.setStyleSheet(f"""
-                QPushButton {{ color: {C.RED}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 3px 8px; }}
+                QPushButton {{ color: {C.RED}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 3px 8px; }}
                 QPushButton:hover {{ border: 1px solid {C.RED}; }}
             """)
             entry = f"{symbol}:{chain or chains_mod.DEFAULT_CHAIN}:{address} force"
@@ -857,16 +865,16 @@ class TraderPanel(QWidget):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(label)
-        lbl.setFont(QFont("Courier New", 8))
+        lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.ACC}; background: transparent;")
         lay.addWidget(lbl)
         for pct in percents:
             btn = QPushButton(f"{pct}%")
-            btn.setFont(QFont("Courier New", 8))
+            btn.setFont(QFont("Segoe UI", 8))
             btn.setFixedWidth(48)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(f"""
-                QPushButton {{ color: {C.PRI}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; }}
+                QPushButton {{ color: {C.PRI}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; }}
                 QPushButton:hover {{ border: 1px solid {C.BORDER_B}; }}
             """)
             btn.clicked.connect(lambda _checked=False, p=pct: on_pick(symbol, p))
@@ -895,16 +903,16 @@ class TraderPanel(QWidget):
             chain_name = chains_mod.resolve(chain)["name"]
             addr_short = f"{address[:6]}…{address[-4:]}" if address else "?"
             lbl = QLabel(f"{symbol:<8} {chain_name:<12} {addr_short}{chg_text}")
-            lbl.setFont(QFont("Courier New", 8))
+            lbl.setFont(QFont("Segoe UI", 8))
             lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             lay.addWidget(lbl)
             if address:
                 btn = QPushButton("+WATCH")
-                btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+                btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.setFixedWidth(64)
                 btn.setStyleSheet(f"""
-                    QPushButton {{ color: {C.GREEN}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; }}
+                    QPushButton {{ color: {C.GREEN}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; }}
                     QPushButton:hover {{ border: 1px solid {C.GREEN}; }}
                 """)
                 entry = f"{symbol}:{chain}:{address}"
@@ -936,14 +944,14 @@ class TraderPanel(QWidget):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(f"Sell {symbol} anyway, skipping the safety checks?")
-        lbl.setFont(QFont("Courier New", 8))
+        lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.ACC}; background: transparent;")
         lay.addWidget(lbl)
         btn = QPushButton(f"⚠ FORCE SELL {symbol}")
-        btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(f"""
-            QPushButton {{ color: {C.RED}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 3px 8px; }}
+            QPushButton {{ color: {C.RED}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 3px 8px; }}
             QPushButton:hover {{ border: 1px solid {C.RED}; }}
         """)
         btn.clicked.connect(lambda: self._pick_and_run(lambda: self.engine.sell_one(symbol, True)))
@@ -982,7 +990,7 @@ class TraderPanel(QWidget):
         positions = self.engine._positions()
         if not positions:
             empty_lbl = QLabel("no open positions")
-            empty_lbl.setFont(QFont("Courier New", 9))
+            empty_lbl.setFont(QFont("Segoe UI", 9))
             empty_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             self._positions_layout.insertWidget(0, empty_lbl)
             return
@@ -995,17 +1003,17 @@ class TraderPanel(QWidget):
             lay = QHBoxLayout(row)
             lay.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(f"{symbol:<8} qty={p['qty']:.4f}  entry=${p['entryPriceUsd']:.6f}  cost=${p['costUsd']:.2f}{held}")
-            lbl.setFont(QFont("Courier New", 9))
+            lbl.setFont(QFont("Segoe UI", 9))
             lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             lay.addWidget(lbl, stretch=1)
 
             def _pos_btn(label: str, color: str, cb):
                 btn = QPushButton(label)
-                btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+                btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.setFixedWidth(88)
                 btn.setStyleSheet(f"""
-                    QPushButton {{ color: {color}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; }}
+                    QPushButton {{ color: {color}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; }}
                     QPushButton:hover {{ border: 1px solid {color}; }}
                 """)
                 btn.clicked.connect(cb)
@@ -1039,7 +1047,7 @@ class TraderPanel(QWidget):
         watchlist = self.engine.config.get("watchlist") or []
         if not watchlist:
             empty_lbl = QLabel("watchlist empty — see feed for +WATCH suggestions, or use 'watch SYM:0xADDR'")
-            empty_lbl.setFont(QFont("Courier New", 8))
+            empty_lbl.setFont(QFont("Segoe UI", 8))
             empty_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             empty_lbl.setWordWrap(True)
             self._watchlist_layout.insertWidget(0, empty_lbl)
@@ -1055,15 +1063,15 @@ class TraderPanel(QWidget):
             lay = QHBoxLayout(row)
             lay.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(f"{w['symbol']:<8} {chain_name:<12} {short}")
-            lbl.setFont(QFont("Courier New", 9))
+            lbl.setFont(QFont("Segoe UI", 9))
             lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             lay.addWidget(lbl, stretch=1)
             buy_btn = QPushButton("BUY")
-            buy_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            buy_btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
             buy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             buy_btn.setFixedWidth(48)
             buy_btn.setStyleSheet(f"""
-                QPushButton {{ color: {C.GREEN}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; }}
+                QPushButton {{ color: {C.GREEN}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; }}
                 QPushButton:hover {{ border: 1px solid {C.GREEN}; }}
             """)
             entry = f"{w['symbol']}:{chain}:{addr}"
@@ -1071,11 +1079,11 @@ class TraderPanel(QWidget):
             lay.addWidget(buy_btn)
 
             remove_btn = QPushButton("REMOVE")
-            remove_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            remove_btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
             remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             remove_btn.setFixedWidth(60)
             remove_btn.setStyleSheet(f"""
-                QPushButton {{ color: {C.RED}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 3px; }}
+                QPushButton {{ color: {C.RED}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; }}
                 QPushButton:hover {{ border: 1px solid {C.RED}; }}
             """)
             remove_btn.clicked.connect(lambda _checked=False, sym=w["symbol"]: self._on_watchlist_remove_click(sym))

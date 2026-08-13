@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for S.E.R.A.P.H — build with:
-#   .venv312\Scripts\pyinstaller.exe seraph.spec --noconfirm
+# PyInstaller spec for Omni-OS — build with:
+#   .venv312\Scripts\pyinstaller.exe omni-os.spec --noconfirm
 #
 # --onedir (not --onefile): a --onefile build re-extracts everything to a
 # temp dir on every launch (slow startup for an app this size — PyQt6,
@@ -26,18 +26,11 @@ PROJECT_DIR = Path(SPECPATH)
 
 datas = [
     (str(PROJECT_DIR / "core" / "prompt.txt"), "core"),
-    (str(PROJECT_DIR / "wakeword_models" / "seraph.onnx"), "wakeword_models"),
+    (str(PROJECT_DIR / "core" / "shared_rules.txt"), "core"),
     (str(PROJECT_DIR / "leda_idle_timeline1.mp4"), "."),
     (str(PROJECT_DIR / "leda_speaking.mp4"), "."),
     (str(PROJECT_DIR / "dashboard" / "static" / "avatar_bg.jpg"), "dashboard/static"),
 ]
-# openwakeword's own preprocessing models (melspectrogram/embedding/VAD) —
-# shipped as package data, not auto-detected by PyInstaller's import
-# analysis (it only follows code, not arbitrary non-Python files a package
-# happens to read at runtime). Missing these isn't a missing-feature
-# failure — it's a hard crash the instant the wake-word listener starts,
-# found by actually launching the packaged build, not by static review.
-datas += collect_data_files("openwakeword")
 # eth_account.hdaccount reads its BIP-39 wordlist .txt files (english.txt,
 # etc.) off disk at runtime for wallet/mnemonic generation — same
 # non-code-data blind spot as openwakeword above. Missing this doesn't
@@ -57,8 +50,6 @@ hiddenimports = [
     # win32com/pywin32 COM support (win10toast, image_generator's Explorer
     # integration if any) sometimes needs its genpy cache pre-seeded.
     "win32timezone",
-    # onnxruntime + openwakeword's provider dispatch.
-    "onnxruntime",
     # google-genai's websocket transport.
     "websockets",
     # web3/eth-* stack — eth_account's key backends are looked up dynamically.
@@ -89,7 +80,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="S.E.R.A.P.H",
+    name="Omni-OS",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -101,18 +92,17 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(PROJECT_DIR / "assets" / "icon.ico"),
+    # TODO: swap for an Omni-OS-branded .ico — kept the inherited S.E.R.A.P.H
+    # icon for now since v1 is prioritizing functional work over visuals.
     # PyInstaller 6.x defaults onedir builds to a separate "_internal"
     # subfolder for everything but the .exe itself. This app's own
     # frozen-mode BASE_DIR (see get_base_dir()/_base_dir() in main.py/
     # ui.py/dashboard/server.py) deliberately resolves to sys.executable's
     # own directory — for config/cert persistence, NOT a nested folder —
-    # so bundled data (wakeword model, prompt.txt, avatar video/image)
-    # needs to live at that same top level, not under _internal. Flattening
-    # here avoids a real bug hit in testing: openwakeword failed to find
-    # seraph.onnx because it was one directory level off from where
-    # WAKE_MODEL_PATH looked. (Belongs on EXE, not COLLECT — verified
-    # against PyInstaller's own source after passing it to the wrong one
-    # first and seeing no effect.)
+    # so bundled data (prompt.txt, avatar video/image) needs to live at
+    # that same top level, not under _internal. (Belongs on EXE, not
+    # COLLECT — verified against PyInstaller's own source after passing
+    # it to the wrong one first and seeing no effect.)
     contents_directory=".",
 )
 
@@ -124,5 +114,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="S.E.R.A.P.H",
+    name="Omni-OS",
 )

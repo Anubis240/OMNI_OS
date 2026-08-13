@@ -17,6 +17,16 @@ _lock            = Lock()
 MAX_VALUE_LENGTH = 380
 MEMORY_MAX_CHARS = 2200
 
+
+def _memory_path(namespace: str | None = None) -> Path:
+    """Each companion gets its own memory file, keyed by memory_namespace,
+    so facts learned by one companion never leak into another's context.
+    No namespace (the default) keeps using the original unnamespaced file —
+    backward compatible with pre-companion-registry installs."""
+    if not namespace:
+        return MEMORY_PATH
+    return BASE_DIR / "memory" / namespace / "long_term.json"
+
 def _empty_memory() -> dict:
     return {
         "identity":      {},
@@ -27,12 +37,13 @@ def _empty_memory() -> dict:
         "notes":         {},
     }
 
-def load_memory() -> dict:
-    if not MEMORY_PATH.exists():
+def load_memory(namespace: str | None = None) -> dict:
+    path = _memory_path(namespace)
+    if not path.exists():
         return _empty_memory()
     with _lock:
         try:
-            data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 base = _empty_memory()
                 for key in base:
@@ -67,13 +78,14 @@ def _trim_to_limit(memory: dict) -> dict:
         print(f"[Memory] 🗑️  Trimmed {cat}/{key}")
     return memory
 
-def save_memory(memory: dict) -> None:
+def save_memory(memory: dict, namespace: str | None = None) -> None:
     if not isinstance(memory, dict):
         return
     memory = _trim_to_limit(memory)
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    path = _memory_path(namespace)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        MEMORY_PATH.write_text(
+        path.write_text(
             json.dumps(memory, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -108,12 +120,12 @@ def _recursive_update(target: dict, updates: dict) -> bool:
     return changed
 
 
-def update_memory(memory_update: dict) -> dict:
+def update_memory(memory_update: dict, namespace: str | None = None) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
-        return load_memory()
-    memory = load_memory()
+        return load_memory(namespace)
+    memory = load_memory(namespace)
     if _recursive_update(memory, memory_update):
-        save_memory(memory)
+        save_memory(memory, namespace)
         print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
 
@@ -220,12 +232,13 @@ forget_memory = forget
 _SESSION_MAX = 3   # safety cap — in practice 0-1 entries after pop
 
 
-def save_session_summary(summary: str, language: str = "") -> None:
+def save_session_summary(summary: str, language: str = "", namespace: str | None = None) -> None:
     """Append a 1-2 sentence session summary to long_term.json['sessions']."""
     summary = (summary or "").strip()
     if not summary:
         return
-    memory   = load_memory()
+    path     = _memory_path(namespace)
+    memory   = load_memory(namespace)
     sessions = memory.get("sessions", [])
     if not isinstance(sessions, list):
         sessions = []
@@ -238,30 +251,31 @@ def save_session_summary(summary: str, language: str = "") -> None:
     sessions.append(entry)
     memory["sessions"] = sessions[-_SESSION_MAX:]
     with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
             json.dumps(memory, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
 
-def pop_last_session() -> dict | None:
+def pop_last_session(namespace: str | None = None) -> dict | None:
     """
     Return AND remove the most recent session entry.
     Calling this consumes the entry so it is never repeated in future briefings.
     """
+    path = _memory_path(namespace)
     with _lock:
-        if not MEMORY_PATH.exists():
+        if not path.exists():
             return None
         try:
-            memory   = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+            memory   = json.loads(path.read_text(encoding="utf-8"))
             sessions = memory.get("sessions", [])
             if not isinstance(sessions, list) or not sessions:
                 return None
             entry = sessions.pop()          # remove the last entry
             memory["sessions"] = sessions
-            MEMORY_PATH.write_text(
+            path.write_text(
                 json.dumps(memory, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )

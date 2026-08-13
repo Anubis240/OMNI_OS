@@ -1,10 +1,16 @@
 def launch_trader(parameters: dict = None, player=None) -> str:
     """Opens the native trader panel in place of the HUD — same mechanic as
-    the old theme switcher (in-place swap, no separate window). Seraph
+    the old theme switcher (in-place swap, no separate window). Omni
     itself never places trades: this only opens the panel, whose own typed
     command bar is the sole path that can move a position (see
     trader/engine.py's command() and core/prompt.txt's CRITICAL SAFETY
     RULE)."""
+    from core import settings_store
+    if not settings_store.load_settings()["trader"]["enabled"]:
+        msg = "The trader panel isn't enabled. Sir can turn it on from the Settings panel."
+        _log(msg, player)
+        return msg
+
     if player is None:
         msg = "Sir, I don't have a window to open the trader panel in."
         _log(msg, player)
