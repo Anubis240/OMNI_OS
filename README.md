@@ -10,7 +10,7 @@ live in a **World view** node graph.
 A built-in **Integrations tab** connects 30+ third-party services (GitHub, Slack, Notion,
 Google Workspace, Microsoft 365, Jira/Confluence, Zoom, Dropbox, and more) as tools any
 companion can call. An optional built-in crypto trading panel, guarded by pre-trade risk
-checks, is available as an add-on.
+checks, is available as an add-on. Connect your phone for remote control if you are on the same network.
 
 Bring your own Gemini API key (required) and, optionally, either an Anthropic API key or
 your own installed, subscription-authenticated Claude Code CLI — Omni-OS is licensed
