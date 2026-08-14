@@ -334,7 +334,12 @@ class _ConnectDialog(QDialog):
             label = "MANAGE" if connected else "CONNECT"
             open_family_btn = self._button(
                 f"{label} {family_entry['name'].upper()}",
-                lambda fe=family_entry: self._open_family_dialog(fe),
+                # QPushButton.clicked emits a `checked: bool` positional arg,
+                # which silently overrides a single default-valued lambda
+                # param (`fe=family_entry` would receive that bool instead
+                # of the intended dict) — the leading `_checked=False` absorbs
+                # it so `fe` keeps the captured value.
+                lambda _checked=False, fe=family_entry: self._open_family_dialog(fe),
                 color=None if connected else C.GREEN,
             )
             btn_row.addWidget(open_family_btn)
