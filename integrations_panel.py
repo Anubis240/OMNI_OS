@@ -307,6 +307,40 @@ class _ConnectDialog(QDialog):
         title_row.addStretch()
         lay.addLayout(title_row)
 
+        # A family-linked entry with no fields/help/connect_action of its own
+        # (Gmail, Google Docs, Outlook, etc.) has nothing to individually
+        # configure — the real OAuth credentials live under the family entry
+        # ("Google Account" / "Microsoft Account"). Rendering the normal
+        # fields+SAVE UI here produced an empty, non-functional dialog: no
+        # fields, no explanation, just a SAVE button that saved nothing.
+        # Point the user at the actual connection point instead.
+        family_id = entry.get("family")
+        if family_id and not entry.get("fields") and not entry.get("connect_action"):
+            family_entry = next(
+                (e for e in settings_store.INTEGRATION_CATALOG if e["id"] == family_id), None
+            )
+            family_saved = self._settings.get("integrations", {}).get(family_id, {})
+            connected = bool(family_saved.get("enabled"))
+            msg = QLabel(
+                f"{entry['name']} uses your {family_entry['name']} connection — "
+                + ("already connected." if connected else "not connected yet.")
+            )
+            msg.setFont(QFont("Segoe UI", 9))
+            msg.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+            msg.setWordWrap(True)
+            lay.addWidget(msg)
+
+            btn_row = QHBoxLayout()
+            label = "MANAGE" if connected else "CONNECT"
+            open_family_btn = self._button(
+                f"{label} {family_entry['name'].upper()}",
+                lambda fe=family_entry: self._open_family_dialog(fe),
+                color=None if connected else C.GREEN,
+            )
+            btn_row.addWidget(open_family_btn)
+            lay.addLayout(btn_row)
+            return
+
         if entry.get("help"):
             help_lbl = QLabel(_linkify_help(entry["help"], C.ACC2))
             help_lbl.setFont(QFont("Segoe UI", 8))
@@ -429,3 +463,13 @@ class _ConnectDialog(QDialog):
         settings_store.save_settings(settings)
         self.saved.emit(f"{self._entry['name']} disconnected.", False)
         self.accept()
+
+    def _open_family_dialog(self, family_entry: dict):
+        """A family-linked entry (Gmail, Docs, ...) has no connection of its
+        own to manage — swap this dialog for the actual family entry's
+        (Google Account / Microsoft Account) so the user lands on the real
+        OAuth setup instead of a dead end."""
+        self.accept()
+        dlg = _ConnectDialog(family_entry, self._settings, self._C, self.parent())
+        dlg.saved.connect(self.saved)
+        dlg.exec()
