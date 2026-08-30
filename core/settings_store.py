@@ -33,6 +33,13 @@ DEFAULT_SETTINGS = {
     "skills": [],        # [{id, name, content, enabled}]
     "claude_agent": {"enabled": False, "cliPath": "", "vaultDir": "", "extraDir": ""},
     "trader": {"enabled": False},  # optional crypto trading panel add-on, off by default
+    "live_model": "",   # Gemini Live model override for the default "Omni" identity
+                        # (a companion's own "model" field still wins over this — see
+                        # main.py::_build_config()); empty means use the hardcoded
+                        # LIVE_MODEL fallback in main.py. Settings → Companions.
+    "dashboard_port": 8000,  # Remote Dashboard listen port — configurable because the
+                             # original Seraph Guardian app this was forked from defaults
+                             # to the same port, so running both at once conflicts.
     "companions": [],    # [{id, name, backend, model, system_prompt, avatar,
                          #   voice, memory_namespace, mcp_server_ids, enabled, specialty}]
                          # backend: "gemini_live" (realtime voice) | "claude_agent" (turn-based text/tools).

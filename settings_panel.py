@@ -76,6 +76,7 @@ class SettingsPanel(QWidget):
         col.addWidget(self._build_companions_section())
         col.addWidget(self._build_trader_section())
         col.addWidget(self._build_claude_section())
+        col.addWidget(self._build_remote_dashboard_section())
         col.addWidget(self._build_api_keys_section())
         col.addWidget(self._build_mcp_section())
         col.addWidget(self._build_skills_section())
@@ -169,6 +170,17 @@ class SettingsPanel(QWidget):
         note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
+
+        self._live_model = self._labeled_input(
+            lay, "Default voice model override (used when no companion is active)",
+            "leave blank for the built-in default, or e.g. models/gemini-3.6-flash",
+        )
+        self._live_model.setText(self.settings.get("live_model", ""))
+        lay.addWidget(self._make_button("SAVE", self._on_save_live_model))
+
+        sep0 = QFrame(); sep0.setFrameShape(QFrame.Shape.HLine)
+        sep0.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
+        lay.addWidget(sep0)
 
         self._companions_list_layout = QVBoxLayout()
         self._companions_list_layout.setSpacing(6)
@@ -319,6 +331,10 @@ class SettingsPanel(QWidget):
         self._refresh_companions_list()
         self._persist("Switched back to the default Omni companion.")
 
+    def _on_save_live_model(self):
+        self.settings["live_model"] = self._live_model.text().strip()
+        self._persist("Default voice model saved — takes effect on next reconnect.")
+
     def _on_add_companion(self):
         name = self._new_companion_name.text().strip()
         prompt = self._new_companion_prompt.toPlainText().strip()
@@ -394,6 +410,53 @@ class SettingsPanel(QWidget):
         lay.addWidget(self._make_button("SAVE", self._on_save_claude))
         return wrap
 
+    # ---------- Remote Dashboard ----------
+
+    def _build_remote_dashboard_section(self) -> QWidget:
+        C = self._C
+        wrap, lay = self._section("REMOTE DASHBOARD")
+
+        note = QLabel(
+            "Lets a phone on the same Wi-Fi/LAN pair with Omni (QR code or manual key) "
+            "and talk to it. Served over HTTPS with a self-signed certificate generated "
+            "once for this machine's current LAN IP; if that IP later changes (different "
+            "network, DHCP renewal, VPN), Omni now detects the mismatch and regenerates "
+            "the certificate automatically on the next restart. Use the button below to "
+            "force a regeneration sooner, or if the port conflicts with another app "
+            "(e.g. Seraph Guardian, which defaults to the same port)."
+        )
+        note.setFont(QFont("Segoe UI", 8))
+        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
+        self._dashboard_port = self._labeled_input(lay, "Port", "8000")
+        self._dashboard_port.setText(str(self.settings.get("dashboard_port", 8000)))
+        lay.addWidget(self._make_button("SAVE (restart required)", self._on_save_dashboard_port))
+
+        lay.addWidget(self._make_button("REGENERATE CERTIFICATE (restart required)", self._on_regenerate_cert, C.RED))
+        return wrap
+
+    def _on_save_dashboard_port(self):
+        raw = self._dashboard_port.text().strip()
+        try:
+            port = int(raw)
+            if not (1 <= port <= 65535):
+                raise ValueError
+        except ValueError:
+            self._status_sig.emit("Port must be a number between 1 and 65535.", True)
+            return
+        self.settings["dashboard_port"] = port
+        self._persist(f"Remote Dashboard port set to {port} — restart Omni-OS for it to take effect.")
+
+    def _on_regenerate_cert(self):
+        from dashboard.server import regenerate_certificate
+        regenerate_certificate()
+        self._status_sig.emit(
+            "Certificate cleared — a fresh one for this machine's current IP will be "
+            "generated the next time Omni-OS starts.", False,
+        )
+
     def _on_browse_cli(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Claude CLI", "", "Executables (*.cmd *.exe);;All files (*)")
         if path:
@@ -409,6 +472,21 @@ class SettingsPanel(QWidget):
         enabled = self._claude_enabled.isChecked()
         if enabled and not cli:
             self._status_sig.emit("Set a Claude CLI path before enabling delegation.", True)
+            return
+        # A path to the npm-installed wrapper script (claude.cmd/claude.ps1)
+        # gets handed straight to the Claude Agent SDK, which spawns it as a
+        # subprocess without a shell — Windows can't exec a .cmd/.ps1/.bat
+        # that way (they aren't native executables), so it fails with an
+        # opaque low-level error at delegation time instead of here, where
+        # it's actually fixable. Catch it at save time with the exact fix.
+        if cli and cli.lower().endswith((".cmd", ".ps1", ".bat")):
+            self._status_sig.emit(
+                "That's the npm wrapper script — Claude Code delegation needs the native "
+                "executable instead. Install it with: irm https://claude.ai/install.ps1 | iex "
+                r"— then point this at C:\Users\<you>\.local\bin\claude.exe and run claude.exe "
+                "/login once.",
+                True,
+            )
             return
         self.settings["claude_agent"] = {
             "enabled": enabled, "cliPath": cli,

@@ -775,6 +775,11 @@ class JarvisLive:
                                             # summarized and saved to memory on disconnect/shutdown
         self._dashboard = None      # DashboardServer | None — remote/phone control, started once in run()
         self._phone_active = False  # True while the phone mic is actively streaming audio
+        self._resumption_handle: str | None = None  # last Gemini Live session-resumption handle
+                                                      # (see session_resumption_update handling in
+                                                      # _receive_audio) — fed back into _build_config()
+                                                      # so a reconnect resumes the same conversation
+                                                      # instead of starting a blank one
 
     def _make_remote_key(self):
         """Called from the Qt main thread when the user presses Remote Control."""
@@ -1029,7 +1034,15 @@ class JarvisLive:
         companion = self._resolve_active_companion(settings)
         self._companion = companion
         namespace = companion.get("memory_namespace") if companion else None
-        self._live_model = (companion.get("model") if companion else None) or LIVE_MODEL
+        # Precedence: the active companion's own model override, then the
+        # global default-voice override (Settings → Companions), then the
+        # hardcoded fallback — lets a user point at a new Gemini model the
+        # moment Google ships it, no source change/rebuild required.
+        self._live_model = (
+            (companion.get("model") if companion else None)
+            or settings.get("live_model")
+            or LIVE_MODEL
+        )
 
         memory     = load_memory(namespace)
         mem_str    = format_memory_for_prompt(memory)
@@ -1125,7 +1138,12 @@ class JarvisLive:
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": base_tool_declarations + custom_tool_declarations + integration_tool_declarations}],
-            session_resumption=types.SessionResumptionConfig(),
+            # Passing back the last handle we saw (session_resumption_update,
+            # captured in _receive_audio) lets the server resume the prior
+            # conversation on reconnect instead of starting a blank one —
+            # None here still enables the mechanism, it just means "start a
+            # new session" (see SessionResumptionConfig's own docstring).
+            session_resumption=types.SessionResumptionConfig(handle=self._resumption_handle),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -1348,9 +1366,27 @@ class JarvisLive:
                 print("[JARVIS] 🎤 Mic stream open")
                 while True:
                     await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise  # normal shutdown/reconnect path — must propagate
         except Exception as e:
+            # Deliberately NOT re-raised: this used to blow up the whole
+            # TaskGroup, which tore down and reconnected the entire live
+            # session (wiping conversation context) every 3s, forever, on
+            # any machine where the mic never opens (e.g. Windows' "Let
+            # desktop apps access your microphone" privacy toggle is off —
+            # no input devices means sd.InputStream() raises here). Instead:
+            # log it once, clearly, where the user can actually see it, and
+            # let the rest of the session (dashboard/phone mic, typed input,
+            # tool calls, playback) keep working without PC-mic input.
             print(f"[JARVIS] ❌ Mic: {e}")
-            raise
+            self.ui.write_log(
+                f"SYS: Microphone unavailable ({e}) — voice input from this PC is "
+                "disabled for this session. Check Windows Settings → Privacy & "
+                "security → Microphone → \"Let desktop apps access your "
+                "microphone\", and your input device selection, then restart "
+                "Omni-OS. Everything else (typed input, phone mic via Remote "
+                "Control, tool calls) still works."
+            )
 
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
@@ -1364,6 +1400,12 @@ class JarvisLive:
                         if self._turn_done_event and self._turn_done_event.is_set():
                             self._turn_done_event.clear()
                         self.audio_in_queue.put_nowait(response.data)
+
+                    if response.session_resumption_update and response.session_resumption_update.resumable:
+                        # new_handle is only meaningful when resumable=True — a
+                        # non-resumable update (e.g. mid function-call) sends an
+                        # empty handle and must NOT overwrite the last good one.
+                        self._resumption_handle = response.session_resumption_update.new_handle
 
                     if response.server_content:
                         sc = response.server_content

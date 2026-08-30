@@ -36,7 +36,12 @@ try:
 except ImportError:
     pass
 
-PORT = 8000
+# Default only — the port actually used is read from settings
+# ("dashboard_port") at DashboardServer construction time, see _resolve_port().
+# Configurable because the original Seraph Guardian app this was forked from
+# defaults to the same port, so running both at once conflicts (a real
+# beta-report — see settings_panel.py's Remote Dashboard section).
+_DEFAULT_PORT = 8000
 
 
 def _base_dir() -> Path:
@@ -58,12 +63,52 @@ CERT_FILE = CERT_DIR / "seraph.crt"
 KEY_FILE  = CERT_DIR / "seraph.key"
 
 
+def _cert_matches_ip(cert_bytes: bytes, ip: str) -> bool:
+    """True if `ip` is already one of the cert's Subject Alternative Names.
+    Used to detect the "certificate/IP desynchronization" case — a cert
+    generated for an old LAN IP (different network, DHCP lease renewal,
+    VPN, ...) silently kept serving forever because _ensure_self_signed_cert
+    only ever checked "does a cert file exist", never "is it still right
+    for THIS machine's current IP"."""
+    try:
+        from cryptography import x509
+        san = x509.load_pem_x509_certificate(cert_bytes).extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value
+        return ip in [str(v) for v in san.get_values_for_type(x509.IPAddress)]
+    except Exception:
+        # Any parse failure (corrupt file, unexpected format, ...) is treated
+        # as "doesn't match" so it gets regenerated rather than silently kept.
+        return False
+
+
+def regenerate_certificate() -> bool:
+    """Delete the cached self-signed cert/key so serve() generates a fresh
+    one (for the current IP) on next start. Called from Settings' "Regenerate
+    Certificate" button (see settings_panel.py) and automatically by
+    _ensure_self_signed_cert() when it detects the existing cert no longer
+    matches this machine's current LAN IP. The dashboard's HTTPS listener is
+    only configured once, at serve() time — this takes effect on the next
+    Omni-OS restart, not live."""
+    ok = True
+    for f in (CERT_FILE, KEY_FILE):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            ok = False
+    return ok
+
+
 def _ensure_self_signed_cert(ip: str) -> tuple[Path, Path] | None:
     """Generate a self-signed cert/key for this machine's LAN IP if one
-    doesn't already exist. Returns (cert_path, key_path), or None if the
-    `cryptography` package isn't installed."""
+    doesn't already exist, or regenerate it if the cached one was issued for
+    a different IP than the machine currently has. Returns (cert_path,
+    key_path), or None if the `cryptography` package isn't installed."""
     if CERT_FILE.exists() and KEY_FILE.exists():
-        return CERT_FILE, KEY_FILE
+        if _cert_matches_ip(CERT_FILE.read_bytes(), ip):
+            return CERT_FILE, KEY_FILE
+        print(f"[Dashboard] Cached certificate doesn't match current IP {ip} — regenerating.")
+        regenerate_certificate()
     try:
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
@@ -755,6 +800,7 @@ class DashboardServer:
 
     def __init__(self):
         self._ip = _local_ip()
+        self._port = self._resolve_port()
         self._tokens: set[str] = set()
         self._clients: set["WebSocket"] = set()
         self._history: list[dict] = []
@@ -817,9 +863,19 @@ class DashboardServer:
         self._pending_keys[key] = now + expiry_secs
         return key
 
+    def _resolve_port(self) -> int:
+        # Deferred import — same reason index()'s route handler does it
+        # locally: avoids a circular import with core at module-load time.
+        from core import settings_store
+        try:
+            port = int(settings_store.load_settings().get("dashboard_port") or _DEFAULT_PORT)
+        except (TypeError, ValueError):
+            return _DEFAULT_PORT
+        return port if 1 <= port <= 65535 else _DEFAULT_PORT
+
     def get_url(self) -> str:
         proto = "https" if self._use_ssl else "http"
-        return f"{proto}://{self._ip}:{PORT}"
+        return f"{proto}://{self._ip}:{self._port}"
 
     def register_file(self, path) -> str | None:
         """Make a local file fetchable by the phone (or the PC's own browser)
@@ -1099,16 +1155,18 @@ class DashboardServer:
         # instead of a silent no-op.
         try:
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            probe.bind(("0.0.0.0", PORT))
+            probe.bind(("0.0.0.0", self._port))
             probe.close()
         except OSError as e:
             self._fail(
-                f"couldn't bind port {PORT} ({e.strerror or e}) — is another copy of "
-                "Omni-OS already running? Remote Control won't work until this is freed."
+                f"couldn't bind port {self._port} ({e.strerror or e}) — is another copy of "
+                "Omni-OS (or another app, e.g. Seraph Guardian) already using it? Free it, "
+                "or change the port in Settings → Remote Dashboard. Remote Control won't "
+                "work until this is resolved."
             )
             return
 
-        cfg = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning", **ssl_kwargs)
+        cfg = uvicorn.Config(app, host="0.0.0.0", port=self._port, log_level="warning", **ssl_kwargs)
         print(f"[Dashboard] {self.get_url()}")
         print("[Dashboard] Press 'Remote Control' in the Omni-OS UI to get a pairing QR code.")
         if self._use_ssl:
