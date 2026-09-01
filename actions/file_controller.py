@@ -83,7 +83,21 @@ def _resolve_path(raw: str) -> Path:
     lower = raw.strip().lower()
     if lower in shortcuts:
         return shortcuts[lower]
-    return Path(raw).expanduser()
+    expanded = Path(raw).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    # A bare relative name ("OmniTest", "OmniTest/notes.txt" — no shortcut
+    # keyword, no drive/root) has no meaningful anchor of its own. Resolving
+    # it as-is falls back to the process's current working directory, which
+    # for a launched frozen app is its own install folder (e.g. under
+    # AppData\Local\Programs) — _is_safe_path() happily allows it (that
+    # folder is still under the user's home dir) so the write silently
+    # succeeds, just somewhere no one would ever think to look: a real bug
+    # report where "create hello.txt in my OmniTest folder" appeared to work
+    # but the file was later reported as genuinely missing by the user.
+    # Anchor bare relative paths to the Desktop instead — the closest match
+    # to what "my <name> folder" means without a fuller path.
+    return _get_desktop() / expanded
 
 def _format_size(b: int) -> str:
     for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -143,7 +157,11 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return f"File created: {target.name} (full path: {target})"
+        # Full path leads the message, not trails it — a model paraphrasing
+        # this in conversation is far more likely to keep/quote the first
+        # clause than a trailing parenthetical, and the actual location is
+        # the one fact a user challenging "did that really work?" needs.
+        return f"File created at: {target}"
     except Exception as e:
         return f"Could not create file: {e}"
 
@@ -155,7 +173,7 @@ def create_folder(path: str, name: str = "") -> str:
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         target.mkdir(parents=True, exist_ok=True)
-        return f"Folder created: {target.name}"
+        return f"Folder created at: {target}"
     except Exception as e:
         return f"Could not create folder: {e}"
 
@@ -296,7 +314,7 @@ def write_file(path: str, name: str = "", content: str = "",
         with open(target, mode, encoding="utf-8") as f:
             f.write(content)
         action = "Appended to" if append else "Written to"
-        return f"{action}: {target.name} (full path: {target})"
+        return f"{action}: {target}"
     except Exception as e:
         return f"Could not write file: {e}"
 

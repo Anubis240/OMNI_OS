@@ -154,6 +154,26 @@ _KEY_CHARS = [c for c in (string.ascii_uppercase + string.digits)
               if c not in ('O', 'I', 'L', '0', '1')]
 
 
+def _looks_like_vpn_ip(ip: str) -> bool:
+    """Heuristic for the 100.64.0.0/10 CGNAT range that Tailscale (and some
+    mobile carriers) hand out. Not a real LAN address — a phone on the
+    actual Wi-Fi can't reach a dashboard bound to it. Confirmed in testing:
+    with a VPN merely paused (not fully disconnected), _local_ip() correctly
+    returned the OS's active/preferred route — which was this VPN interface
+    — and the dashboard served there with zero indication anywhere that a
+    phone on the real Wi-Fi would find it unreachable. Not exhaustive (won't
+    catch every VPN's addressing scheme), but catches the concrete case
+    reported. See DashboardServer.set_warning_callback / serve()."""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        octets = [int(p) for p in parts]
+    except ValueError:
+        return False
+    return octets[0] == 100 and 64 <= octets[1] <= 127
+
+
 def _local_ip() -> str:
     """Return the best LAN-facing IPv4 address, no internet required."""
     for probe in ("8.8.8.8", "1.1.1.1", "192.168.1.1"):
@@ -372,17 +392,32 @@ _APP_HTML = """<!DOCTYPE html>
   }
 
   var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  var ws = new WebSocket(proto + '://' + location.host + '/ws?token=' + encodeURIComponent(token));
-  ws.onopen = function() { statusEl.textContent = 'live'; statusEl.className = 'live'; };
-  ws.onclose = function() { statusEl.textContent = 'disconnected'; statusEl.className = ''; };
-  ws.onmessage = function(ev) {
-    var msg = JSON.parse(ev.data);
-    if (msg.type === 'you') addLine('you', 'You: ' + msg.text);
-    else if (msg.type === 'seraph') addLine('seraph', 'Omni: ' + msg.text);
-    else if (msg.type === 'sys') addLine('sys', msg.text);
-    else if (msg.type === 'image') addImage(msg.data);
-    else if (msg.type === 'link') addLink(msg.url, msg.label);
-  };
+  // Opened once at page load and, unlike /ws/audio (re-opened fresh every
+  // time the mic is tapped, so it self-heals), had no reconnect logic at
+  // all — an idle timeout or a transient mobile-network drop silently
+  // killed the ONLY channel Omni's replies are broadcast through, with no
+  // visible sign anything had failed (the phone just went quiet forever).
+  // Retry with backoff instead of giving up after the first drop.
+  var ws = null, wsRetryMs = 1000;
+  function connectWs() {
+    ws = new WebSocket(proto + '://' + location.host + '/ws?token=' + encodeURIComponent(token));
+    ws.onopen = function() { statusEl.textContent = 'live'; statusEl.className = 'live'; wsRetryMs = 1000; };
+    ws.onclose = function() {
+      statusEl.textContent = 'reconnecting…'; statusEl.className = '';
+      setTimeout(connectWs, wsRetryMs);
+      wsRetryMs = Math.min(wsRetryMs * 2, 15000);
+    };
+    ws.onerror = function() { ws.close(); };
+    ws.onmessage = function(ev) {
+      var msg = JSON.parse(ev.data);
+      if (msg.type === 'you') addLine('you', 'You: ' + msg.text);
+      else if (msg.type === 'seraph') addLine('seraph', 'Omni: ' + msg.text);
+      else if (msg.type === 'sys') addLine('sys', msg.text);
+      else if (msg.type === 'image') addImage(msg.data);
+      else if (msg.type === 'link') addLink(msg.url, msg.label);
+    };
+  }
+  connectWs();
 
   document.getElementById('f').addEventListener('submit', function(e) {
     e.preventDefault();
@@ -825,6 +860,7 @@ class DashboardServer:
         self.running = False  # True once the HTTP(S) listener is actually up
         self.start_error: str | None = None  # set if serve() fails to start
         self._error_callback = None
+        self._warning_callback = None
         # Files Seraph has created that the phone can fetch by an opaque id —
         # avoids exposing raw filesystem paths; only explicitly-shared files
         # are servable, not arbitrary paths off a URL parameter.
@@ -841,6 +877,13 @@ class DashboardServer:
         looks fine, Remote Control still shows a URL/QR code, and nothing
         ever explains to the user why their phone can't connect."""
         self._error_callback = fn
+
+    def set_warning_callback(self, fn) -> None:
+        """fn(message: str) -> None — for a non-fatal heads-up the dashboard
+        still starts fine despite (unlike set_error_callback, which is only
+        for a failed start). Currently only used for the VPN/CGNAT-IP case:
+        see _looks_like_vpn_ip()."""
+        self._warning_callback = fn
 
     def set_trader_state_callback(self, fn) -> None:
         """fn() -> dict | None, called synchronously from the request handler
@@ -950,8 +993,9 @@ class DashboardServer:
                 del self._pending_keys[entered]  # one-time use
                 tok = secrets.token_urlsafe(32)
                 self._tokens.add(tok)
-                if self._connect_callback:
-                    self._connect_callback()
+                # NOTE: _connect_callback fires from the /ws handler now, not
+                # here — see that route for why (this only proves HTTP login
+                # succeeded, not that the phone's actual chat socket is up).
                 await self.broadcast({"type": "sys", "text": "Remote connection established."})
                 return JSONResponse({"ok": True, "token": tok})
             return JSONResponse({"ok": False, "error": "Invalid or expired key"}, status_code=401)
@@ -971,8 +1015,8 @@ class DashboardServer:
             del self._pending_keys[key]
             tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
-            if self._connect_callback:
-                self._connect_callback()
+            # NOTE: _connect_callback fires from the /ws handler now, not
+            # here — see that route for why.
             await self.broadcast({"type": "sys", "text": "Remote connection established via QR code."})
             return HTMLResponse(
                 "<body style='background:#000000;color:#f0f0f0;font-family:sans-serif;"
@@ -1072,6 +1116,16 @@ class DashboardServer:
                 return
             await websocket.accept()
             self._clients.add(websocket)
+            # This — not HTTP /login succeeding — is the real "phone can
+            # actually receive messages" moment: login only proves the
+            # pairing key was valid, not that this chat socket (the one
+            # every broadcast() call sends through) is actually open. A
+            # tester saw the desktop's "CONNECTED" indicator stay green
+            # while this socket had in fact dropped and never reconnected
+            # (no retry logic existed client-side — fixed below), so every
+            # reply silently went nowhere with no visible sign of failure.
+            if self._connect_callback:
+                self._connect_callback()
             for entry in self._history[-50:]:
                 try:
                     await websocket.send_json(entry)
@@ -1133,6 +1187,16 @@ class DashboardServer:
         if not _DEPS_OK:
             self._fail('fastapi/uvicorn not installed — run: pip install fastapi "uvicorn[standard]"')
             return
+
+        if _looks_like_vpn_ip(self._ip) and self._warning_callback:
+            try:
+                self._warning_callback(
+                    f"is binding to {self._ip}, which looks like a VPN/Tailscale address, "
+                    "not your real Wi-Fi LAN — a phone on the actual Wi-Fi network won't be "
+                    "able to reach it. Disconnect the VPN and restart Omni-OS to fix this."
+                )
+            except Exception:
+                pass
 
         app = self._build_app()
         cert = _ensure_self_signed_cert(self._ip)

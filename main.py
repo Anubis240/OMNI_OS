@@ -428,7 +428,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "code_helper",
-        "description": "Writes, edits, explains, runs, or builds code files.",
+        "description": "Writes, edits, explains, runs, or builds actual PROGRAMMING SOURCE CODE files (Python, JS, HTML, etc.). Never for prose, stories, poems, essays, or any natural-language creative writing — answer those directly in conversation, no tool call.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -849,6 +849,15 @@ class JarvisLive:
                         break
                     await asyncio.sleep(0.1)
                 if self.session:
+                    # Broadcast explicitly rather than relying on
+                    # _receive_audio()'s input_transcription-based "you" line:
+                    # that only fires for spoken audio input, so a
+                    # phone-typed (no audio) turn would otherwise never be
+                    # echoed to any OTHER connected client (a second phone,
+                    # or the desktop's own browser tab) — only the
+                    # originating phone's own optimistic local echo showed it.
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast({"type": "you", "text": text}))
                     await self.session.send_client_content(
                         turns={"parts": [{"text": text}]},
                         turn_complete=True,
@@ -1104,8 +1113,24 @@ class JarvisLive:
             f"Right now it is: {time_str}\n"
             f"Use this to calculate exact times for reminders.\n\n"
         )
+        # Ground truth, not a guess: a tester asked "which Gemini model are
+        # you?" and got a confident, wrong, made-up answer, then a failed
+        # search when challenged. This is a fact main.py already knows
+        # (self._live_model, set just above) — hand it over directly instead
+        # of leaving the model to reason/search its way to an answer about
+        # its own identity, which it structurally cannot verify from inside
+        # the conversation. Doesn't fix the underlying search/tool
+        # reliability for OTHER factual questions, only this one knowable-
+        # in-advance case.
+        model_ctx = (
+            f"[YOUR CURRENT MODEL]\n"
+            f"You are running as exactly this model: {self._live_model}\n"
+            f"If asked which model/version you are, state this exact string. Do not "
+            f"guess, do not claim to be a different or newer model, and do not present "
+            f"an unverified guess as fact even if a search for confirmation fails.\n\n"
+        )
 
-        parts = [time_ctx]
+        parts = [time_ctx, model_ctx]
         if mem_str:
             parts.append(mem_str)
 
@@ -1509,6 +1534,9 @@ class JarvisLive:
             self._dashboard.set_trader_state_callback(self.ui.get_trader_state)
             self._dashboard.set_trader_action_callback(self.ui.run_trader_action)
             self._dashboard.set_error_callback(
+                lambda msg: self.ui.write_log(f"SYS: Remote Dashboard {msg}")
+            )
+            self._dashboard.set_warning_callback(
                 lambda msg: self.ui.write_log(f"SYS: Remote Dashboard {msg}")
             )
             asyncio.create_task(self._dashboard.serve())

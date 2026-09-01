@@ -422,8 +422,9 @@ class SettingsPanel(QWidget):
             "once for this machine's current LAN IP; if that IP later changes (different "
             "network, DHCP renewal, VPN), Omni now detects the mismatch and regenerates "
             "the certificate automatically on the next restart. Use the button below to "
-            "force a regeneration sooner, or if the port conflicts with another app "
-            "(e.g. Seraph Guardian, which defaults to the same port)."
+            "force a regeneration sooner, or if the port conflicts with another app — "
+            "e.g. Seraph Guardian, Kondux's separate crypto pre-trade risk-check engine "
+            "(unrelated to Omni's own identity), which defaults to the same port."
         )
         note.setFont(QFont("Segoe UI", 8))
         note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
