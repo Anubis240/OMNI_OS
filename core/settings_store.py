@@ -24,6 +24,12 @@ def _base_dir() -> Path:
 
 SETTINGS_PATH = _base_dir() / "config" / "settings.json"
 
+# Single source of truth for the hardcoded Gemini Live model fallback — main.py
+# uses it as LIVE_MODEL, settings_panel.py reads it to show the actually-
+# resolved model in Settings (a tester asked to verify Omni's own self-report
+# independently rather than trust it — see the [YOUR CURRENT MODEL] prompt fix).
+DEFAULT_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+
 DEFAULT_SETTINGS = {
     "mcp_servers": [],   # [{id, name, url, apiKey}]
     "api_keys": {"openai": "", "anthropic": ""},

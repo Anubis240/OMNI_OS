@@ -401,7 +401,18 @@ _APP_HTML = """<!DOCTYPE html>
   var ws = null, wsRetryMs = 1000;
   function connectWs() {
     ws = new WebSocket(proto + '://' + location.host + '/ws?token=' + encodeURIComponent(token));
-    ws.onopen = function() { statusEl.textContent = 'live'; statusEl.className = 'live'; wsRetryMs = 1000; };
+    ws.onopen = function() {
+      // The server always replays its last 50 history entries fresh on
+      // every /ws accept (so a phone reconnecting mid-session sees prior
+      // context) — harmless when a connection barely ever reconnected, but
+      // now that this reconnects automatically (below), leaving the old
+      // DOM in place meant every reconnect (e.g. the phone's own screen
+      // timeout, ~every 15s) re-appended the same history on top of what
+      // was already shown — confirmed in testing as 5+ stacked copies of
+      // one exchange. Clear first so the replay rebuilds cleanly instead.
+      logEl.innerHTML = '';
+      statusEl.textContent = 'live'; statusEl.className = 'live'; wsRetryMs = 1000;
+    };
     ws.onclose = function() {
       statusEl.textContent = 'reconnecting…'; statusEl.className = '';
       setTimeout(connectWs, wsRetryMs);

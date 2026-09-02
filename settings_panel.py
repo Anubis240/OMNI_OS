@@ -171,6 +171,29 @@ class SettingsPanel(QWidget):
         note.setWordWrap(True)
         lay.addWidget(note)
 
+        # Read-only — a tester asked to be able to verify Omni's own
+        # self-report of its model independently rather than trust it (a
+        # fair ask, since Omni answering questions about itself is exactly
+        # the class of thing that was previously getting guessed instead of
+        # known — see the [YOUR CURRENT MODEL] system-prompt fix). Computed
+        # with the same precedence _build_config() uses at connect time:
+        # active companion's own override, then this default override,
+        # then the hardcoded fallback.
+        active_id = self.settings.get("active_companion_id") or ""
+        active_companion = next(
+            (c for c in self.settings["companions"] if c["id"] == active_id), None
+        ) if active_id else None
+        resolved_model = (
+            (active_companion.get("model") if active_companion else None)
+            or self.settings.get("live_model")
+            or settings_store.DEFAULT_LIVE_MODEL
+        )
+        resolved_lbl = QLabel(f"Currently resolves to: {resolved_model}")
+        resolved_lbl.setFont(QFont("Segoe UI", 8))
+        resolved_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        resolved_lbl.setWordWrap(True)
+        lay.addWidget(resolved_lbl)
+
         self._live_model = self._labeled_input(
             lay, "Default voice model override (used when no companion is active)",
             "leave blank for the built-in default, or e.g. models/gemini-3.6-flash",

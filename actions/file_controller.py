@@ -97,6 +97,16 @@ def _resolve_path(raw: str) -> Path:
     # but the file was later reported as genuinely missing by the user.
     # Anchor bare relative paths to the Desktop instead — the closest match
     # to what "my <name> folder" means without a fuller path.
+    #
+    # If the model itself already prefixed one of the shortcut names (e.g.
+    # "Desktop/OmniTest" — confirmed in testing: once the tool's own
+    # description started saying bare paths resolve to Desktop, the model
+    # started applying that resolution itself too), anchoring under Desktop
+    # again here would duplicate the segment (Desktop\Desktop\OmniTest).
+    # Strip a leading shortcut-named segment first so doing it is a no-op.
+    parts = expanded.parts
+    if parts and parts[0].lower() in shortcuts:
+        return shortcuts[parts[0].lower()].joinpath(*parts[1:])
     return _get_desktop() / expanded
 
 def _format_size(b: int) -> str:

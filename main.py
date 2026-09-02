@@ -143,11 +143,13 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 SHARED_RULES_PATH = BASE_DIR / "core" / "shared_rules.txt"
-LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+LIVE_MODEL          = settings_store.DEFAULT_LIVE_MODEL
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+TOOL_CALL_TIMEOUT   = 200  # see the try/except around _execute_tool() in _receive_audio() —
+                           # generous ceiling above claude_agent's own 180s internal timeout
 
 def _load_vault_memory_index() -> str:
     """Reads the index of Claude's memory (the user's 'second brain') from
@@ -1469,7 +1471,31 @@ class JarvisLive:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
-                            fr = await self._execute_tool(fc)
+                            try:
+                                # No call in this path (a network request inside
+                                # a tool, an MCP call, a subprocess) previously
+                                # had any timeout at all — a single genuinely
+                                # stuck one blocked this entire receive loop
+                                # forever, which meant every other channel too
+                                # (typed/phone text goes through the same
+                                # session object) with no error surfaced and no
+                                # recovery short of force-restarting the app. A
+                                # generous but finite ceiling — longer than
+                                # claude_agent's own 180s internal timeout —
+                                # can't force-kill a stuck synchronous call
+                                # (thread-pool work can't be cancelled), but it
+                                # unblocks the session either way.
+                                fr = await asyncio.wait_for(self._execute_tool(fc), timeout=TOOL_CALL_TIMEOUT)
+                            except asyncio.TimeoutError:
+                                print(f"[JARVIS] ⏱️ Tool call timed out: {fc.name}")
+                                self._tool_running = False
+                                if not self.ui.muted:
+                                    self.ui.set_state("LISTENING")
+                                self.ui.write_log(f"SYS: '{fc.name}' didn't respond in time — cancelled, try again.")
+                                fr = types.FunctionResponse(
+                                    id=fc.id, name=fc.name,
+                                    response={"error": "Tool call timed out"},
+                                )
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses

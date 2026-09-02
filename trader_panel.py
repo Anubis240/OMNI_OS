@@ -534,7 +534,36 @@ class TraderPanel(QWidget):
         reset_btn = self._make_button("RESET LEDGER", self._on_reset)
         col.addWidget(reset_btn)
 
+        # A bad/invalid key entered on first setup (McpKeySetupOverlay) had
+        # no way to be corrected afterward — that overlay only ever shows
+        # once, before any key is saved, and neither this config panel nor
+        # Settings had a key field at all. save_seraph_api_key() already
+        # persists + live-applies with no restart needed (mcp_client.py);
+        # this was purely a missing UI affordance to reach it again.
+        key_lbl = QLabel("Seraph API key")
+        key_lbl.setFont(QFont("Segoe UI", 7))
+        key_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; margin-top: 4px;")
+        col.addWidget(key_lbl)
+        self._seraph_key_input = QLineEdit()
+        self._seraph_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._seraph_key_input.setPlaceholderText("Enter to replace saved key…")
+        self._seraph_key_input.setFont(QFont("Segoe UI", 8))
+        self._seraph_key_input.setStyleSheet(f"background: {C.PANEL_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 4px;")
+        col.addWidget(self._seraph_key_input)
+        key_save_btn = self._make_button("SAVE KEY", self._on_save_seraph_key)
+        col.addWidget(key_save_btn)
+
         return wrap
+
+    def _on_save_seraph_key(self):
+        key = self._seraph_key_input.text().strip()
+        if not key:
+            return
+        mcp_client.save_seraph_api_key(key)
+        self._seraph_key_input.clear()
+        if self._key_warn_lbl:
+            self._key_warn_lbl.hide()
+        self._append_feed_text("SYS: Seraph API key updated — takes effect immediately, no restart needed.")
 
     def _build_wallet_row(self) -> QWidget:
         """App-managed wallet dock + live-arm control. Local wallet only
