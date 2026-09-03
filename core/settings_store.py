@@ -91,7 +91,10 @@ INTEGRATION_CATALOG = [
     # --- Batch 1: token/local auth, implemented ---
     {"id": "github", "name": "GitHub", "category": "Developer Tools", "auth_type": "credentials",
      "fields": [{"key": "token", "label": "Personal Access Token", "secret": True}],
-     "help": "github.com/settings/tokens — classic PAT with 'repo' scope.", "implemented": True},
+     "help": "github.com/settings/personal-access-tokens/new — a fine-grained token scoped to just "
+             "the repo(s) you want Omni to touch is safer than a classic 'repo'-scope token (full "
+             "read/write on every repo, public and private); use classic only if you need broader access.",
+     "implemented": True},
     {"id": "notion", "name": "Notion", "category": "Productivity", "auth_type": "credentials",
      "fields": [{"key": "token", "label": "Internal Integration Token", "secret": True}],
      "help": "notion.so/my-integrations — then share each page/database with the integration.", "implemented": True},

@@ -21,6 +21,9 @@ def weather_action(
     search_query  = f"weather in {city} {when}"
     url           = f"https://www.google.com/search?q={quote_plus(search_query)}"
 
+    if player:
+        player.write_log(f"[Weather] {search_query}")
+
     try:
         opened = webbrowser.open(url)
         if not opened:
@@ -46,6 +49,15 @@ def _log(message: str, player=None) -> None:
     print(f"[Weather] {message}")
     if player:
         try:
-            player.write_log(f"JARVIS: {message}")
+            # Was "JARVIS: ..." — a leftover pre-rebrand log prefix (this
+            # app was internally called JARVIS before Omni-OS; see
+            # class JarvisLive/JarvisUI in main.py/ui.py) that never got
+            # updated when every other action module moved to "SYS:".
+            # ui.py's log widget has an explicit "jarvis:" prefix case
+            # (tagged "ai", rendered in the accent color, distinct from
+            # normal SYS/Omni lines) — a real, confirmed-in-testing find:
+            # it read as an unattributed, mislabeled subsystem rather than
+            # this tool's own normal result line.
+            player.write_log(f"SYS: {message}")
         except Exception:
             pass

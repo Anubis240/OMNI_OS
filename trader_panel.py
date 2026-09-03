@@ -1158,7 +1158,10 @@ class TraderPanel(QWidget):
         # the freeze this fixes). "checking with Seraph" gives immediate
         # feedback before the engine's own gate/submit log lines start
         # streaming in.
-        if re.match(r"^buy\s", text, re.I):
+        if re.match(r"^buy\s", text, re.I) and not re.search(r"\bforce\b", text, re.I):
+            # "force" skips the risk screen entirely (see engine.py's
+            # bypass_gate path) — showing "checking with Seraph" for it was
+            # misleading, since no check is actually happening.
             pending = "SYS: checking with Seraph…"
         elif re.match(r"^unwrap\b", text, re.I):
             pending = "SYS: unwrapping WETH…"

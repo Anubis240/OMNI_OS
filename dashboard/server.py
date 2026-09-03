@@ -478,6 +478,15 @@ _APP_HTML = """<!DOCTYPE html>
       playCtx = new (window.AudioContext || window.webkitAudioContext)();
       nextPlayTime = playCtx.currentTime;
     }
+    // Mobile browsers can suspend this context as a side effect of the mic
+    // toggle — getUserMedia capture and AudioContext output appear to share
+    // OS-level audio focus on at least Android Chrome. Confirmed in
+    // testing: toggling the phone's mic on/off was silencing/resuming
+    // Omni's own in-progress reply audio, making some real responses look
+    // like "no response" at all. Re-resuming on every incoming chunk makes
+    // playback self-healing regardless of what suspended it, instead of
+    // only recovering on whatever timing the user happens to tap next.
+    if (playCtx.state === 'suspended') { playCtx.resume().catch(function() {}); }
     var int16 = new Int16Array(arrayBuffer);
     var float32 = new Float32Array(int16.length);
     for (var i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
@@ -1204,7 +1213,9 @@ class DashboardServer:
                 self._warning_callback(
                     f"is binding to {self._ip}, which looks like a VPN/Tailscale address, "
                     "not your real Wi-Fi LAN — a phone on the actual Wi-Fi network won't be "
-                    "able to reach it. Disconnect the VPN and restart Omni-OS to fix this."
+                    "able to reach it. Disconnect the VPN, then FULLY QUIT and relaunch "
+                    "Omni-OS (this is only re-checked at app startup — reconnecting or "
+                    "getting a new pairing key while the app keeps running won't help)."
                 )
             except Exception:
                 pass

@@ -990,7 +990,15 @@ class TraderEngine:
                 verdict = self._risk_check(token)
                 self._emit({"type": "gate", "symbol": symbol, "address": address, "chain": chain, "source": "manual", **verdict})
                 if not verdict["approved"]:
-                    return {"ok": False, "message": f"Seraph {verdict['reason']}"}
+                    # The fail-closed/unavailable reason already says
+                    # "Seraph MCP unavailable: ..." itself (see
+                    # _risk_check's except branch) — prefixing "Seraph "
+                    # unconditionally produced "Seraph Seraph MCP
+                    # unavailable...". Only add it when the reason doesn't
+                    # already start with it.
+                    reason = verdict["reason"]
+                    prefix = "" if reason.lower().startswith("seraph") else "Seraph "
+                    return {"ok": False, "message": f"{prefix}{reason}"}
             self._execute_buy(token, price_usd, {"riskLevel": verdict["level"], "riskScore": verdict["score"], "source": "manual", "bypassGate": bypass_gate})
             self._persist()
             self._emit({"type": "state", **self.public_state()})
