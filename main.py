@@ -747,6 +747,26 @@ class _ReconnectRequested(Exception):
     voice_name is only read at connect time."""
 
 
+# Companion backends with their own turn-based text session and no live-
+# voice equivalent (contrast "gemini_live", which drives the real-time
+# session directly). Both claude_agent and codex_agent share the exact
+# same async send(companion, text) -> str calling shape (see
+# actions/claude_companion.py and actions/codex_companion.py) even though
+# they drive completely different CLIs underneath — a future backend just
+# needs to match that shape and get one more branch below.
+_AGENT_BACKENDS = {"claude_agent", "codex_agent"}
+
+
+def _agent_send_fn(backend: str | None):
+    if backend == "claude_agent":
+        from actions.claude_companion import send
+        return send
+    if backend == "codex_agent":
+        from actions.codex_companion import send
+        return send
+    return None
+
+
 class JarvisLive:
 
     def __init__(self, ui: JarvisUI):
@@ -917,15 +937,17 @@ class JarvisLive:
     def _on_text_command(self, text: str):
         if not self._loop:
             return
-        # A claude_agent-backend companion has no live voice session to route
-        # into (see _resolve_active_companion's docstring) — its interaction
-        # surface is this same text box, just routed to its own Claude
-        # conversation instead of the Gemini Live session below.
+        # An agent-backend companion (claude_agent, codex_agent, ... — see
+        # _AGENT_BACKENDS) has no live voice session to route into (see
+        # _resolve_active_companion's docstring) — its interaction surface
+        # is this same text box, just routed to its own turn-based CLI
+        # session instead of the Gemini Live session below.
         settings = settings_store.load_settings()
         active_id = settings.get("active_companion_id")
         companion = next((c for c in settings.get("companions", []) if c.get("id") == active_id), None)
-        if companion and companion.get("backend") == "claude_agent" and companion.get("enabled", True):
-            asyncio.run_coroutine_threadsafe(self._handle_claude_companion_text(companion, text), self._loop)
+        send_fn = _agent_send_fn(companion.get("backend")) if companion else None
+        if companion and send_fn and companion.get("enabled", True):
+            asyncio.run_coroutine_threadsafe(self._handle_agent_companion_text(companion, send_fn, text), self._loop)
             return
         if not self.session:
             return
@@ -937,36 +959,36 @@ class JarvisLive:
             self._loop
         )
 
-    async def _handle_claude_companion_text(self, companion: dict, text: str) -> None:
-        from actions.claude_companion import send as claude_companion_send
+    async def _handle_agent_companion_text(self, companion: dict, send_fn, text: str) -> None:
         self.ui.write_log(f"SYS: {companion['name']} is thinking…")
-        reply = await claude_companion_send(companion, text)
+        reply = await send_fn(companion, text)
         self.ui.write_log(f"{companion['name']}: {reply}")
 
     def _delegate_to_agent(self, agent_name: str, task: str) -> str:
         """Handles delegate_to_agent tool calls — looks up the named
-        claude_agent-backend companion and kicks off the work as a
-        background asyncio task on the live event loop, so the voice
-        session isn't blocked waiting for it (a sub-agent turn can easily
-        take longer than a voice turn should)."""
+        agent-backend companion (claude_agent or codex_agent — see
+        _AGENT_BACKENDS) and kicks off the work as a background asyncio
+        task on the live event loop, so the voice session isn't blocked
+        waiting for it (a sub-agent turn can easily take longer than a
+        voice turn should)."""
         if not agent_name or not task:
             return "Both an agent name and a task are required."
         settings = settings_store.load_settings()
         companion = next(
             (c for c in settings["companions"]
-             if c.get("backend") == "claude_agent" and c["name"].lower() == agent_name.lower()),
+             if c.get("backend") in _AGENT_BACKENDS and c["name"].lower() == agent_name.lower()),
             None,
         )
         if not companion:
             return f"No sub-agent named '{agent_name}' found."
+        send_fn = _agent_send_fn(companion["backend"])
 
-        asyncio.run_coroutine_threadsafe(self._run_delegation(companion, task), self._loop)
+        asyncio.run_coroutine_threadsafe(self._run_delegation(companion, send_fn, task), self._loop)
         return f"Delegating to {companion['name']} now — I'll let you know when it's done."
 
-    async def _run_delegation(self, companion: dict, task: str) -> None:
-        from actions.claude_companion import send as claude_companion_send
+    async def _run_delegation(self, companion: dict, send_fn, task: str) -> None:
         self.ui.write_log(f"SYS: {companion['name']} started: {task[:80]}")
-        result = await claude_companion_send(companion, task)
+        result = await send_fn(companion, task)
         self.ui.write_log(f"{companion['name']}: {result}")
         self.speak(f"{companion['name']} finished — {result[:300]}")
 
@@ -1068,14 +1090,15 @@ class JarvisLive:
         trader_enabled = settings["trader"]["enabled"]
         enabled_skills = [s for s in settings["skills"] if s.get("enabled")]
         sys_prompt = _apply_trader_section(sys_prompt, trader_enabled)
-        # Sub-agents: claude_agent-backend companions the active (voice)
-        # companion can hand work off to via delegate_to_agent — see
-        # actions/claude_companion.py. A companion delegating to itself
+        # Sub-agents: agent-backend companions (claude_agent, codex_agent —
+        # see _AGENT_BACKENDS) the active (voice) companion can hand work
+        # off to via delegate_to_agent — see actions/claude_companion.py
+        # and actions/codex_companion.py. A companion delegating to itself
         # would just be a slower version of answering directly, so it's
         # excluded from its own directory.
         sub_agents = [
             c for c in settings["companions"]
-            if c.get("backend") == "claude_agent" and c.get("enabled", True)
+            if c.get("backend") in _AGENT_BACKENDS and c.get("enabled", True)
             and (companion is None or c.get("id") != companion.get("id"))
         ]
         base_tool_declarations = TOOL_DECLARATIONS

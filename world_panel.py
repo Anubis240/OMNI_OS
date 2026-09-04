@@ -17,7 +17,7 @@ import math
 from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -72,7 +72,7 @@ class WorldPanel(QWidget):
         all_companions = settings["companions"]
         lead = next((c for c in all_companions if c.get("id") == active_id), None)
         lead_name = lead["name"] if lead else "Omni"
-        sub_agents = [c for c in all_companions if c.get("backend") == "claude_agent"]
+        sub_agents = [c for c in all_companions if c.get("backend") in ("claude_agent", "codex_agent")]
         self._canvas.set_data(lead_name, sub_agents, all_companions)
 
     def _open_add_dialog(self):
@@ -89,8 +89,12 @@ class WorldPanel(QWidget):
             return
         dlg = _AddSubAgentDialog(self._C, companion, self)
         if dlg.exec():
-            from actions.claude_companion import forget_session
-            forget_session(companion_id)  # identity changed — start its next turn fresh
+            # identity (or backend) changed — start its next turn fresh.
+            # Harmless no-op in whichever module it didn't actually use.
+            from actions.claude_companion import forget_session as forget_claude_session
+            from actions.codex_companion import forget_session as forget_codex_session
+            forget_claude_session(companion_id)
+            forget_codex_session(companion_id)
             self.refresh()
             if self.on_companion_added:
                 self.on_companion_added()
@@ -117,8 +121,10 @@ class WorldPanel(QWidget):
             settings["active_companion_id"] = ""
         settings_store.save_settings(settings)
 
-        from actions.claude_companion import forget_session
-        forget_session(companion_id)
+        from actions.claude_companion import forget_session as forget_claude_session
+        from actions.codex_companion import forget_session as forget_codex_session
+        forget_claude_session(companion_id)
+        forget_codex_session(companion_id)
 
         self.refresh()
         if self.on_companion_added:
@@ -245,9 +251,13 @@ class _GraphCanvas(QWidget):
     def refresh_statuses(self):
         if not self._sub_cards:
             return
-        from actions.claude_companion import get_status
+        from actions.claude_companion import get_status as claude_status
+        from actions.codex_companion import get_status as codex_status
+        settings = settings_store.load_settings()
+        backend_by_id = {c["id"]: c.get("backend") for c in settings["companions"]}
         any_running = False
         for cid, card in self._sub_cards.items():
+            get_status = codex_status if backend_by_id.get(cid) == "codex_agent" else claude_status
             status = get_status(cid)
             card.set_status(status)
             any_running = any_running or status == "running"
@@ -482,14 +492,24 @@ class _AddSubAgentDialog(QDialog):
         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         lay.addWidget(title)
 
-        note_text = "Runs on the Claude Agent SDK. The lead companion can delegate tasks to it by name via delegate_to_agent."
+        note_text = "The lead companion can delegate tasks to it by name via delegate_to_agent."
         if self._companion:
-            note_text += " Saving resets its conversation — it starts fresh under the new identity next time it's given a task."
+            note_text += " Saving resets its conversation — it starts fresh under the new identity/backend next time it's given a task."
         note = QLabel(note_text)
         note.setFont(QFont("Segoe UI", 8))
         note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
+
+        self._labeled(lay, "Backend — which CLI this sub-agent runs on")
+        self._backend = QComboBox()
+        self._backend.addItem("Claude Code", userData="claude_agent")
+        self._backend.addItem("Codex", userData="codex_agent")
+        self._backend.setFont(QFont("Segoe UI", 9))
+        self._backend.setStyleSheet(
+            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
+        )
+        lay.addWidget(self._backend)
 
         self._labeled(lay, "Name")
         self._name = QLineEdit()
@@ -514,6 +534,9 @@ class _AddSubAgentDialog(QDialog):
             self._name.setText(self._companion.get("name", ""))
             self._specialty.setText(self._companion.get("specialty", ""))
             self._prompt.setPlainText(self._companion.get("system_prompt", ""))
+            idx = self._backend.findData(self._companion.get("backend", "claude_agent"))
+            if idx >= 0:
+                self._backend.setCurrentIndex(idx)
 
         self._status_lbl = QLabel("")
         self._status_lbl.setFont(QFont("Segoe UI", 8))
@@ -539,6 +562,7 @@ class _AddSubAgentDialog(QDialog):
             self._status_lbl.setText("Name and system prompt are both required.")
             return
 
+        backend = self._backend.currentData()
         settings = settings_store.load_settings()
         if self._companion:
             for c in settings["companions"]:
@@ -546,12 +570,13 @@ class _AddSubAgentDialog(QDialog):
                     c["name"] = name
                     c["specialty"] = specialty
                     c["system_prompt"] = prompt
+                    c["backend"] = backend
                     break
         else:
             settings["companions"].append({
                 "id": settings_store.new_id(),
                 "name": name,
-                "backend": "claude_agent",
+                "backend": backend,
                 "model": "",
                 "system_prompt": prompt,
                 "specialty": specialty,

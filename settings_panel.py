@@ -76,6 +76,7 @@ class SettingsPanel(QWidget):
         col.addWidget(self._build_companions_section())
         col.addWidget(self._build_trader_section())
         col.addWidget(self._build_claude_section())
+        col.addWidget(self._build_codex_section())
         col.addWidget(self._build_remote_dashboard_section())
         col.addWidget(self._build_api_keys_section())
         col.addWidget(self._build_mcp_section())
@@ -227,10 +228,12 @@ class SettingsPanel(QWidget):
         lay.addWidget(backend_lbl)
         self._new_companion_backend = QComboBox()
         # display text -> backend id. Voice uses the live Gemini session (voice
-        # field below applies); Text uses its own turn-based Claude conversation
-        # (typed input only — see main.py::_on_text_command) and ignores voice.
+        # field below applies); the two Text options each use their own
+        # turn-based CLI conversation (typed input only — see
+        # main.py::_on_text_command/_agent_send_fn) and ignore voice.
         self._new_companion_backend.addItem("Voice (real-time)", userData="gemini_live")
         self._new_companion_backend.addItem("Text (Claude-powered)", userData="claude_agent")
+        self._new_companion_backend.addItem("Text (Codex-powered)", userData="codex_agent")
         self._new_companion_backend.setFont(QFont("Segoe UI", 9))
         self._new_companion_backend.setStyleSheet(
             f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
@@ -327,7 +330,9 @@ class SettingsPanel(QWidget):
             dot.setStyleSheet(f"color: {hue}; background: transparent;")
             dot.setFixedWidth(14)
             rlay.addWidget(dot)
-            backend_label = {"gemini_live": "Voice", "claude_agent": "Text (Claude)"}.get(comp.get("backend"), comp.get("backend", "?"))
+            backend_label = {
+                "gemini_live": "Voice", "claude_agent": "Text (Claude)", "codex_agent": "Text (Codex)",
+            }.get(comp.get("backend"), comp.get("backend", "?"))
             lbl = QLabel(("★ " if is_active else "") + f"{comp['name']}  —  {backend_label}")
             lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold if is_active else QFont.Weight.Normal))
             lbl.setStyleSheet(f"color: {C.PRI if is_active else C.TEXT}; background: transparent;")
@@ -387,8 +392,12 @@ class SettingsPanel(QWidget):
         self.settings["companions"] = [c for c in self.settings["companions"] if c["id"] != companion_id]
         if self.settings.get("active_companion_id") == companion_id:
             self.settings["active_companion_id"] = ""
-        from actions.claude_companion import forget_session
-        forget_session(companion_id)
+        # Harmless no-op in whichever module the companion's backend never
+        # actually used — both just pop a dict key that may not be there.
+        from actions.claude_companion import forget_session as forget_claude_session
+        from actions.codex_companion import forget_session as forget_codex_session
+        forget_claude_session(companion_id)
+        forget_codex_session(companion_id)
         self._refresh_companions_list()
         self._persist("Companion removed.")
 
@@ -432,6 +441,76 @@ class SettingsPanel(QWidget):
 
         lay.addWidget(self._make_button("SAVE", self._on_save_claude))
         return wrap
+
+    # ---------- Codex delegation ----------
+
+    def _build_codex_section(self) -> QWidget:
+        C = self._C
+        wrap, lay = self._section("CODEX DELEGATION")
+
+        note = QLabel(
+            "Same idea as Claude Code delegation above, but for a companion set to "
+            "\"Text (Codex-powered)\" — hands that companion's conversation off to a "
+            "local OpenAI Codex CLI session instead. Off by default."
+        )
+        note.setFont(QFont("Segoe UI", 8))
+        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
+        xa = self.settings["codex_agent"]
+        self._codex_enabled = QCheckBox("Enable Codex delegation")
+        self._codex_enabled.setFont(QFont("Segoe UI", 9))
+        self._codex_enabled.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        self._codex_enabled.setChecked(bool(xa.get("enabled")))
+        lay.addWidget(self._codex_enabled)
+
+        self._codex_cli = self._labeled_input(lay, "Codex CLI path", r"C:\Users\you\AppData\Local\Programs\codex\codex.exe")
+        self._codex_cli.setText(xa.get("cliPath", ""))
+        browse_cli = self._make_button("BROWSE…", self._on_browse_codex_cli)
+        lay.addWidget(browse_cli)
+
+        self._codex_vault = self._labeled_input(lay, "Working directory (vault/project root)")
+        self._codex_vault.setText(xa.get("vaultDir", ""))
+        browse_vault = self._make_button("BROWSE…", lambda: self._browse_dir(self._codex_vault))
+        lay.addWidget(browse_vault)
+
+        lay.addWidget(self._make_button("SAVE", self._on_save_codex))
+        return wrap
+
+    def _on_browse_codex_cli(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Codex CLI", "", "Executables (*.exe);;All files (*)")
+        if path:
+            self._codex_cli.setText(path)
+
+    def _on_save_codex(self):
+        cli = self._codex_cli.text().strip()
+        enabled = self._codex_enabled.isChecked()
+        if enabled and not cli:
+            self._status_sig.emit("Set a Codex CLI path before enabling delegation.", True)
+            return
+        # Same class of problem as Claude's npm wrapper (see _on_save_claude)
+        # — subprocess.run() without a shell can't exec a .cmd/.ps1/.bat on
+        # Windows. Codex's own npm package bundles a real platform-native
+        # binary as an optional dependency rather than a JS shim the way
+        # Claude Code's does, so this is less likely to bite here — but the
+        # failure mode is identical if it ever does, so still worth an
+        # immediate, specific message instead of a cryptic one at delegation
+        # time.
+        if cli and cli.lower().endswith((".cmd", ".ps1", ".bat")):
+            self._status_sig.emit(
+                "That looks like a wrapper script, not a native executable — Codex CLI "
+                "ships a native Windows build (the official standalone installer, or a "
+                "GitHub release codex-x86_64-pc-windows-msvc.exe renamed to codex.exe). "
+                "Point this at that native codex.exe instead.",
+                True,
+            )
+            return
+        self.settings["codex_agent"] = {
+            "enabled": enabled, "cliPath": cli,
+            "vaultDir": self._codex_vault.text().strip(),
+        }
+        self._persist("Codex delegation settings saved.")
 
     # ---------- Remote Dashboard ----------
 

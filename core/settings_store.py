@@ -38,6 +38,10 @@ DEFAULT_SETTINGS = {
                             # needs that isn't one of the fixed fields above.
     "skills": [],        # [{id, name, content, enabled}]
     "claude_agent": {"enabled": False, "cliPath": "", "vaultDir": "", "extraDir": ""},
+    "codex_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},  # OpenAI Codex CLI —
+                    # same shape as claude_agent minus extraDir (no confirmed CLI-level
+                    # equivalent to add_dirs; codex's --sandbox mode governs write access
+                    # to the --cd'd workspace instead). See actions/codex_companion.py.
     "trader": {"enabled": False},  # optional crypto trading panel add-on, off by default
     "live_model": "",   # Gemini Live model override for the default "Omni" identity
                         # (a companion's own "model" field still wins over this — see
@@ -48,7 +52,9 @@ DEFAULT_SETTINGS = {
                              # to the same port, so running both at once conflicts.
     "companions": [],    # [{id, name, backend, model, system_prompt, avatar,
                          #   voice, memory_namespace, mcp_server_ids, enabled, specialty}]
-                         # backend: "gemini_live" (realtime voice) | "claude_agent" (turn-based text/tools).
+                         # backend: "gemini_live" (realtime voice) | "claude_agent" |
+                         # "codex_agent" (both turn-based text/tools, different CLI —
+                         # main.py's _AGENT_BACKENDS/_agent_send_fn() dispatch on this).
                          # system_prompt only needs to define the persona/identity — the
                          # shared tool-routing/safety rules (core/shared_rules.txt) are
                          # always appended automatically by main.py::_build_config().
