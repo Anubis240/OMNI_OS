@@ -1,5 +1,7 @@
 import json
+import os
 import random
+import ssl
 import sys
 import tempfile
 from datetime import datetime
@@ -38,7 +40,50 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
-def _check_image_safety(image_bytes: bytes, mime_type: str) -> tuple[bool, str]:
+# main.py already solves this exact problem for its own Gemini Live
+# connection (see _write_merged_ca_bundle() there, same logic verbatim) —
+# on some Windows machines, certifi's bundled root list alone isn't enough
+# to verify Google's TLS chain (a corporate/personal security product
+# injecting its own root CA into Windows' store, not into certifi's static
+# list, is the common cause), so httpx/ssl reject the connection outright.
+# Confirmed empirically: this tool's new output-moderation check (added to
+# fix a real content-safety gap) was the first code in this file to ever
+# call Gemini directly rather than the unauthenticated pollinations.ai
+# endpoint — on an affected machine that meant EVERY moderation call failed
+# closed with a raw SSL error, before any image content was even
+# evaluated, which is exactly why testing saw 100% blocking with zero
+# correlation to actual content. main.py's own fix sets this up
+# process-wide (os.environ["SSL_CERT_FILE"]) before this module ever runs,
+# so in principle it's already inherited — but that's exactly the
+# assumption that broke down for real, so this module now guarantees it
+# for its own Gemini calls independently rather than relying on it.
+def _ensure_ca_bundle() -> None:
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+        parts = [Path(certifi.where()).read_bytes()]
+        if sys.platform == "win32":
+            try:
+                seen = set()
+                for der, _encoding, _trust in ssl.enum_certificates("ROOT"):
+                    if der not in seen:
+                        seen.add(der)
+                        parts.append(ssl.DER_cert_to_PEM_cert(der).encode("ascii"))
+            except Exception:
+                pass
+        bundle_path = _get_base_dir() / "config" / "ca_bundle.pem"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_bytes(b"\n".join(parts))
+        os.environ["SSL_CERT_FILE"] = str(bundle_path)
+    except Exception:
+        pass  # best-effort — _check_image_safety() still fails closed if this doesn't help
+
+
+_ensure_ca_bundle()
+
+
+def _check_image_safety(image_bytes: bytes, mime_type: str) -> tuple[str, str]:
     """Output-side moderation — the real fix, not just the prompt suffix
     above. This tool previously had NO check at all on the image it was
     about to show/deliver to the user; the only "moderation" was whichever
@@ -46,15 +91,27 @@ def _check_image_safety(image_bytes: bytes, mime_type: str) -> tuple[bool, str]:
     calling this tool, which a stylistic prompt can slip past even when the
     prompt itself is entirely innocuous (confirmed in testing). Runs a
     second, independent Gemini call purely to classify the actual pixels
-    that came back. Fails CLOSED: if the check itself can't complete for
-    any reason, the image is treated as unsafe rather than delivered
-    unverified — the one place in this app where "assume the worst on
-    error" is the correct default, not paranoia."""
+    that came back.
+
+    Returns (status, detail): status is "safe", "unsafe", or "error" — kept
+    distinct so the caller can tell a genuine content flag apart from the
+    check itself failing. A real point of confusion in testing: a TLS
+    trust-store issue on the test machine made this call fail closed on
+    every single attempt regardless of content, and with no way to
+    distinguish "correctly blocked" from "broken and blocking everything",
+    it read as the moderation feature being fundamentally non-functional
+    rather than a fixable technical fault. Both "unsafe" and "error" still
+    fail CLOSED (the image is never delivered either way) — only the
+    user-facing message differs, so this failure mode is never invisible
+    or ambiguous again. 60s request timeout: an earlier version had none,
+    and a stuck/black-holed connection (e.g. an intercepting security
+    product on the network path) left a request pending indefinitely with
+    no verdict ever returned, rather than failing fast."""
     try:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=_get_api_key())
+        client = genai.Client(api_key=_get_api_key(), http_options={"timeout": 60_000})
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
@@ -64,9 +121,11 @@ def _check_image_safety(image_bytes: bytes, mime_type: str) -> tuple[bool, str]:
             ],
         )
         answer = (resp.text or "").strip().upper()
-        return (not answer.startswith("Y")), answer
+        if not answer:
+            return "error", "empty response from moderation check"
+        return ("unsafe" if answer.startswith("Y") else "safe"), answer
     except Exception as e:
-        return False, f"moderation check failed: {e}"
+        return "error", str(e)
 
 
 def generate_image(
@@ -107,13 +166,23 @@ def generate_image(
         _log(msg, player)
         return msg
 
-    is_safe, _reason = _check_image_safety(image_bytes, mime_type)
-    if not is_safe:
-        print(f"[ImageGen] blocked by output moderation: {_reason}")
-        msg = (
-            "Sir, that image didn't pass a safety check, so I'm not showing it — "
-            "try rephrasing the request."
-        )
+    status, detail = _check_image_safety(image_bytes, mime_type)
+    if status != "safe":
+        print(f"[ImageGen] not delivered ({status}): {detail}")
+        if status == "unsafe":
+            msg = (
+                "Sir, that image didn't pass a safety check, so I'm not showing it — "
+                "try rephrasing the request."
+            )
+        else:
+            # "error", not "unsafe" — the check itself failed (network/API
+            # issue), not a genuine content flag. Distinct wording so this
+            # never reads as "content was rejected" when it wasn't actually
+            # evaluated at all.
+            msg = (
+                "Sir, I couldn't verify that image was safe to show — a technical "
+                "issue with the safety check itself, not a content flag. Please try again."
+            )
         _log(msg, player)
         return msg
 
