@@ -43,6 +43,17 @@ except ImportError:
 # beta-report — see settings_panel.py's Remote Dashboard section).
 _DEFAULT_PORT = 8000
 
+# /ws heartbeat — a client that silently goes away (network drop, screen
+# standby killing the connection without a clean close frame) doesn't
+# raise WebSocketDisconnect on its own; TCP can sit "half-open"
+# indefinitely with nothing observable at this layer. Without an active
+# check, self._clients (and therefore the desktop's "CONNECTED" status)
+# never learns the client is gone. Ping every PING_INTERVAL; if nothing at
+# all (a pong, or any other message) has arrived within PONG_TIMEOUT,
+# treat the connection as dead and close it ourselves.
+_WS_PING_INTERVAL = 15
+_WS_PONG_TIMEOUT = 35
+
 
 def _base_dir() -> Path:
     # Matches main.py's get_base_dir()/ui.py's _base_dir() exactly — must
@@ -399,6 +410,7 @@ _APP_HTML = """<!DOCTYPE html>
   // visible sign anything had failed (the phone just went quiet forever).
   // Retry with backoff instead of giving up after the first drop.
   var ws = null, wsRetryMs = 1000;
+  var wsConnectedAt = 0;
   function connectWs() {
     ws = new WebSocket(proto + '://' + location.host + '/ws?token=' + encodeURIComponent(token));
     ws.onopen = function() {
@@ -411,16 +423,29 @@ _APP_HTML = """<!DOCTYPE html>
       // was already shown — confirmed in testing as 5+ stacked copies of
       // one exchange. Clear first so the replay rebuilds cleanly instead.
       logEl.innerHTML = '';
-      statusEl.textContent = 'live'; statusEl.className = 'live'; wsRetryMs = 1000;
+      statusEl.textContent = 'live'; statusEl.className = 'live';
+      wsConnectedAt = Date.now();
     };
     ws.onclose = function() {
       statusEl.textContent = 'reconnecting…'; statusEl.className = '';
+      // Only treat this as a healthy connection (reset backoff to the
+      // floor) if it actually held for a while first. Resetting on every
+      // successful open — even a fleeting one — meant a flapping network
+      // could keep reconnecting at the 1s floor forever, never backing
+      // off: confirmed in testing as a burst of 6 identical reconnect log
+      // lines, twice, bracketing a duplicated-message render on the
+      // client. A connection that dies within 5s doesn't get treated as
+      // "recovered".
+      var wasStable = wsConnectedAt && (Date.now() - wsConnectedAt) >= 5000;
+      wsRetryMs = wasStable ? 1000 : Math.min(wsRetryMs * 2, 15000);
       setTimeout(connectWs, wsRetryMs);
-      wsRetryMs = Math.min(wsRetryMs * 2, 15000);
     };
     ws.onerror = function() { ws.close(); };
     ws.onmessage = function(ev) {
       var msg = JSON.parse(ev.data);
+      // Server-initiated liveness check (see _WS_PING_INTERVAL/_WS_PONG_TIMEOUT
+      // in dashboard/server.py) — echo it straight back, nothing to render.
+      if (msg.type === 'ping') { try { ws.send(JSON.stringify({type: 'pong'})); } catch (_) {} return; }
       if (msg.type === 'you') addLine('you', 'You: ' + msg.text);
       else if (msg.type === 'seraph') addLine('seraph', 'Omni: ' + msg.text);
       else if (msg.type === 'sys') addLine('sys', msg.text);
@@ -862,6 +887,7 @@ class DashboardServer:
         self._pending_keys: dict[str, float] = {}
         self._command_queue = asyncio.Queue()
         self._connect_callback = None
+        self._disconnect_callback = None
         self._trader_state_callback = None
         self._trader_action_callback = None
         # Trade-executing actions (buy/sell/take-profit/unwrap, or a typed
@@ -888,6 +914,17 @@ class DashboardServer:
 
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
+
+    def set_disconnect_callback(self, fn) -> None:
+        """fn() -> None, called when the last connected /ws client goes
+        away — either a clean close, or the heartbeat below declaring one
+        dead. Without this, the desktop's "CONNECTED" indicator was a
+        one-way ratchet: nothing ever reversed it once set, so a tester's
+        phone silently dropping (browser navigated away after a brief WiFi
+        blip during screen standby) left the desktop showing a connected
+        session that no longer existed — the user could keep talking into
+        what looked like a live connection with nothing on the other end."""
+        self._disconnect_callback = fn
 
     def set_error_callback(self, fn) -> None:
         """fn(message: str) -> None, called if the dashboard fails to start
@@ -1151,17 +1188,62 @@ class DashboardServer:
                     await websocket.send_json(entry)
                 except Exception:
                     break
+
+            last_seen = time.time()
+
+            # Idempotent — safe to call from both the heartbeat's dead-path
+            # and the main loop's finally below, since it's genuinely
+            # uncertain (without a live test) whether websocket.close()
+            # called from the heartbeat task actually unblocks a
+            # concurrently-pending receive_json() with a clean
+            # WebSocketDisconnect on every ASGI server, or leaves it
+            # hanging until some other trigger. Only firing the callback
+            # when the client was actually still present avoids a double
+            # "disconnected" log line if both paths do end up running.
+            def _cleanup():
+                was_present = websocket in self._clients
+                self._clients.discard(websocket)
+                if was_present and not self._clients and self._disconnect_callback:
+                    try:
+                        self._disconnect_callback()
+                    except Exception:
+                        pass
+
+            async def _heartbeat():
+                nonlocal last_seen
+                while True:
+                    await asyncio.sleep(_WS_PING_INTERVAL)
+                    if time.time() - last_seen > _WS_PONG_TIMEOUT:
+                        _cleanup()
+                        try:
+                            await websocket.close(code=4000)
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        await websocket.send_json({"type": "ping"})
+                    except Exception:
+                        _cleanup()
+                        return
+
+            hb_task = asyncio.create_task(_heartbeat())
             try:
                 while True:
                     data = await websocket.receive_json()
+                    last_seen = time.time()
+                    if data.get("type") == "pong":
+                        continue
                     if data.get("type") == "command":
                         t = (data.get("text") or "").strip()
                         if t:
                             await self._command_queue.put(t)
             except WebSocketDisconnect:
                 pass
+            except Exception:
+                pass  # e.g. a RuntimeError if the heartbeat's close() above raced this receive
             finally:
-                self._clients.discard(websocket)
+                hb_task.cancel()
+                _cleanup()
 
         # ── Two-way voice ────────────────────────────────────────────────
         # One persistent binary socket per phone: client sends 16kHz mono

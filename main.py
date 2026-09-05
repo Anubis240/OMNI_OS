@@ -825,6 +825,10 @@ class JarvisLive:
         self.ui.write_log("SYS: Phone connected via Remote Dashboard.")
         self.ui.notify_phone_connected()
 
+    def _on_phone_disconnected(self) -> None:
+        self.ui.write_log("SYS: Phone disconnected from Remote Dashboard.")
+        self.ui.notify_phone_disconnected()
+
     def _share_file(self, path: str) -> str:
         if not self._dashboard:
             return (
@@ -1441,6 +1445,7 @@ class JarvisLive:
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
+        in_buf_is_phone = False
 
         try:
             while True:
@@ -1468,6 +1473,15 @@ class JarvisLive:
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                if not in_buf:
+                                    # Capture at the START of this turn's
+                                    # transcription, not at turn_complete —
+                                    # _phone_active can already have reset
+                                    # to False (no phone audio for 1s) by
+                                    # the time turn_complete fires, even
+                                    # though the turn itself came from the
+                                    # phone.
+                                    in_buf_is_phone = self._phone_active
                                 in_buf.append(txt)
 
                         if sc.turn_complete:
@@ -1476,11 +1490,24 @@ class JarvisLive:
 
                             full_in = " ".join(in_buf).strip()
                             if full_in:
-                                self.ui.write_log(f"You: {full_in}")
-                                self._session_log.append(f"You: {full_in}")
+                                # A phone-relayed voice turn shares the
+                                # exact same input_transcription event as
+                                # the PC's own mic — nothing upstream
+                                # distinguishes them, so this always
+                                # attributed voice input to "You:"
+                                # (implicitly "the PC mic"), even when it
+                                # was genuinely the phone. Confirmed in
+                                # testing: a remote voice turn was
+                                # mislabeled "You:" in the desktop log
+                                # while every other phone-originated (but
+                                # typed) line correctly showed "[Phone]:".
+                                who = "[Phone]" if in_buf_is_phone else "You"
+                                self.ui.write_log(f"{who}: {full_in}")
+                                self._session_log.append(f"{who}: {full_in}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({"type": "you", "text": full_in}))
                             in_buf = []
+                            in_buf_is_phone = False
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
@@ -1580,6 +1607,7 @@ class JarvisLive:
             from dashboard.server import DashboardServer
             self._dashboard = DashboardServer()
             self._dashboard.set_connect_callback(self._on_phone_connected)
+            self._dashboard.set_disconnect_callback(self._on_phone_disconnected)
             self._dashboard.set_trader_state_callback(self.ui.get_trader_state)
             self._dashboard.set_trader_action_callback(self.ui.run_trader_action)
             self._dashboard.set_error_callback(

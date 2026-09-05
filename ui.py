@@ -1276,6 +1276,34 @@ class RemoteKeyOverlay(QWidget):
         self._timer_lbl.setText("Phone connected — Omni ready")
         self._timer_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
 
+    def mark_disconnected(self) -> None:
+        """Call from any thread when the connected phone's socket actually
+        drops (heartbeat timeout, or a clean close with no phone left
+        connected) — reverses mark_connected() so this panel stops
+        silently claiming a session that no longer exists. A tester found
+        the badge could stay green long after the phone's browser had
+        navigated away entirely (a brief WiFi drop during screen standby
+        redirected it off the page) — with nothing to reverse it, this
+        looked like a still-live connection when nothing was listening on
+        the other end, and is a leading suspect for several "sent it, got
+        no response" reports."""
+        self._key_lbl.setText("DISCONNECTED")
+        self._key_lbl.setStyleSheet(f"""
+            color: {C.RED};
+            background: rgba(239,71,111,0.08);
+            border: 2px solid rgba(239,71,111,0.4);
+            border-radius: 2px;
+            padding: 6px 4px;
+            letter-spacing: 4px;
+        """)
+        self._qr_label.setText("✕")
+        self._qr_label.setFont(QFont("Segoe UI", 54, QFont.Weight.Bold))
+        self._qr_label.setStyleSheet(
+            "color: #ef476f; background: #1a0008; border-radius: 10px;"
+        )
+        self._timer_lbl.setText("Phone disconnected — press Remote Control for a new key")
+        self._timer_lbl.setStyleSheet(f"color: {C.RED}; background: transparent;")
+
     def _refresh_key(self):
         if self._on_new_key:
             result = self._on_new_key()
@@ -2172,6 +2200,10 @@ class MainWindow(QMainWindow):
         if self._remote_overlay and self._remote_overlay.isVisible():
             self._remote_overlay.mark_connected()
 
+    def notify_phone_disconnected(self) -> None:
+        if self._remote_overlay and self._remote_overlay.isVisible():
+            self._remote_overlay.mark_disconnected()
+
     def _open_remote(self):
         if not self.on_remote_clicked:
             self._log.append_log("SYS: Dashboard not running — remote unavailable.")
@@ -2563,6 +2595,9 @@ class JarvisUI:
 
     def notify_phone_connected(self) -> None:
         self._win.notify_phone_connected()
+
+    def notify_phone_disconnected(self) -> None:
+        self._win.notify_phone_disconnected()
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
