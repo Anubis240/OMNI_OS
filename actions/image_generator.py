@@ -114,6 +114,77 @@ _ensure_ca_bundle()
 
 _SAFETY_FINISH_REASONS = {"SAFETY", "IMAGE_SAFETY", "FinishReason.SAFETY", "FinishReason.IMAGE_SAFETY"}
 
+# Local, offline safety net — added 2026-09-06 after research confirmed
+# every generation-side option (Gemini's own image models, OpenAI's GPT
+# Image, the DALL-E option the original Open-Jarvis fork this project
+# started from once had — deprecated/removed from OpenAI's API entirely as
+# of May 2026 anyway) gates its real safety filtering behind billing, so it
+# only protects users who pay. This runs the same way for every user
+# regardless of which backend answered or whether they have billing at
+# all: nudenet ships its own ONNX model inside the pip package itself (no
+# download, confirmed by building and running an actual frozen executable
+# before this shipped), so it needs no API key, no network call, and can't
+# ever be "unavailable" the way an external service can.
+_NSFW_BLOCK_CLASSES = {
+    "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "FEMALE_BREAST_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+    "ANUS_EXPOSED",
+}
+# Deliberately NOT blocking on FEET_EXPOSED/BELLY_EXPOSED/ARMPITS_EXPOSED —
+# the Sep 6 retest's real failures were full nudity, not bare feet or a
+# midriff; blocking on those would just make ordinary portraits/swimwear
+# feel broken for no safety benefit.
+_NSFW_CONFIDENCE_THRESHOLD = 0.6  # calibrated against two real generations
+# from this app's own history: a benign photo scored 0.325 on an unrelated,
+# non-blocked class (false-positive-prone but harmless); a confirmed
+# explicit generation scored 0.626-0.874 on classes in the block set above.
+# 0.6 sits cleanly between the two with real margin on both sides.
+_LOCAL_SAFETY_MAX_ATTEMPTS = 3  # applies only to the pollinations.ai retry
+# loop below — each attempt already gets a fresh random seed (see
+# _generate_via_pollinations), and the Sep 6 retest showed the same prompt
+# doesn't reliably repeat the same result (4/6 unsafe, not 6/6), so a few
+# extra rolls meaningfully raise the odds of a safe image instead of just
+# refusing outright.
+
+_nsfw_detector = None  # lazy singleton — loading the model has a real, if
+# small, cost, and most sessions never generate an image at all.
+
+
+def _get_nsfw_detector():
+    global _nsfw_detector
+    if _nsfw_detector is None:
+        from nudenet import NudeDetector
+        _nsfw_detector = NudeDetector()
+    return _nsfw_detector
+
+
+def _local_safety_check(image_bytes: bytes) -> tuple[bool, list[str]]:
+    """Returns (is_safe, flagged_labels).
+
+    Fails OPEN, not closed — the opposite of this file's network-based
+    checks. A broken *local* classifier (missing model file, a bad
+    onnxruntime build, a packaging gap) is a structural bug that would fail
+    identically on every single call forever, not a transient hiccup worth
+    being cautious about — blocking every image forever due to a packaging
+    bug is a worse outcome than shipping with one fewer safety layer until
+    it's fixed. The failure is still logged loudly so it surfaces in the
+    next bug report rather than being silently swallowed.
+    """
+    try:
+        detector = _get_nsfw_detector()
+        detections = detector.detect(image_bytes)
+    except Exception as e:
+        print(f"[ImageGen] Local safety check failed to run ({e}) — allowing this image through unfiltered by this layer.")
+        return True, []
+
+    flagged = [
+        d["class"] for d in detections
+        if d.get("class") in _NSFW_BLOCK_CLASSES and d.get("score", 0) >= _NSFW_CONFIDENCE_THRESHOLD
+    ]
+    return not flagged, flagged
+
 
 def _generate_via_gemini(prompt: str) -> tuple[str, bytes | None, str | None]:
     """Returns (status, image_bytes, mime_type_or_message):
@@ -202,7 +273,8 @@ def generate_image(
         return msg
 
     mime_type = "image/png"
-    if status == "ok":
+    used_gemini = status == "ok"
+    if used_gemini:
         mime_type = detail  # detail carries the mime type on the "ok" path
     else:
         print(f"[ImageGen] Gemini unavailable ({detail}) — falling back to pollinations.ai")
@@ -211,6 +283,33 @@ def generate_image(
             msg = f"Sir, {err}"
             _log(msg, player)
             return msg
+
+    is_safe, flagged = _local_safety_check(image_bytes)
+    if not is_safe and not used_gemini:
+        # pollinations has no safety filtering of its own — worth a few
+        # fresh rolls (new random seed each time) before giving up.
+        for attempt in range(2, _LOCAL_SAFETY_MAX_ATTEMPTS + 1):
+            print(f"[ImageGen] Local safety check flagged {flagged} — retrying pollinations.ai (attempt {attempt}/{_LOCAL_SAFETY_MAX_ATTEMPTS})")
+            image_bytes, mime_type, err = _generate_via_pollinations(prompt)
+            if err:
+                msg = f"Sir, {err}"
+                _log(msg, player)
+                return msg
+            is_safe, flagged = _local_safety_check(image_bytes)
+            if is_safe:
+                break
+    # Note: a Gemini "ok" image flagged here is NOT retried — that would
+    # silently re-bill the user's Gemini quota for what should be a rare,
+    # defense-in-depth-only case (Gemini's own filter already passed it).
+
+    if not is_safe:
+        print(f"[ImageGen] Local safety check blocked this image: {flagged}")
+        msg = (
+            "Sir, the image that came back didn't pass a local safety check, "
+            "so I'm not showing it — try rephrasing the request."
+        )
+        _log(msg, player)
+        return msg
 
     ext = "png" if "png" in mime_type else "jpg"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

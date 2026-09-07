@@ -37,3 +37,12 @@ claude-agent-sdk
 google-auth-oauthlib
 google-api-python-client
 msal
+# Local, offline NSFW image classifier for actions/image_generator.py's
+# post-generation safety gate — ships its own ONNX model (no download, no
+# API key, no billing, no network call). Pulls in opencv-python-headless
+# as a transitive dep; confirmed (2026-09-07) that installing it alongside
+# the opencv-python already above does NOT conflict as long as pip resolves
+# both to the same release version (it does, in one combined install) — if
+# a future dependency bump ever skews them apart, that's the first thing to
+# check if cv2 behaves oddly.
+nudenet>=3.4.2

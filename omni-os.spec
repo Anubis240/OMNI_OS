@@ -19,10 +19,12 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_all
 
 block_cipher = None
 PROJECT_DIR = Path(SPECPATH)
+
+binaries = []
 
 datas = [
     (str(PROJECT_DIR / "core" / "prompt.txt"), "core"),
@@ -44,7 +46,21 @@ datas = [
 # the packaged trader panel throwing FileNotFoundError.
 datas += collect_data_files("eth_account")
 
-hiddenimports = [
+# actions/image_generator.py's local NSFW safety gate (nudenet + onnxruntime).
+# onnxruntime has a well-documented frozen-build failure mode ("DLL load
+# failed" importing onnxruntime_pybind11_state) if its native DLLs aren't
+# collected explicitly — collect_all is the community-standard fix (same
+# effect as `pyinstaller --collect-all onnxruntime`). nudenet ships its own
+# 320n.onnx model file as package data, same non-code-data blind spot as
+# eth_account's wordlists above — collect_data_files pulls it in the same
+# way. Both collected here were verified by actually building and running a
+# frozen test executable (2026-09-07), not assumed from documentation alone.
+onnxruntime_datas, onnxruntime_binaries, onnxruntime_hiddenimports = collect_all("onnxruntime")
+datas += onnxruntime_datas
+binaries += onnxruntime_binaries
+datas += collect_data_files("nudenet")
+
+hiddenimports = onnxruntime_hiddenimports + [
     # plyer dispatches to platform backends via importlib at runtime —
     # PyInstaller's static analysis can't see those, so they need to be
     # named explicitly or the compiled app silently no-ops on first use.
@@ -64,7 +80,7 @@ hiddenimports = [
 a = Analysis(
     ["main.py"],
     pathex=[str(PROJECT_DIR)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
