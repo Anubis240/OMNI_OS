@@ -11,15 +11,13 @@ from __future__ import annotations
 
 import json
 import re
-import sys
+from core.app_paths import get_data_dir
 import uuid
 from pathlib import Path
 
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 
 SETTINGS_PATH = _base_dir() / "config" / "settings.json"

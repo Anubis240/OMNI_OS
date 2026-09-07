@@ -41,8 +41,8 @@ software, not a hosted subscription; your usage bills directly to your own accou
 
 | Requirement | Details |
 |---|---|
-| OS | Windows 10/11 (primary target; installer is Windows-only) |
-| Python | 3.11 or 3.12 |
+| OS | Native release targets: Windows 10/11 x64; macOS 15+ Intel or Apple Silicon; Ubuntu 22.04+ desktop-compatible Linux x64 |
+| Python | Not needed for packaged releases; 3.11 or 3.12 for source development |
 | Microphone | Required for voice interaction |
 | API Key | Gemini API key (free tier available) |
 
@@ -88,11 +88,190 @@ python main.py
 
 On first launch, open the **Settings panel** and add your API key(s) (see above).
 
-> **Note:** To keep the repo lightweight, some OS-specific dependencies aren't pinned in `requirements.txt`. If you hit a `ModuleNotFoundError`, install the missing package for your platform.
+> **Source development:** most dependencies are not locked. Windows-only packages use
+> platform markers. Playwright is pinned to **1.62.0**, the version queried from the
+> isolated, previously smoke-tested Windows build environment; PyInstaller is fixed
+> at **6.16.0** in CI. Other native targets must pass their own CI, not inherit the
+> Windows result. Source development needs build dependencies; release users do not
+> install Python, pip packages, PortAudio, GTK, or Playwright browsers separately.
 
-### Windows Installer
+### Standalone downloads
 
-A packaged Windows installer is also available under `installer/output` (built with Inno Setup from `installer/installer.iss`), for users who don't want to run from source.
+Native builds include **Python, application libraries, native dependencies, NudeNet's
+model, and the default Chromium, Firefox and WebKit engines**. The installed Claude
+Agent SDK wheel's native CLI is explicitly included; a missing CLI fails the build.
+No developer CLI install is needed for the bundled SDK/API-key path. Custom Claude
+Code paths, Codex, Chrome/Edge channels, and external developer tools/integrations
+remain optional and are not startup prerequisites. You still supply service credentials
+and grant OS microphone/camera/screen-capture/accessibility permissions as appropriate.
+After all four native builds pass, download from this repository's **GitHub Releases**:
+
+- `Omni-OS-Setup-X.Y.Z.exe`: per-user installer, defaults to `%LOCALAPPDATA%\Programs\Omni-OS`.
+- `Omni-OS-Windows-x64-X.Y.Z.zip`: extract the **entire** archive to a writable directory,
+  then run `Omni-OS\Omni-OS.exe`. Do not run inside the ZIP or copy the EXE alone.
+- `Omni-OS-macOS-x64-X.Y.Z.zip` or `Omni-OS-macOS-arm64-X.Y.Z.zip`: choose your CPU,
+  extract with Archive Utility or `ditto -x -k archive.zip destination`, and move the
+  entire `Omni-OS.app` into Applications. These are native apps, not universal binaries.
+- `Omni-OS-Linux-x64-X.Y.Z.tar.gz`: `tar -xzf archive.tar.gz`, keep the whole `Omni-OS`
+  folder and run `./Omni-OS/Omni-OS`. No AppImage/FUSE is required.
+- `SHA256SUMS`: aggregate SHA-256 checksums for all five binaries (compare with
+  PowerShell `Get-FileHash -Algorithm SHA256 <file>`, macOS `shasum -a 256 <file>`, or
+  Linux `sha256sum <file>`).
+
+`installer/output` is a **local, gitignored build output**, not a committed installer.
+The bundle is PyInstaller **onedir**, not onefile: assets and native dependencies stay
+in the bundle. Windows settings/logs/certificates are persisted beside the executable;
+keep that folder writable. macOS uses `~/Library/Application Support/Omni-OS`; Linux
+uses `$XDG_DATA_HOME/Omni-OS` (default `~/.local/share/Omni-OS`). Source runs use the repo.
+Frozen resources are resolved separately from writable state, including macOS's
+Resources/Frameworks symlinks.
+
+There is **no paid code-signing certificate or Apple notarization** in this pipeline.
+Windows SmartScreen may warn. macOS is ad-hoc signed and verified with `codesign`,
+which is not a Developer ID signature or Gatekeeper approval. After verifying the
+download's origin/checksum, use macOS **System Settings → Privacy & Security → Open
+Anyway** if Gatekeeper blocks it. Do not disable OS security. Checksums are integrity
+checks, not certificates. Browser-heavy bundles are roughly 2 GB unpacked and need
+space for both download and extraction; each compressed release asset must be below
+2 GiB. Do not move just the EXE or files out of an `.app`.
+
+### CI and automatic releases
+
+`.github/workflows/ci.yml` runs syntax checks and stdlib unit tests on Windows/Python
+3.11 and 3.12, Ubuntu/Python 3.12, and macOS/Python 3.12; Ubuntu also runs actionlint.
+PRs and ordinary `main` pushes do **not** run the expensive builds. For a single-run
+release, use **Run workflow** on the intended commit's branch and set the optional
+`release_tag` input to e.g. `v1.10.0`. This builds version `1.10.0`, validates all
+targets, then creates the tag and publishes without paying for a second tag-triggered
+build. Leave the input empty on a branch for a **build-only** rehearsal. Tags and
+manual dispatch build all four targets in isolated Python 3.12 environments, after
+tests pass:
+
+| Runner | Native distribution |
+|---|---|
+| `windows-2022`, x64 | Portable ZIP and per-user Inno Setup 6 installer |
+| `ubuntu-22.04`, x64 | onedir tar.gz |
+| `macos-15-intel`, x64 | `.app` ZIP |
+| `macos-15`, arm64 | `.app` ZIP |
+
+macOS ZIP creation/extraction uses Apple's `ditto` to preserve symlinks and executable
+bits; Linux tar preserves permissions. Windows/macOS/Linux each build their own runtime,
+not cross-compiled copies. No application/API secrets are provided to builds. Branch
+dispatches without a release tag use `0.0.<run_number>`. All distribution and
+diagnostic artifacts expire after
+**one day**, are uploaded without redundant artifact compression, and remain private
+with the repository. This workflow does not change account spending limits.
+
+Only exact tags `vX.Y.Z` (nonnegative ASCII integers, no leading zeroes, suffixes or
+paths) can publish a Release, including the optional dispatch input. A manual run
+selected on an existing tag follows the same gates. The requested tag is ignored
+outside `workflow_dispatch`; malformed dispatch input fails before dependency installation.
+The release job requires **all four** matrix builds to succeed, downloads only artifacts
+matching `bundle-<run_id>-<target>` from the same run, and requires the exact four target
+directories. Each manifest must match target, numeric version, commit, run ID, exact
+asset names, size and SHA-256. Archives are checked for unsafe paths/links; all five
+assets must be nonempty and below 2 GiB. Only then is aggregate `SHA256SUMS` generated.
+Stable per-target artifact names and `overwrite: true` let only the owning job replace
+its artifact on a failed-job retry; no matrix aggregate output can lose target names.
+After validation and the existing release/draft check, an explicit release dispatch
+may create a missing tag at this run's `GITHUB_SHA`. Existing tags must peel to that
+same commit and are never moved or forced; missing tag-triggered refs are never
+recreated. Only an explicit HTTP 404 permits creation; other API/authentication
+errors and creation conflicts stop the run, without retrying writes. The created
+tag is re-read and its commit verified before drafting. Tag creation uses the
+release job's `GITHUB_TOKEN`, whose tag pushes do not trigger another workflow run.
+No tag or release is created by a failed build or artifact validation; a later
+failure may leave the immutable tag or draft for manual recovery.
+
+The release job uses `gh release create --verify-tag --generate-notes` to create a draft,
+re-downloads all six uploaded assets and verifies their hashes before publishing.
+It never rebuilds or overwrites an existing release/draft.
+If an upload fails, inspect the unpublished draft manually; reruns deliberately refuse
+to clobber it. Only that job has `contents: write`; other jobs have read-only access,
+and checkout does not persist credentials. Obsolete branch/PR CI is cancelled, tag
+runs are not interrupted by concurrency cancellation. Adding this workflow alone
+does not create a tag or publish anything.
+
+The executable smoke test runs **before normal startup side effects**: it verifies
+assets and imports (Qt/audio/GenAI/Uvicorn/Web3/ONNX/NudeNet), creates an offscreen Qt
+application, performs local NudeNet inference, and renders inline HTML offline in
+`about:blank` headlessly with
+each bundled browser in temporary profiles. It does not import `main`, start voice,
+create app configuration/keys/certificates, contact APIs, or require Internet.
+CI first archives, then extracts into a new temporary directory and runs **that final
+package**, with a fresh HOME and PATH limited to OS bins, without inherited browser,
+Python, venv, Homebrew or API-key environment. The frozen entry point restores bundled
+browser resolution. Both Windows ZIP and silently installed setup payload are smoked.
+All seven checks, a successful exit, and a JSON report **outside the whole bundle**
+(including the entire `.app`) are mandatory, with a five-minute process timeout.
+Models and browser executable paths must resolve within the bundle, never host caches.
+A privacy scan covers onedir, `_internal`, and all macOS content roots; it rejects
+persisted configuration, memory, wallets, logs and `.env` files while allowing library
+metadata/config schemas. No app-private configuration is an input to the spec whitelist.
+
+Linux installs `libportaudio2`, Qt's xcb helper and `playwright install --with-deps`
+**on the builder only**. A bounded `ldd` traversal of trusted local browser/helper,
+Qt and SDK binaries recursively collects non-baseline ELF libraries, retaining SONAMEs
+and rejecting missing/conflicting dependencies. Known GStreamer/GIO dlopen plugins
+are collected too. Merely collecting browsers as PyInstaller data does not collect
+their OS libraries. libc/loader and desktop GPU/audio driver ABIs remain OS-provided;
+libstdc++, GTK, NSS/NSPR, WebKit dependencies and embedded SwiftShader/GLES are not
+blanket-excluded.
+
+The final Linux tarball must also pass a **fresh Ubuntu 22.04 container** with no
+Python/pip/Node, venv, Playwright cache or builder filesystem. The test fixture installs
+only GL/EGL/GBM/Mesa/ALSA/udev desktop baseline libraries, Xvfb/xauth and standard fonts;
+it explicitly rejects installed GTK/NSS/NSPR/GStreamer/PortAudio/xcb-cursor packages.
+Network is allowed for fixture apt setup, then disabled for execution. An unprivileged
+process runs all seven smoke checks under Xvfb with **Qt xcb**, not just offscreen,
+to catch missing GUI plugins. Failure blocks Linux upload and the entire release.
+This targets **Ubuntu 22.04+ desktop-compatible x64**, not every distro or minimal server;
+there is no claim of zero OS dependencies. A scrubbed macOS runner is not a clean
+consumer machine, and ad-hoc signature verification is not native certification.
+
+This smoke verifies the bootloader and selected native dependencies/model/browser
+paths, **not the complete GUI, microphone hardware, API integrations, installer UI,
+or every dynamically imported feature**. The stdlib unit tests likewise do not prove
+end-to-end application behavior. Runtime dependencies in `requirements.txt` are not
+fully locked, so these are not bit-for-bit reproducible builds. The pin/closure design
+must be validated by actual native CI. Until those jobs run successfully, additional
+OS/architecture support is a **release target, not a verified runtime claim**. macOS
+13/14, ARM Linux/Windows, notarization and complete hardware/GUI coverage are not claimed.
+
+### Local Windows build (PowerShell)
+
+Use a clean checkout with no personal data. Install Python 3.12 x64 and Inno Setup 6
+(6.3 or newer), then run from the repository root. These commands do not publish:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+py -3.12 -m venv .venv-build
+if ($LASTEXITCODE -ne 0) { throw 'venv failed' }
+& .\.venv-build\Scripts\python.exe -m pip install -r requirements.txt 'PyInstaller==6.16.0'
+if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+$env:PLAYWRIGHT_BROWSERS_PATH = '0'
+& .\.venv-build\Scripts\python.exe -m playwright install chromium firefox webkit
+if ($LASTEXITCODE -ne 0) { throw 'Browser installation failed' }
+& .\.venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm omni-os.spec
+if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
+# Remove build env to exercise the installed user's default browser resolution.
+Remove-Item Env:PLAYWRIGHT_BROWSERS_PATH
+$report = Join-Path $env:TEMP 'omni-bundle-smoke.json'
+if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report -Force }
+$p = Start-Process -FilePath '.\dist\Omni-OS\Omni-OS.exe' -ArgumentList @('--smoke-test', '--smoke-report', "`"$report`"") -PassThru
+if (-not $p.WaitForExit(300000)) { taskkill.exe /PID $p.Id /T /F; throw 'Smoke timed out' }
+$p.WaitForExit()
+$result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+if ($p.ExitCode -ne 0 -or $result.ok -ne $true) { throw 'Smoke failed' }
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.10.0 installer\installer.iss
+if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
+```
+
+Stop on any failed command. Output: `dist\Omni-OS\` and
+`installer\output\Omni-OS-Setup-1.10.0.exe`. `/DAppVersion` overrides the installer's
+default `1.10.0`. The wizard uses `modern` without the newer `dark` modifier so the
+runner's Inno Setup 6 works without downloading an unpinned compiler. CI fails if
+ISCC is absent; it does not silently fall back to a downloaded installer.
 
 ---
 

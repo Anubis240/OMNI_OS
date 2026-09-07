@@ -44,7 +44,9 @@ def _linkify_help(text: str, link_color: str) -> str:
 # composited onto a circular badge at render time and cached — catalog ids
 # with no matching file (there shouldn't be any, but new entries could lag
 # the icon set) fall through to _build_card's letter-badge fallback.
-_ICONS_DIR = Path(__file__).resolve().parent / "assets" / "integration_icons"
+from core.app_paths import get_resource_dir
+
+_ICONS_DIR = get_resource_dir() / "assets" / "integration_icons"
 _icon_cache: dict[str, QPixmap] = {}
 
 

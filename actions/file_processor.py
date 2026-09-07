@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from core.app_paths import get_data_dir
 from datetime import datetime
 
 from google import genai
@@ -32,7 +33,7 @@ _GEMINI_MODEL = "gemini-2.5-flash"
 
 
 def _get_api_key() -> str:
-    config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
+    config_path = get_data_dir() / "config" / "api_keys.json"
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
 

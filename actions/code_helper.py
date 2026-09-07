@@ -4,12 +4,11 @@ import json
 import re
 import time
 from pathlib import Path
+from core.app_paths import get_data_dir
 
 
 def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 BASE_DIR           = get_base_dir()
 API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"

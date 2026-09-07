@@ -6,6 +6,19 @@ import sys
 import traceback
 from pathlib import Path
 
+import os
+
+# Resolve Playwright's packaged engines even on machines without build-time env.
+if getattr(sys, "frozen", False):
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+
+# Must precede log files, CA/config writes, audio setup and application imports.
+if __name__ == "__main__" and "--smoke-test" in sys.argv:
+    from bundle_smoke import run
+    raise SystemExit(run())
+
+from core.app_paths import get_data_dir, get_resource_dir
+
 # print() calls throughout this file use emoji (🔌, 💾, etc.) for readable
 # logs. Two separate packaged-build failure modes land on the same fix:
 # (1) a console-mode/redirected stream defaults to the OS's legacy codepage
@@ -16,10 +29,11 @@ from pathlib import Path
 # AttributeError instead. Either way the exception silently kills whatever
 # thread hit it (the main connection loop, in practice) with no visible
 # error, since there's no console to show it in even if there were one.
-# Route to a log file next to the exe so this is diagnosable at all, and
+# Route to a log file in the data directory so this is diagnosable at all, and
 # make it UTF-8 so the emoji themselves never crash it again.
 if getattr(sys, "frozen", False) and (sys.stdout is None or sys.stderr is None):
-    _log_path = Path(sys.executable).parent / "seraph.log"
+    _log_path = get_data_dir() / "seraph.log"
+    _log_path.parent.mkdir(parents=True, exist_ok=True)
     _log_f = open(_log_path, "a", encoding="utf-8", errors="replace", buffering=1)
     sys.stdout = sys.stdout or _log_f
     sys.stderr = sys.stderr or _log_f
@@ -40,7 +54,6 @@ if sys.platform == "win32":
     if _console_hwnd:
         ctypes.windll.user32.ShowWindow(_console_hwnd, 0)  # SW_HIDE
 
-import os
 import ssl
 
 import sounddevice as sd
@@ -78,10 +91,7 @@ def _write_merged_ca_bundle() -> None:
                     parts.append(ssl.DER_cert_to_PEM_cert(der).encode("ascii"))
         except Exception:
             pass  # fall back to certifi-only bundle rather than fail startup
-    # get_base_dir() isn't defined until later in this file — inline the same
-    # frozen-vs-source logic rather than reordering the whole module.
-    base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-    bundle_path = base_dir / "config" / "ca_bundle.pem"
+    bundle_path = get_data_dir() / "config" / "ca_bundle.pem"
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     bundle_path.write_bytes(b"\n".join(parts))
     os.environ["SSL_CERT_FILE"] = str(bundle_path)
@@ -133,16 +143,15 @@ def _play_listen_chime():
 
 
 def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
+    return get_data_dir()
 
 
 BASE_DIR        = get_base_dir()
+RESOURCE_DIR    = get_resource_dir()
 (BASE_DIR / "config").mkdir(parents=True, exist_ok=True)  # first-run on a packaged install: config/ doesn't ship in the bundle
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
-SHARED_RULES_PATH = BASE_DIR / "core" / "shared_rules.txt"
+PROMPT_PATH     = RESOURCE_DIR / "core" / "prompt.txt"
+SHARED_RULES_PATH = RESOURCE_DIR / "core" / "shared_rules.txt"
 LIVE_MODEL          = settings_store.DEFAULT_LIVE_MODEL
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000

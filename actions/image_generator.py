@@ -2,10 +2,12 @@ import json
 import os
 import random
 import ssl
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from core.app_paths import get_data_dir
 from urllib.parse import quote
 
 import requests
@@ -55,9 +57,7 @@ OUTPUT_DIR = Path(tempfile.gettempdir()) / "Omni Images"
 
 
 def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 
 _API_CONFIG_PATH = _get_base_dir() / "config" / "api_keys.json"
@@ -324,9 +324,14 @@ def generate_image(
         return msg
 
     try:
-        os.startfile(dest)
-    except Exception:
-        pass
+        if sys.platform == "win32":
+            os.startfile(dest)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(dest)])
+        else:
+            subprocess.Popen(["xdg-open", str(dest)])
+    except Exception as e:
+        print(f"[ImageGen] Could not open image viewer: {e}")
 
     if notify_image:
         try:

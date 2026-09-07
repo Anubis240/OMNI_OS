@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import platform
 from pathlib import Path
+from core.app_paths import get_data_dir
 from datetime import datetime
 
 try:
@@ -19,9 +20,7 @@ _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
 def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 def _get_api_key() -> str:
     path = _get_base_dir() / "config" / "api_keys.json"

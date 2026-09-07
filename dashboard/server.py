@@ -22,10 +22,11 @@ import asyncio
 import secrets
 import socket
 import string
-import sys
 import threading
 import time
 from pathlib import Path
+
+from core.app_paths import get_data_dir, get_resource_dir
 
 _DEPS_OK = False
 try:
@@ -55,19 +56,8 @@ _WS_PING_INTERVAL = 15
 _WS_PONG_TIMEOUT = 35
 
 
-def _base_dir() -> Path:
-    # Matches main.py's get_base_dir()/ui.py's _base_dir() exactly — must
-    # resolve to the real install directory (not a --onefile temp
-    # extraction dir, which Path(__file__) would give instead) so the
-    # self-signed cert persists across restarts rather than regenerating
-    # (and re-triggering the phone's "proceed anyway" warning) every launch.
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-
-BASE_DIR = _base_dir()
-STATIC_DIR = BASE_DIR / "dashboard" / "static"
+BASE_DIR = get_data_dir()
+STATIC_DIR = get_resource_dir() / "dashboard" / "static"
 AVATAR_BG_FILE = STATIC_DIR / "avatar_bg.jpg"
 CERT_DIR = BASE_DIR / "config" / "certs"
 CERT_FILE = CERT_DIR / "seraph.crt"

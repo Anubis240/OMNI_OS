@@ -16,13 +16,34 @@
 # run by the app's own code; shipping them would leak Lee's own paths/keys
 # into anyone else's install.
 
+import os
+import re
 import sys
+import importlib.util
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_all
+from PyInstaller.utils.hooks import collect_data_files, collect_all, copy_metadata
 
 block_cipher = None
 PROJECT_DIR = Path(SPECPATH)
+APP_VERSION = os.environ.get("APP_VERSION", "1.10.0")
+if os.environ.get("CI") and "APP_VERSION" not in os.environ:
+    raise RuntimeError("CI must supply validated APP_VERSION")
+if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", APP_VERSION):
+    raise RuntimeError("APP_VERSION must be numeric X.Y.Z")
+
+# The official Playwright hook collects these package-local browser installs.
+# Install all three engines with this same environment before building.
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+import playwright
+import nudenet
+
+browser_dir = Path(playwright.__file__).parent / "driver" / "package" / ".local-browsers"
+for engine in ("chromium", "firefox", "webkit"):
+    if not any(path.is_dir() for path in browser_dir.glob(f"{engine}-*")):
+        raise RuntimeError(f"Missing bundled {engine}; run python -m playwright install with PLAYWRIGHT_BROWSERS_PATH=0")
+if not (Path(nudenet.__file__).parent / "320n.onnx").is_file():
+    raise RuntimeError("NudeNet's packaged 320n.onnx model is required")
 
 binaries = []
 
@@ -45,6 +66,8 @@ datas = [
 # which is exactly how this was found — a real "create wallet" click in
 # the packaged trader panel throwing FileNotFoundError.
 datas += collect_data_files("eth_account")
+# py_ecc queries its installed version while Web3 imports eth_keyfile.
+datas += copy_metadata("py-ecc")
 
 # actions/image_generator.py's local NSFW safety gate (nudenet + onnxruntime).
 # onnxruntime has a well-documented frozen-build failure mode ("DLL load
@@ -60,22 +83,47 @@ datas += onnxruntime_datas
 binaries += onnxruntime_binaries
 datas += collect_data_files("nudenet")
 
+# The SDK's wheel ships its own native CLI. Collect it as a binary (including
+# Mach-O signing/dependency processing), not just Python modules. No CLI download.
+sdk_spec = importlib.util.find_spec("claude_agent_sdk")
+if sdk_spec is not None:
+    sdk_root = Path(sdk_spec.origin).parent
+    cli = sdk_root / "_bundled" / ("claude.exe" if sys.platform == "win32" else "claude")
+    if not cli.is_file():
+        raise RuntimeError("Installed Claude Agent SDK wheel has no bundled native CLI")
+    datas += collect_data_files("claude_agent_sdk", excludes=["_bundled/*"])
+    binaries.append((str(cli), "claude_agent_sdk/_bundled"))
+
+runtime_hooks = []
+if sys.platform.startswith("linux"):
+    # Browsers are package DATA: PyInstaller does not automatically close their
+    # ELF dependency graph. Inspect only these locally installed trusted roots.
+    sys.path.insert(0, str(PROJECT_DIR / "scripts"))
+    from release_bundle import linux_binaries
+    import PyQt6
+    binaries += linux_binaries([
+        Path(playwright.__file__).parent / "driver",
+        Path(PyQt6.__file__).parent,
+        sdk_root / "_bundled" if sdk_spec else browser_dir,
+    ])
+    runtime_hooks.append(str(PROJECT_DIR / "scripts" / "linux_runtime.py"))
+
 hiddenimports = onnxruntime_hiddenimports + [
     # plyer dispatches to platform backends via importlib at runtime —
     # PyInstaller's static analysis can't see those, so they need to be
     # named explicitly or the compiled app silently no-ops on first use.
-    "plyer.platforms.win.notification",
-    "plyer.platforms.win.filechooser",
-    "plyer.platforms.win.audio",
     # win32com/pywin32 COM support (win10toast, image_generator's Explorer
     # integration if any) sometimes needs its genpy cache pre-seeded.
-    "win32timezone",
     # google-genai's websocket transport.
     "websockets",
     # web3/eth-* stack — eth_account's key backends are looked up dynamically.
     "eth_account",
     "eth_account.hdaccount",
 ]
+plyer_platform = {"win32": "win", "darwin": "macosx", "linux": "linux"}[sys.platform]
+hiddenimports += [f"plyer.platforms.{plyer_platform}.{name}" for name in ("notification", "filechooser", "audio")]
+if sys.platform == "win32":
+    hiddenimports.append("win32timezone")
 
 a = Analysis(
     ["main.py"],
@@ -85,7 +133,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=runtime_hooks,
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -111,7 +159,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(PROJECT_DIR / "assets" / "icon.ico"),
+    icon=str(PROJECT_DIR / "assets" / "icon.ico") if sys.platform == "win32" else None,
     # PyInstaller 6.x defaults onedir builds to a separate "_internal"
     # subfolder for everything but the .exe itself. This app's own
     # frozen-mode BASE_DIR (see get_base_dir()/_base_dir() in main.py/
@@ -134,3 +182,18 @@ coll = COLLECT(
     upx_exclude=[],
     name="Omni-OS",
 )
+
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="Omni-OS.app",
+        bundle_identifier="com.kondux.omnios",
+        version=APP_VERSION,
+        info_plist={
+            "CFBundleShortVersionString": APP_VERSION,
+            "NSPrincipalClass": "NSApplication",
+            "LSMinimumSystemVersion": "15.0",
+            "NSMicrophoneUsageDescription": "Omni-OS uses your microphone for voice conversations when enabled.",
+            "NSCameraUsageDescription": "Omni-OS uses your camera for visual assistance when enabled.",
+        },
+    )

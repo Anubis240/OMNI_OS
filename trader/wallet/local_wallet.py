@@ -26,6 +26,8 @@ from pathlib import Path
 from eth_account import Account
 from web3 import Web3
 
+from core.app_paths import get_data_dir
+
 from .. import chains as chains_mod
 
 Account.enable_unaudited_hdwallet_features()
@@ -34,9 +36,7 @@ _wallet = None  # in-memory eth_account.LocalAccount — only set while unlocked
 
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent.parent
+    return get_data_dir()
 
 
 def _file_path() -> Path:

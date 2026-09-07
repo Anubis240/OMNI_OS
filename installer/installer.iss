@@ -5,7 +5,9 @@
 ; ============================================================
 
 #define AppName "Omni-OS"
-#define AppVersion "1.9.0"
+#ifndef AppVersion
+#define AppVersion "1.10.0"
+#endif
 #define AppPublisher "Kondux"
 #define AppURL "https://kondux.io"
 #define AppExeName "Omni-OS.exe"
@@ -33,10 +35,11 @@ OutputDir=output
 OutputBaseFilename={#AppName}-Setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
-WizardStyle=modern dark
+WizardStyle=modern
 SetupIconFile=..\assets\icon.ico
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64compatible
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -63,8 +66,8 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
 
 [Code]
 // ---------------------------------------------------------------
-// Colors, panels, and contrast are handled by Inno Setup's own
-// built-in "dark" custom style (WizardStyle=modern dark, above).
+// Use the modern wizard supported by the CI runner's Inno Setup 6.
+// The optional newer dark style is deliberately not required.
 // This just customizes wording and adds one cyan accent touch.
 // NOTE: this Font.Color property still uses legacy TColor order
 // ($BBGGRR), unlike the new WizardBackColor-style directives.

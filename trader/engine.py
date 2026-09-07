@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from random import random
 
+from core.app_paths import get_data_dir
+
 from . import chains as chains_mod
 from . import dexscreener
 from . import live as live_mod
@@ -76,9 +78,7 @@ _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 
 def _now_iso() -> str:
@@ -119,7 +119,6 @@ class TraderEngine:
         self.wallet_status = wallet_status
 
         self._dir = _base_dir() / "config" / "trader"
-        self._dir.mkdir(parents=True, exist_ok=True)
 
         self.config: dict = self._load_config()
         self.state: dict = self._load_state()
@@ -178,6 +177,7 @@ class TraderEngine:
         return cfg
 
     def _save_config(self):
+        self._config_file().parent.mkdir(parents=True, exist_ok=True)
         self._config_file().write_text(json.dumps(self.config, indent=2), encoding="utf-8")
 
     def _load_state(self) -> dict:
@@ -203,11 +203,13 @@ class TraderEngine:
         return {**base, **saved} if saved else base
 
     def _persist(self):
+        self._state_file().parent.mkdir(parents=True, exist_ok=True)
         self._state_file().write_text(json.dumps(self.state, indent=2), encoding="utf-8")
 
     def _emit(self, event: dict):
         e = {"at": _now_iso(), **event}
         try:
+            self._journal_file().parent.mkdir(parents=True, exist_ok=True)
             with self._journal_file().open("a", encoding="utf-8") as f:
                 f.write(json.dumps(e) + "\n")
         except Exception:

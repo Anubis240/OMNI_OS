@@ -8,6 +8,7 @@ import sys
 import time
 import random
 from pathlib import Path
+from core.app_paths import get_data_dir, get_os_name
 
 try:
     import pyautogui
@@ -24,9 +25,7 @@ except ImportError:
     _PYPERCLIP = False
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 
 _BASE         = _base_dir()
@@ -40,7 +39,7 @@ def _load_config() -> dict:
         return {}
 
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
+    return _load_config().get("os_system", get_os_name()).lower()
 
 
 def _get_api_key() -> str:

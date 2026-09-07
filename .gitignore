@@ -3,6 +3,8 @@
 .venv_full/
 .venv_preview/
 .venv/
+.venv-ci/
+.venv-build/
 venv/
 
 # Python
@@ -13,6 +15,7 @@ __pycache__/
 # PyInstaller build output
 build/
 dist/
+release-assets/
 *.spec.bak
 
 # Inno Setup output

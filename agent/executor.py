@@ -8,14 +8,13 @@ import os
 from pathlib import Path
 from typing import Callable
 
+from core.app_paths import get_data_dir
 from agent.planner       import create_plan, replan
 from agent.error_handler import analyze_error, generate_fix, ErrorDecision
 
 
 def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 
 BASE_DIR        = get_base_dir()

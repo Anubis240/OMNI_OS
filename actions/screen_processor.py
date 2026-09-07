@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from core.app_paths import get_data_dir, get_os_name
 from typing import Optional
 
 import numpy as np
@@ -37,9 +38,7 @@ from google import genai
 from google.genai import types as gtypes
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 
 _BASE        = _base_dir()
@@ -70,7 +69,7 @@ def _get_api_key() -> str:
 
 
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
+    return _load_config().get("os_system", get_os_name()).lower()
 
 _LIVE_MODEL         = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 _CHANNELS           = 1

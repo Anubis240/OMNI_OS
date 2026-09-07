@@ -28,12 +28,10 @@ from PyQt6.QtWidgets import (
     QTextEdit, QTextBrowser, QVBoxLayout, QWidget, QProgressBar,
 )
 
-def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
+from core.app_paths import get_data_dir, get_resource_dir
 
-BASE_DIR   = _base_dir()
+BASE_DIR   = get_data_dir()
+RESOURCE_DIR = get_resource_dir()
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
 
@@ -123,8 +121,8 @@ FACE_VIDEO: dict = {
     # rock-still/front-facing throughout, unlike the earlier idle sources.
     # Trimmed to its calmest 3s window (frame 228-317, lowest measured
     # motion + best loop-seam match of the whole clip).
-    "idle": str(BASE_DIR / "leda_idle_timeline1.mp4"),
-    "speaking": str(BASE_DIR / "leda_speaking.mp4"),
+    "idle": str(RESOURCE_DIR / "leda_idle_timeline1.mp4"),
+    "speaking": str(RESOURCE_DIR / "leda_speaking.mp4"),
     # Continuous talking motion the whole way through (measured via
     # mouth-region crops every 5%), built as a 5s loop (the file is 10s —
     # two cycles back to back), no camera zoom per the filename. Loop just

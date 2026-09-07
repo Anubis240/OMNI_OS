@@ -1,0 +1,181 @@
+name: Native CI and gated release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional release tag: strictly vX.Y.Z, without leading zeroes; empty builds only'
+        required: false
+        default: ''
+        type: string
+
+env:
+  REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, python: '3.11'}
+          - {os: windows-2022, python: '3.12'}
+          - {os: ubuntu-22.04, python: '3.12'}
+          - {os: macos-15, python: '3.12'}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile Python/spec sources without app imports
+        run: python -S scripts/release_bundle.py syntax
+      - name: Stdlib tests without application startup or credentials
+        run: python -S -m unittest discover -s tests -v
+      - name: Workflow lint (pinned actionlint image, Ubuntu only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.11 -shellcheck= .github/workflows/ci.yml
+
+  build:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, target: windows-x64, arch: x64}
+          - {os: ubuntu-22.04, target: linux-x64, arch: x64}
+          - {os: macos-15-intel, target: macos-x64, arch: x64}
+          - {os: macos-15, target: macos-arm64, arch: arm64}
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: '0'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      BUNDLE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
+      - name: Validate trusted version environment
+        run: python -S scripts/release_bundle.py version
+      - name: Isolated native build environment
+        run: |
+          python -m venv .venv-ci
+          if ($LASTEXITCODE -ne 0) { throw 'venv failed' }
+          $python = if ($IsWindows) { Join-Path $PWD '.venv-ci/Scripts/python.exe' } else { Join-Path $PWD '.venv-ci/bin/python' }
+          "BUILD_PYTHON=$python" >> $env:GITHUB_ENV
+          & $python -m pip install -r requirements.txt 'PyInstaller==6.16.0'
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+      - name: Linux build-only system dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libportaudio2 libxcb-cursor0
+          "$BUILD_PYTHON" -m playwright install --with-deps chromium firefox webkit
+      - name: Windows and macOS bundled browsers
+        if: runner.os != 'Linux'
+        run: |
+          & $env:BUILD_PYTHON -m playwright install chromium firefox webkit
+          if ($LASTEXITCODE -ne 0) { throw 'Browser installation failed' }
+      - name: Native onedir build including models, SDK CLI and browser dependencies
+        run: |
+          & $env:BUILD_PYTHON -m PyInstaller --clean --noconfirm omni-os.spec
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
+      - name: Windows per-user installer (runner Inno Setup 6)
+        if: runner.os == 'Windows'
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) { throw 'Runner must provide Inno Setup 6' }
+          & $iscc "/DAppVersion=$env:APP_VERSION" installer/installer.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
+      - name: Privacy gate, final archives, fresh extraction and scrubbed-environment smoke
+        timeout-minutes: 25
+        run: |
+          & $env:BUILD_PYTHON -S scripts/release_bundle.py package --target $env:BUNDLE_TARGET
+          if ($LASTEXITCODE -ne 0) { throw 'Final package/smoke failed' }
+      - name: Linux clean desktop-baseline container, no network during xcb/browser smoke
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          docker build -f scripts/linux-smoke.Dockerfile -t omni-clean-smoke scripts
+          mkdir -p "$RUNNER_TEMP/linux-clean-report"
+          chmod 777 "$RUNNER_TEMP/linux-clean-report"
+          docker run --rm --network none --shm-size=1g --cap-drop ALL --security-opt no-new-privileges \
+            -v "$PWD/release-assets/Omni-OS-Linux-x64-$APP_VERSION.tar.gz:/input/bundle.tar.gz:ro" \
+            -v "$RUNNER_TEMP/linux-clean-report:/reports" omni-clean-smoke
+          python -S scripts/release_bundle.py report "$RUNNER_TEMP/linux-clean-report/smoke-linux-clean.json" --qt xcb
+      - name: Smoke diagnostics (never release assets)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ github.run_id }}-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/smoke-*.json
+            ${{ runner.temp }}/linux-clean-report/*.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 1
+          compression-level: 0
+      - name: Upload only this successful target for this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ github.run_id }}-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+          compression-level: 0
+
+  release:
+    needs: [test, build]
+    if: needs.build.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-${{ github.run_id }}-*
+          path: downloaded
+          merge-multiple: false
+      - name: Require exact four-target identity, five binaries, hashes and formats
+        run: python -S scripts/release_bundle.py verify
+      - name: Verify or create immutable tag, draft, validate uploads, then publish (never overwrite)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python -S scripts/release_bundle.py publish

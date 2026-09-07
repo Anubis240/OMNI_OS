@@ -5,11 +5,10 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from core.app_paths import get_data_dir, get_os_name
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return get_data_dir()
 
 
 def _get_os() -> str:
@@ -17,9 +16,9 @@ def _get_os() -> str:
         cfg = json.loads(
             (_base_dir() / "config" / "api_keys.json").read_text(encoding="utf-8")
         )
-        return cfg.get("os_system", "windows").lower()
+        return cfg.get("os_system", get_os_name()).lower()
     except Exception:
-        return "windows"
+        return get_os_name()
 
 
 def _scripts_dir() -> Path:
