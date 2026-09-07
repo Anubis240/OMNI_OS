@@ -1,4 +1,8 @@
+import json
+import os
 import random
+import ssl
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -6,25 +10,167 @@ from urllib.parse import quote
 
 import requests
 
+# Switched 2026-09-06 from pollinations.ai's free, unauthenticated "flux"
+# model — used alone — to Gemini's own native image generation, tried
+# FIRST, with pollinations kept as a fallback. Root cause for the switch:
+# a tester's targeted retest of the Sep 4 rollback (see the 2026-09-06
+# report) showed the rollback's own risk assessment was wrong — the
+# premise was that unintended nudity would be confined to rare, stylized/
+# artistic prompts; the data showed the opposite. A plain, unstylized
+# prompt ("a person standing in a garden") produced full nudity 4/6 times
+# (67%), while every stylized prompt (Picasso, Renaissance oil painting)
+# and the one non-human subject came back clean 100% of the time.
+# pollinations.ai has no safety filtering of its own to catch that
+# (confirmed: partial face-only blurring was observed on later outputs,
+# suggesting *something* tries and fails, not that nothing exists at all).
+#
+# Why a fallback, not a straight swap: confirmed by live testing against
+# this project's own real API key (2026-09-06) that Gemini's native image
+# models — both gemini-3.1-flash-image and gemini-2.5-flash-image — return
+# a hard 429 "limit: 0" on a bare, no-billing-enabled free-tier key, even
+# though 2.5-flash-image is documented as free-tier-eligible in principle
+# (500 images/day). The exact same key generates plain text fine. This app
+# is BYOK against a bare free key by design — every other feature assumes
+# that — so requiring billing for images alone, silently, would trade one
+# regression (occasional unsafe output) for a worse one (the feature is
+# dead for most real users). Gemini is tried first for the real safety
+# filtering when billing happens to be available; pollinations.ai is the
+# fallback for everyone else, exactly as before this change.
+IMAGE_MODEL = "gemini-2.5-flash-image"  # NOT gemini-3.1-flash-image — confirmed
+# billing-only (limit: 0 on the free tier) by live testing. If this model
+# ever also moves to paid-only, every BYOK user loses the Gemini path and
+# silently falls back to pollinations — check ai.google.dev/gemini-api/docs
+# /image-generation and the free-tier docs before assuming this is broken.
+
+# Cheap, always-on stopgap for the pollinations.ai fallback path specifically
+# — a free, unauthenticated image model has no safety guardrails of its own.
+_SAFETY_SUFFIX = ", safe for work, no nudity, no explicit or graphic content"
+
+IMAGE_TIMEOUT_S = 60
+
 # Generated images are shown from a temp folder, not saved to Downloads —
 # opening the file lets the user view it and choose to "Save As" themselves
 # rather than Omni deciding every generation is a keeper.
-OUTPUT_DIR  = Path(tempfile.gettempdir()) / "Omni Images"
-IMAGE_MODEL = "flux"  # pollinations.ai model — no API key required
+OUTPUT_DIR = Path(tempfile.gettempdir()) / "Omni Images"
 
-# A real second Gemini call to classify each generated image (added
-# 2026-09-02, after a neutral "Picasso-style NFT" prompt produced
-# unsolicited nudity) was tried and reverted 2026-09-05: independently
-# verified as completely non-functional across three consecutive releases
-# (v1.4.0, v1.5.0, v1.6.0) on the actual test machine — 100% "check failed"
-# regardless of subject, language, or local firewall state, even after a
-# TLS trust-store fix that tested successfully on the dev machine. A tool
-# that never works is worse than one with an occasional content surprise,
-# and — per product direction — a stylized/painterly nude is a different
-# category of "unsafe" than explicit photorealistic content in the first
-# place. Kept: this prompt-side suffix, which costs nothing, can't fail or
-# hang, and reduces the odds of a repeat without a network dependency.
-_SAFETY_SUFFIX = ", safe for work, no nudity, no explicit or graphic content"
+
+def _get_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
+
+
+_API_CONFIG_PATH = _get_base_dir() / "config" / "api_keys.json"
+
+
+def _get_api_key() -> str:
+    with open(_API_CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)["gemini_api_key"]
+
+
+# main.py already solves this exact Windows TLS trust-store gap for its own
+# Gemini Live connection (see _write_merged_ca_bundle() there, same logic
+# verbatim) — process-wide, at import time, before this module runs. That
+# "should already be inherited" assumption is exactly what broke down for
+# real once before (this file's Sep 2 output-moderation call, on the real
+# test machine, failed closed with a raw SSL error on every attempt) — so
+# this module guarantees its own Gemini calls independently rather than
+# relying on it a second time, now that this IS the primary generation
+# path rather than a secondary check.
+def _ensure_ca_bundle() -> None:
+    # google-genai's httpx transport respects SSL_CERT_FILE (a standard
+    # OpenSSL/ssl-module variable); the pollinations.ai fallback below uses
+    # `requests`, which does NOT — it defaults to certifi's own bundle
+    # unless REQUESTS_CA_BUNDLE is set explicitly. Confirmed by testing:
+    # with only SSL_CERT_FILE set, the Gemini call succeeded past the TLS
+    # gap but the pollinations.ai fallback still failed with the exact same
+    # [SSL: CERTIFICATE_VERIFY_FAILED] error — both env vars need to point
+    # at the same merged bundle for both HTTP libraries in this file to
+    # actually benefit.
+    bundle_path = _get_base_dir() / "config" / "ca_bundle.pem"
+    if os.environ.get("SSL_CERT_FILE") and os.environ.get("REQUESTS_CA_BUNDLE"):
+        return
+    try:
+        import certifi
+        parts = [Path(certifi.where()).read_bytes()]
+        if sys.platform == "win32":
+            try:
+                seen = set()
+                for der, _encoding, _trust in ssl.enum_certificates("ROOT"):
+                    if der not in seen:
+                        seen.add(der)
+                        parts.append(ssl.DER_cert_to_PEM_cert(der).encode("ascii"))
+            except Exception:
+                pass
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_bytes(b"\n".join(parts))
+        os.environ.setdefault("SSL_CERT_FILE", str(bundle_path))
+        os.environ["REQUESTS_CA_BUNDLE"] = str(bundle_path)
+    except Exception:
+        pass  # best-effort — the caller still reports a clear error if this doesn't help
+
+
+_ensure_ca_bundle()
+
+_SAFETY_FINISH_REASONS = {"SAFETY", "IMAGE_SAFETY", "FinishReason.SAFETY", "FinishReason.IMAGE_SAFETY"}
+
+
+def _generate_via_gemini(prompt: str) -> tuple[str, bytes | None, str | None]:
+    """Returns (status, image_bytes, mime_type_or_message):
+      - status="ok": image_bytes/mime_type are the real result.
+      - status="safety_blocked": Gemini's own filter made an actual content
+        decision — the caller must NOT fall back to pollinations for this
+        same prompt, since that would just launder the request through the
+        one backend with no safety filtering at all, defeating the point.
+      - status="unavailable": no content decision was made at all (a raised
+        exception — network, auth, quota — or a response with no image and
+        no positive safety signal). Safe, and intended, to fall back."""
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=_get_api_key(), http_options={"timeout": IMAGE_TIMEOUT_S * 1000})
+        resp = client.models.generate_content(
+            model=IMAGE_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
+        )
+    except Exception as e:
+        return "unavailable", None, str(e)
+
+    if getattr(resp, "prompt_feedback", None) and resp.prompt_feedback.block_reason:
+        return "safety_blocked", None, "prompt blocked before generation"
+
+    for cand in (resp.candidates or []):
+        content = getattr(cand, "content", None)
+        if not content or not content.parts:
+            continue
+        for part in content.parts:
+            blob = getattr(part, "inline_data", None)
+            if blob and blob.data:
+                return "ok", blob.data, (blob.mime_type or "image/png")
+
+    reasons = {str(getattr(cand, "finish_reason", "")) for cand in (resp.candidates or [])}
+    if reasons & _SAFETY_FINISH_REASONS:
+        return "safety_blocked", None, "generated content failed Gemini's safety filter"
+    return "unavailable", None, "no image returned"
+
+
+def _generate_via_pollinations(prompt: str) -> tuple[bytes | None, str | None, str | None]:
+    """Returns (image_bytes, mime_type, error_message)."""
+    url = (
+        f"https://image.pollinations.ai/prompt/{quote(prompt + _SAFETY_SUFFIX)}"
+        f"?width=1024&height=1024&nologo=true&model=flux&seed={random.randint(0, 2_000_000_000)}"
+    )
+    try:
+        resp = requests.get(url, timeout=IMAGE_TIMEOUT_S)
+        resp.raise_for_status()
+    except Exception as e:
+        return None, None, f"image generation failed: {e}"
+    mime_type = resp.headers.get("content-type", "image/jpeg")
+    if not resp.content or "image" not in mime_type:
+        return None, None, "the image service didn't return an image — please try again"
+    return resp.content, mime_type, None
 
 
 def generate_image(
@@ -44,30 +190,31 @@ def generate_image(
     if speak:
         speak("Generating that image now, sir — one moment.")
 
-    url = (
-        f"https://image.pollinations.ai/prompt/{quote(prompt + _SAFETY_SUFFIX)}"
-        f"?width=1024&height=1024&nologo=true&model={IMAGE_MODEL}"
-        f"&seed={random.randint(0, 2_000_000_000)}"
-    )
+    status, image_bytes, detail = _generate_via_gemini(prompt)
 
-    try:
-        resp = requests.get(url, timeout=60)
-        resp.raise_for_status()
-        image_bytes = resp.content
-        mime_type = resp.headers.get("content-type", "image/jpeg")
-    except Exception as e:
-        msg = f"Sir, image generation failed: {e}"
+    if status == "safety_blocked":
+        print(f"[ImageGen] Gemini blocked this generation: {detail}")
+        msg = (
+            "Sir, that image didn't pass Gemini's own safety filter, so I'm not "
+            "showing it — try rephrasing the request."
+        )
         _log(msg, player)
         return msg
 
-    if not image_bytes or "image" not in mime_type:
-        msg = "Sir, the image service didn't return an image — please try again."
-        _log(msg, player)
-        return msg
+    mime_type = "image/png"
+    if status == "ok":
+        mime_type = detail  # detail carries the mime type on the "ok" path
+    else:
+        print(f"[ImageGen] Gemini unavailable ({detail}) — falling back to pollinations.ai")
+        image_bytes, mime_type, err = _generate_via_pollinations(prompt)
+        if err:
+            msg = f"Sir, {err}"
+            _log(msg, player)
+            return msg
 
     ext = "png" if "png" in mime_type else "jpg"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"seraph_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
+    filename = f"omni_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
     dest = OUTPUT_DIR / filename
 
     try:
@@ -78,7 +225,6 @@ def generate_image(
         return msg
 
     try:
-        import os
         os.startfile(dest)
     except Exception:
         pass

@@ -563,6 +563,19 @@ _APP_HTML = """<!DOCTYPE html>
     micNode = micCtx.createScriptProcessor(2048, 1, 1);
     micNode.onaudioprocess = function(e) {
       if (!recording) return;
+      // getUserMedia's echoCancellation:true mostly targets loopback from
+      // a <video>/<audio> element or another WebRTC peer's stream — it
+      // doesn't reliably reference a manually-built Web Audio graph like
+      // playChunk()'s (AudioContext.createBufferSource() straight to
+      // destination), so it doesn't reliably cancel Omni's own TTS output
+      // here. Confirmed in testing: a delayed reply playing back at the
+      // same moment the mic was open for a new attempt got picked up and
+      // transcribed as new "user" input, echoing Omni's own prior wording
+      // back at it. Belt-and-suspenders fix matching the desktop app's own
+      // guard (_listen_audio there skips capture while jarvis_speaking) —
+      // don't send mic frames while a scheduled chunk is still playing,
+      // plus a short tail to cover speaker/mic pickup decay.
+      if (playCtx && playCtx.currentTime < nextPlayTime + 0.3) return;
       var input = e.inputBuffer.getChannelData(0);
       var down = resampleTo16k(input, inRate);
       var int16 = new Int16Array(down.length);
