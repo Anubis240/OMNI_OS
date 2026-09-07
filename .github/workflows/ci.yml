@@ -87,7 +87,8 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libportaudio2 libxcb-cursor0
+          sudo apt-get install -y --no-install-recommends libportaudio2 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-xkb1 libxkbcommon-x11-0
           "$BUILD_PYTHON" -m playwright install --with-deps chromium firefox webkit
       - name: Windows and macOS bundled browsers
         if: runner.os != 'Linux'

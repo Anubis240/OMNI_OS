@@ -96,16 +96,6 @@ if sdk_spec is not None:
 
 runtime_hooks = []
 if sys.platform.startswith("linux"):
-    # Browsers are package DATA: PyInstaller does not automatically close their
-    # ELF dependency graph. Inspect only these locally installed trusted roots.
-    sys.path.insert(0, str(PROJECT_DIR / "scripts"))
-    from release_bundle import linux_binaries
-    import PyQt6
-    binaries += linux_binaries([
-        Path(playwright.__file__).parent / "driver",
-        Path(PyQt6.__file__).parent,
-        sdk_root / "_bundled" if sdk_spec else browser_dir,
-    ])
     runtime_hooks.append(str(PROJECT_DIR / "scripts" / "linux_runtime.py"))
 
 hiddenimports = onnxruntime_hiddenimports + [
@@ -140,6 +130,37 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+if sys.platform.startswith("linux"):
+    sys.path.insert(0, str(PROJECT_DIR / "scripts"))
+    from release_bundle import linux_binaries, without_browser_toc, append_linux_browsers
+    import PyQt6
+    qt_root = Path(PyQt6.__file__).parent.resolve()
+    # Qt hooks select QtWidgets/QtMultimedia and their required plugins. Do not
+    # seed closure from the whole Qt wheel (including unused QML design tools).
+    qt_inputs = [Path(source) for _, source, kind in a.binaries
+                 if kind in {"BINARY", "EXTENSION"} and Path(source).resolve().is_relative_to(qt_root)]
+    closure = linux_binaries([
+        Path(playwright.__file__).parent / "driver",
+        sdk_root / "_bundled" if sdk_spec else browser_dir,
+        *qt_inputs,
+    ], library_paths=[qt_root / "Qt6" / "lib"], library_scope=qt_root,
+       browser_root=browser_dir)
+    a.binaries += [(str(Path(destination) / Path(source).name), source, "BINARY")
+                   for source, destination in closure]
+    # ldd discovers external dependencies, not every dlopen payload (libxul).
+    # Exclude the whole browser TOC, including generated aliases, then copy
+    # complete upstream distributions unchanged after COLLECT.
+    a.binaries = without_browser_toc(a.binaries, browser_dir)
+    a.datas = without_browser_toc(a.datas, browser_dir)
+
+if sys.platform == "darwin":
+    sys.path.insert(0, str(PROJECT_DIR / "scripts"))
+    from release_bundle import without_browser_toc, append_macos_browsers
+    # Keep Node and the SDK CLI in normal binary processing. Only the upstream
+    # browser distributions bypass relocation and are appended after BUNDLE.
+    a.binaries = without_browser_toc(a.binaries, browser_dir)
+    a.datas = without_browser_toc(a.datas, browser_dir)
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -183,6 +204,9 @@ coll = COLLECT(
     name="Omni-OS",
 )
 
+if sys.platform.startswith("linux"):
+    append_linux_browsers(Path(coll.name), browser_dir, closure)
+
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
@@ -197,3 +221,4 @@ if sys.platform == "darwin":
             "NSCameraUsageDescription": "Omni-OS uses your camera for visual assistance when enabled.",
         },
     )
+    append_macos_browsers(Path(app.name), browser_dir)

@@ -105,8 +105,14 @@ def elf(path):
         return stream.read(4) == b"\x7fELF"
 
 
-def ldd_dependencies(path):
-    result = subprocess.run(["ldd", str(path)], text=True, capture_output=True, timeout=30)
+def ldd_dependencies(path, library_paths=()):
+    # Never inherit a builder-wide search path into a distribution's loader.
+    # This environment belongs only to ldd, not the frozen runtime.
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    if library_paths:
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(map(str, library_paths))
+    result = subprocess.run(["ldd", str(path)], text=True, capture_output=True, timeout=30, env=env)
     text = result.stdout + result.stderr
     if "not found" in text:
         raise RuntimeError(f"Missing native dependency for {path}:\n{text}")
@@ -123,7 +129,58 @@ def ldd_dependencies(path):
     return dependencies
 
 
-def linux_binaries(roots):
+def linux_elf_inputs(roots):
+    """Inspect selected files or complete trusted distributions, never siblings."""
+    return [p for root in roots for p in (root.rglob("*") if root.is_dir() else (root,)) if elf(p)]
+
+
+def linux_loader_paths(path, browser_root=None, library_paths=(), library_scope=None):
+    """Nearest directory first, then ancestors; never sibling engines/plugins.
+
+    A nested Firefox GMP needs the Firefox root, whereas WebKit's GTK and WPE
+    wrappers each set lib:sys/lib within their own minibrowser. Otherwise only
+    ancestor lib directories join the search. Qt paths apply only to Qt inputs.
+    """
+    path = path.resolve()
+    if browser_root is not None:
+        browser_root = browser_root.resolve()
+        if path.is_relative_to(browser_root):
+            distribution = browser_root / path.relative_to(browser_root).parts[0]
+            relative = path.relative_to(distribution)
+            if (distribution.name.startswith("webkit-") and len(relative.parts) > 1
+                    and relative.parts[0] in {"minibrowser-gtk", "minibrowser-wpe"}):
+                minibrowser = distribution / relative.parts[0]
+                return [minibrowser / "lib", minibrowser / "sys/lib"]
+            paths = []
+            parent = path.parent
+            while parent.is_relative_to(distribution):
+                paths.append(parent)
+                if (parent / "lib").is_dir():
+                    paths.append(parent / "lib")
+                if parent == distribution:
+                    break
+                parent = parent.parent
+            return paths
+    if library_scope is not None and path.is_relative_to(library_scope.resolve()):
+        return list(library_paths)
+    return []
+
+
+def linux_runtime_destination(path, browser_root=None):
+    """WebKit wrappers replace LD_LIBRARY_PATH with their own lib:sys/lib."""
+    if browser_root is not None:
+        path = path.resolve()
+        browser_root = browser_root.resolve()
+        if path.is_relative_to(browser_root):
+            parts = path.relative_to(browser_root).parts
+            if (len(parts) > 2 and parts[0].startswith("webkit-")
+                    and parts[1] in {"minibrowser-gtk", "minibrowser-wpe"}):
+                return str(Path("playwright/driver/package/.local-browsers")
+                           / parts[0] / parts[1] / "sys/lib")
+    return "."
+
+
+def linux_binaries(roots, library_paths=(), *, library_scope=None, browser_root=None):
     """Bounded ELF closure, retaining SONAMEs; ldd only trusted build inputs.
 
     Also collect known dlopen plugin roots, which ldd alone cannot discover.
@@ -135,6 +192,10 @@ def linux_binaries(roots):
     if not portaudio.is_file():
         raise RuntimeError("Build host must install libportaudio2")
     entries = [(portaudio, ".")]
+    gles = library_root / "libGLESv2.so.2"
+    if not gles.is_file():
+        raise RuntimeError("Build host must install libgles2")
+    entries.append((gles, "."))
     for directory, destination in (
         (library_root / "gstreamer-1.0", "gstreamer-1.0"),
         (library_root / "gio/modules", "gio/modules"),
@@ -144,31 +205,170 @@ def linux_binaries(roots):
         if directory.is_dir():
             entries.extend((p, str(Path(destination) / p.relative_to(directory).parent))
                            for p in directory.rglob("*") if elf(p))
-    queue = [p for root in roots for p in root.rglob("*") if elf(p)]
-    queue += [p for p, _ in entries]
+    # File roots allow the Qt hooks to select the actual modules/plugins rather
+    # than scanning unused QML/designer plugins throughout the installed wheel.
+    inputs = linux_elf_inputs(roots) + [p for p, _ in entries]
+    queue = [(p, linux_loader_paths(p, browser_root, library_paths, library_scope),
+              linux_runtime_destination(p, browser_root)) for p in inputs]
+    # The runtime hook exposes GIO/GStreamer plugins globally, but WebKit's
+    # wrapper also hides their external dependencies. Traverse dlopen roots in
+    # each wrapper's loader context, not just the builder/global context.
+    webkit_contexts = {(tuple(search), destination) for _, search, destination in queue
+                       if destination != "."}
+    dlopen_roots = [source for source, destination in entries if destination != "." or source == gles]
+    for search, destination in webkit_contexts:
+        # dlopen's entry library itself is not an ldd dependency. Plugins stay
+        # at GIO_MODULE_DIR/GST_PLUGIN_PATH; GLES needs a wrapper-local copy.
+        entries.append((gles, destination))
+        queue.extend((source, list(search), destination) for source in dlopen_roots)
     seen = set()
     collected = {}
     for source, destination in entries:
         collected[(destination, source.name)] = source
     while queue:
-        path = queue.pop()
+        path, search, runtime_destination = queue.pop()
         resolved = path.resolve()
-        if resolved in seen:
+        context = (resolved, tuple(search), runtime_destination)
+        if context in seen:
             continue
-        seen.add(resolved)
+        seen.add(context)
         if len(seen) > 12000:
             raise RuntimeError("ELF dependency traversal exceeded 12000 files")
-        for dependency in ldd_dependencies(path):
+        for dependency in ldd_dependencies(path, search):
             if BASELINE.fullmatch(dependency.name):
                 continue
-            key = (".", dependency.name)
+            destination = runtime_destination
+            if browser_root is not None and dependency.resolve().is_relative_to(browser_root.resolve()):
+                relative = dependency.relative_to(browser_root)
+                destination = str(Path("playwright/driver/package/.local-browsers") / relative.parent)
+            key = (destination, dependency.name)
             previous = collected.get(key)
             if previous and previous.resolve() != dependency.resolve() and digest(previous) != digest(dependency):
                 raise RuntimeError(f"Conflicting SONAME: {previous}, {dependency}")
             collected[key] = dependency
-            queue.append(dependency)
+            # Inspect transitive dependencies in the same ELF load context.
+            queue.append((dependency, search, runtime_destination))
     print(f"Linux closure: {len(seen)} ELF inputs, {len(collected)} collected libraries/plugins")
     return [(str(source), destination) for (destination, _), source in sorted(collected.items())]
+
+
+def without_browser_toc(entries, browser_root):
+    """Leave self-contained browsers out of COLLECT/BUNDLE Mach-O rewriting."""
+    browser_root = browser_root.resolve()
+    prefix = "playwright/driver/package/.local-browsers"
+
+    def browser_destination(name):
+        name = name.replace("\\", "/")
+        return name == prefix or name.startswith(prefix + "/")
+
+    return [(destination, source, kind) for destination, source, kind in entries
+            if not (browser_destination(destination)
+                    or Path(source).resolve().is_relative_to(browser_root)
+                    # Analysis also adds top-level aliases to browser dylibs.
+                    # These would be dangling while BUNDLE is signing itself.
+                    or (kind == "SYMLINK" and browser_destination(posixpath.normpath(posixpath.join(
+                        posixpath.dirname(destination.replace("\\", "/")), source.replace("\\", "/"))))))]
+
+
+def browser_tree_manifest(root):
+    """Compare bytes, executable modes and link targets without following links."""
+    root = root.resolve()
+    manifest = {}
+    for path in sorted(root.rglob("*")):
+        name = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            if not path.exists() or not path.resolve().is_relative_to(root):
+                raise ValueError(f"Broken/external browser symlink: {path}")
+            manifest[name] = ("link", os.readlink(path))
+        elif path.is_file():
+            manifest[name] = ("file", stat.S_IMODE(path.stat().st_mode), digest(path))
+        elif path.is_dir():
+            manifest[name] = ("directory",)
+        else:
+            raise ValueError(f"Special browser file: {path}")
+    return manifest
+
+
+def append_linux_browsers(root, browser_root, dependencies=()):
+    """Preserve complete upstream trees, including ELF loaded only via dlopen.
+
+    Analysis can omit shared-library data or replace it with global SONAME
+    aliases. A dependency closure alone cannot reconstruct those payloads.
+    External dependencies still pass linux_binaries and the clean smoke gate.
+    """
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("Browser assembly requires a native Linux runner")
+    browser_root = browser_root.resolve()
+    for engine in ("chromium", "firefox", "webkit"):
+        if not any(p.is_dir() for p in browser_root.glob(f"{engine}-*")):
+            raise ValueError(f"Missing bundled {engine}")
+    original = browser_tree_manifest(browser_root)
+    destination = root.resolve() / "playwright/driver/package/.local-browsers"
+    if not destination.parent.is_dir():
+        raise ValueError("COLLECT is missing the Playwright driver package")
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("Browsers must be excluded from COLLECT before copying")
+    shutil.copytree(browser_root, destination, symlinks=True)
+    if browser_tree_manifest(destination) != original:
+        raise ValueError("Browser copy changed upstream bytes, modes or links")
+    print("Linux browsers preserved byte-for-byte, including dlopen libraries")
+    # These entries are deliberately excluded from COLLECT along with browsers.
+    # Add external closure libraries only AFTER verifying the upstream copy;
+    # never replace upstream private libraries or create global aliases to them.
+    prefix = Path("playwright/driver/package/.local-browsers")
+    for source, directory in dependencies:
+        directory = Path(directory)
+        if not directory.is_relative_to(prefix):
+            continue
+        source = Path(source)
+        if source.resolve().is_relative_to(browser_root):
+            continue
+        target = root.resolve() / directory / source.name
+        if target.exists() or target.is_symlink():
+            if not target.is_file() or digest(target) != digest(source):
+                raise ValueError(f"External dependency conflicts with browser library: {target}")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def append_macos_browsers(app, browser_root):
+    """Copy upstream distributions unchanged, then seal ONLY the outer wrapper.
+
+    PyInstaller rewrites Mach-O load commands and re-signs collected binaries.
+    Firefox's liblgpllibs lacks header padding for that extra LC_RPATH. These
+    distributions already contain their own loader paths and signatures; they
+    must not pass through process_collected_binary or recursive re-signing.
+    """
+    if sys.platform != "darwin":
+        raise RuntimeError("Browser app assembly requires a native macOS runner")
+    app = app.resolve()
+    browser_root = browser_root.resolve()
+    for engine in ("chromium", "firefox", "webkit"):
+        if not any(p.is_dir() for p in browser_root.glob(f"{engine}-*")):
+            raise ValueError(f"Missing bundled {engine}")
+    original = browser_tree_manifest(browser_root)
+    relative = Path("playwright/driver/package/.local-browsers")
+    destination = app / "Contents/Resources" / relative
+    alias = app / "Contents/Frameworks" / relative
+    if not destination.parent.is_dir() or not alias.parent.is_dir():
+        raise ValueError("BUNDLE is missing the Playwright driver package")
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("Browsers must be excluded from BUNDLE before copying")
+    shutil.copytree(browser_root, destination, symlinks=True)
+    # Support both JS realpaths (Resources) and Python _MEIPASS (Frameworks).
+    if alias.resolve() != destination.resolve():
+        alias.symlink_to(os.path.relpath(destination, alias.parent), target_is_directory=True)
+    if browser_tree_manifest(destination) != original:
+        raise ValueError("Browser copy changed upstream bytes, modes or links")
+    # No --deep signing: upstream nested signatures/entitlements stay intact.
+    # Replace the stale wrapper signature explicitly, without --force.
+    subprocess.run(["/usr/bin/codesign", "--remove-signature", str(app)], check=True)
+    subprocess.run(["/usr/bin/codesign", "--sign", "-", str(app)], check=True)
+    subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+    if browser_tree_manifest(destination) != original:
+        raise ValueError("Wrapper signing modified an upstream browser")
+    print("macOS browsers preserved byte-for-byte; final wrapper signature verified")
 
 
 def archive_members_safe(path):
