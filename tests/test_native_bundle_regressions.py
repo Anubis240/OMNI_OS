@@ -276,7 +276,7 @@ class MacBrowserCollectionTests(unittest.TestCase):
             self.assertEqual([call.args[0] for call in run.call_args_list], [
                 ["/usr/bin/codesign", "--remove-signature", str(app.resolve())],
                 ["/usr/bin/codesign", "--sign", "-", str(app.resolve())],
-                ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app.resolve())],
+                ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(app.resolve())],
             ])
             self.assertTrue(all(call.kwargs == {"check": True} for call in run.call_args_list))
 

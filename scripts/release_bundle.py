@@ -1,6 +1,7 @@
 """Stdlib-only native packaging and fail-closed release gates (no app imports)."""
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -270,10 +271,12 @@ def without_browser_toc(entries, browser_root):
                         posixpath.dirname(destination.replace("\\", "/")), source.replace("\\", "/"))))))]
 
 
-def browser_tree_manifest(root):
+def browser_tree_manifest(root, *, all_modes=False):
     """Compare bytes, executable modes and link targets without following links."""
     root = root.resolve()
     manifest = {}
+    if all_modes:
+        manifest["."] = ("directory", stat.S_IMODE(root.stat().st_mode))
     for path in sorted(root.rglob("*")):
         name = path.relative_to(root).as_posix()
         if path.is_symlink():
@@ -286,6 +289,8 @@ def browser_tree_manifest(root):
             manifest[name] = ("directory",)
         else:
             raise ValueError(f"Special browser file: {path}")
+        if all_modes and manifest[name][0] != "file":
+            manifest[name] += (stat.S_IMODE(path.lstat().st_mode),)
     return manifest
 
 
@@ -365,7 +370,7 @@ def append_macos_browsers(app, browser_root):
     # Replace the stale wrapper signature explicitly, without --force.
     subprocess.run(["/usr/bin/codesign", "--remove-signature", str(app)], check=True)
     subprocess.run(["/usr/bin/codesign", "--sign", "-", str(app)], check=True)
-    subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+    subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(app)], check=True)
     if browser_tree_manifest(destination) != original:
         raise ValueError("Wrapper signing modified an upstream browser")
     print("macOS browsers preserved byte-for-byte; final wrapper signature verified")
@@ -465,12 +470,103 @@ def clean_environment(home):
     return env
 
 
-def smoke_extracted(root, report, qt="offscreen"):
+def manifest_difference(before, after):
+    """Diagnostic only: equality does NOT prove equal xattrs/resource forks/ACLs."""
+    added = sorted(after.keys() - before.keys())
+    removed = sorted(before.keys() - after.keys())
+    changed = {name: {"before": before[name], "after": after[name]}
+               for name in sorted(before.keys() & after.keys()) if before[name] != after[name]}
+    return {"counts": {"added": len(added), "removed": len(removed), "changed": len(changed)},
+            "added": added, "removed": removed, "changed": changed}
+
+
+@contextmanager
+def macos_package_report(target):
+    path = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / f"smoke-package-{target}.json"
+    report = {"target": target, "stage": "pre-zip-verify", "errors": [], "native_verify": {},
+              "manifests": {}, "diff": None,
+              "limitations": "Manifest equality does not prove equal xattrs, resource forks or ACLs; "
+                             "only file hashes, relative paths, types, link targets and modes are compared."}
+    failed = False
+    try:
+        yield report
+    except Exception as error:
+        failed = True
+        report["errors"].append({"stage": report["stage"], "type": type(error).__name__,
+                                 "message": str(error)})
+        if isinstance(error, subprocess.CalledProcessError):
+            report["errors"][-1].update(returncode=error.returncode,
+                                        stdout=error.stdout, stderr=error.stderr)
+        raise
+    finally:
+        # This scope ends BEFORE extraction cleanup. Never replace a gate's
+        # original exception with a secondary report-writing error.
+        try:
+            path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        except OSError as error:
+            if not failed:
+                raise
+            print(f"Could not persist macOS package diagnostics: {error}", file=sys.stderr)
+
+
+def verify_macos_signature(root, diagnostics=None):
+    command = ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(root)]
+    if diagnostics is None:
+        subprocess.run(command, check=True)
+        return
+    try:
+        result = subprocess.run(command, check=True, text=True, capture_output=True)
+    except subprocess.CalledProcessError as error:
+        diagnostics["native_verify"][diagnostics["stage"]] = {
+            "returncode": error.returncode, "stdout": error.stdout, "stderr": error.stderr}
+        raise
+    else:
+        diagnostics["native_verify"][diagnostics["stage"]] = {
+            "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+
+
+def package_macos(root, archive, target):
+    if sys.platform != "darwin":
+        raise RuntimeError("macOS package diagnostics require a native macOS runner")
+    with tempfile.TemporaryDirectory(prefix="omni-final-package-") as temporary:
+        with macos_package_report(target) as diagnostics:
+            verify_macos_signature(root, diagnostics)
+            diagnostics["stage"] = "pre-zip-manifest"
+            # Freeze BEFORE ditto: never compare against a potentially mutated
+            # build tree after archiving/extraction.
+            before = browser_tree_manifest(root, all_modes=True)
+            diagnostics["manifests"]["before"] = before
+            diagnostics["stage"] = "archive"
+            subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
+                            str(root), str(archive)], check=True)
+            diagnostics["stage"] = "archive-members"
+            archive_members_safe(archive)
+            diagnostics["stage"] = "extract"
+            subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), temporary],
+                           check=True, text=True, capture_output=True)
+            extracted = Path(temporary) / root.name
+            diagnostics["stage"] = "post-zip-privacy"
+            privacy(extracted)
+            diagnostics["stage"] = "post-zip-manifest"
+            after = browser_tree_manifest(extracted, all_modes=True)
+            diagnostics["manifests"]["after"] = after
+            diagnostics["diff"] = manifest_difference(before, after)
+            report = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / f"smoke-{target}.json"
+            report.unlink(missing_ok=True)
+            smoke_extracted(extracted, report, diagnostics=diagnostics)
+            diagnostics["stage"] = "complete"
+
+
+def smoke_extracted(root, report, qt="offscreen", *, diagnostics=None):
     privacy(root)
     executable = (root / "Contents/MacOS/Omni-OS" if root.suffix == ".app"
                   else root / ("Omni-OS.exe" if sys.platform == "win32" else "Omni-OS"))
     if root.suffix == ".app":
-        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(root)], check=True)
+        if diagnostics is not None:
+            diagnostics["stage"] = "post-zip-verify"
+        verify_macos_signature(root, diagnostics)
+    if diagnostics is not None:
+        diagnostics["stage"] = "smoke"
     with tempfile.TemporaryDirectory(prefix="omni-clean-home-") as home:
         env = clean_environment(Path(home))
         env["QT_QPA_PLATFORM"] = qt
@@ -502,8 +598,7 @@ def package(target, version, output):
     output.mkdir(parents=True, exist_ok=False)
     archive = output / names[0]
     if native == "macos":
-        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(root)], check=True)
-        subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(root), str(archive)], check=True)
+        package_macos(root, archive, target)
     elif native == "linux":
         with tarfile.open(archive, "w:gz", dereference=False) as stream:
             stream.add(root, arcname=root.name)
@@ -512,13 +607,24 @@ def package(target, version, output):
             for path in sorted(root.rglob("*")):
                 stream.write(path, path.relative_to(root.parent))
         shutil.copy2(Path("installer/output") / names[1], output / names[1])
+    if native != "macos":
+        smoke_archive(root, archive, target, native, output, names)
+    manifest = {"target": target, "version": version, "commit": os.environ["GITHUB_SHA"],
+                "run_id": os.environ["GITHUB_RUN_ID"], "assets": {}}
+    for name in names:
+        path = output / name
+        if not 0 < path.stat().st_size < MAX_ASSET:
+            raise ValueError(f"Asset must be nonempty and below 2 GiB: {name}")
+        manifest["assets"][name] = {"sha256": digest(path), "size": path.stat().st_size}
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def smoke_archive(root, archive, target, native, output, names):
     archive_members_safe(archive)
     # Every smoke runs from a NEW extraction of the final distributed archive.
     with tempfile.TemporaryDirectory(prefix="omni-final-package-") as temporary:
         temporary = Path(temporary)
-        if native == "macos":
-            subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(temporary)], check=True)
-        elif native == "linux":
+        if native == "linux":
             with tarfile.open(archive, "r:gz") as stream:
                 stream.extractall(temporary, filter="data")
         else:
@@ -536,14 +642,6 @@ def package(target, version, output):
             installer_report = report.with_name("smoke-windows-installer.json")
             installer_report.unlink(missing_ok=True)
             smoke_extracted(installed, installer_report)
-    manifest = {"target": target, "version": version, "commit": os.environ["GITHUB_SHA"],
-                "run_id": os.environ["GITHUB_RUN_ID"], "assets": {}}
-    for name in names:
-        path = output / name
-        if not 0 < path.stat().st_size < MAX_ASSET:
-            raise ValueError(f"Asset must be nonempty and below 2 GiB: {name}")
-        manifest["assets"][name] = {"sha256": digest(path), "size": path.stat().st_size}
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def verify_artifacts(downloads, output, version, commit, run_id):
