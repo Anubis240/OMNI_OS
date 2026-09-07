@@ -41,7 +41,7 @@ class ReleaseBundleTests(unittest.TestCase):
         return {"GITHUB_EVENT_NAME": "workflow_dispatch" if manual else "push",
                 "GITHUB_REF_TYPE": "branch" if manual else "tag",
                 "GITHUB_REF_NAME": "main" if manual else "v1.10.0",
-                "REQUESTED_RELEASE_TAG": "v1.10.0" if manual else "",
+                "GITHUB_REF": "refs/heads/main" if manual else "refs/tags/v1.10.0",
                 "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_NUMBER": "15"}
 
     def tag_response(self, sha="a" * 40, kind="commit"):
@@ -52,44 +52,57 @@ class ReleaseBundleTests(unittest.TestCase):
         return subprocess.CalledProcessError(1, ["gh", "api"],
                                              output='HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}')
 
-    def test_dispatch_version_is_strict_and_numeric(self):
+    def test_dispatch_is_not_authorized_to_release(self):
         env = self.release_env(manual=True)
-        self.assertEqual(bundle.version_from_env(env), "1.10.0")
+        self.assertEqual(bundle.version_from_env(env), "0.0.15")
+        with self.assertRaises(ValueError):
+            bundle.release_version_from_env(env)
+
+    def test_release_tag_version_is_strict(self):
+        env = self.release_env()
         self.assertEqual(bundle.release_version_from_env(env), "1.10.0")
         for tag in ("v01.2.3", "1.2.3", "v1.2", "v1.2.3-rc1", "v1.2.3\n",
                     " v1.2.3", "v1.2.3/x", "v1.2.$(whoami)", "V1.2.3", "v١.2.3"):
             with self.subTest(tag=tag), self.assertRaises(ValueError):
-                bundle.version_from_env(dict(env, REQUESTED_RELEASE_TAG=tag))
+                bundle.release_version_from_env(dict(env, GITHUB_REF_NAME=tag, GITHUB_REF="refs/tags/" + tag))
 
-    def test_requested_tag_ignored_outside_dispatch(self):
-        for event in ("push", "pull_request", "workflow_run", ""):
-            env = dict(self.release_env(), GITHUB_EVENT_NAME=event, REQUESTED_RELEASE_TAG="v9.9.9")
-            with self.subTest(event=event):
-                self.assertEqual(bundle.version_from_env(env), "1.10.0")
-                env["GITHUB_REF_TYPE"] = "branch"
-                self.assertEqual(bundle.version_from_env(env), "0.0.15")
-                with self.assertRaises(ValueError):
-                    bundle.release_version_from_env(env)
+    def test_release_requires_matching_tag_ref(self):
+        for overrides in ({"GITHUB_REF": "refs/heads/v1.10.0"}, {"GITHUB_REF": ""},
+                          {"GITHUB_REF_NAME": "v9.9.9"}, {"GITHUB_REF_TYPE": "branch"}):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                bundle.release_version_from_env(dict(self.release_env(), **overrides))
 
-    def test_empty_dispatch_is_build_only(self):
-        env = dict(self.release_env(manual=True), REQUESTED_RELEASE_TAG="")
-        self.assertEqual(bundle.version_from_env(env), "0.0.15")
-        for command in ("verify", "publish"):
-            with self.subTest(command=command), patch.dict(os.environ, env, clear=True), \
-                    patch.object(sys, "argv", ["release_bundle.py", command]), \
-                    patch.object(bundle, "verify_artifacts") as verify, \
-                    patch.object(bundle, "publish") as publish, self.assertRaises(ValueError):
-                bundle.main()
-            verify.assert_not_called()
-            publish.assert_not_called()
+    def test_non_tag_push_events_are_tests_only(self):
+        for event in ("push", "workflow_dispatch", "pull_request", "workflow_run", ""):
+            for tag in (False, True):
+                if event == "push" and tag:
+                    continue
+                env = dict(self.release_env(manual=not tag), GITHUB_EVENT_NAME=event)
+                for command in ("verify", "publish"):
+                    with self.subTest(event=event, tag=tag, command=command), \
+                            patch.dict(os.environ, env, clear=True), \
+                            patch.object(sys, "argv", ["release_bundle.py", command]), \
+                            patch.object(bundle, "verify_artifacts") as verify, \
+                            patch.object(bundle, "publish") as publish, self.assertRaises(ValueError):
+                        bundle.main()
+                    verify.assert_not_called()
+                    publish.assert_not_called()
 
-    def test_dispatch_cli_verifies_requested_artifact_version(self):
+    def test_tag_push_cli_verifies_artifact_version(self):
         downloads = self.fixtures()
-        with patch.dict(os.environ, self.release_env(manual=True), clear=True), \
+        with patch.dict(os.environ, self.release_env(), clear=True), \
                 patch.object(sys, "argv", ["release_bundle.py", "verify", "--downloads", str(downloads),
                                            "--output", str(self.root / "release")]):
             bundle.main()
         self.assertTrue((self.root / "release/Omni-OS-Setup-1.10.0.exe").is_file())
+
+    def test_workflow_build_and_release_require_new_tag_push(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        gate = "github.event_name == 'push' && github.event.created == true && startsWith(github.ref, 'refs/tags/v')"
+        for job, condition in (("build", gate), ("release", "needs.build.result == 'success' && " + gate)):
+            section = workflow.split(f"\n  {job}:\n", 1)[1]
+            self.assertEqual(section.split("\n    if: ", 1)[1].splitlines()[0], condition)
+        self.assertIn("  workflow_dispatch:\n\npermissions:", workflow)
 
     def test_privacy_all_resource_roots(self):
         for prefix in ("", "_internal", "Contents/Resources", "Contents/Frameworks", "Contents/MacOS"):
@@ -371,29 +384,26 @@ class ReleaseBundleTests(unittest.TestCase):
     def test_existing_release_or_draft_never_overwritten(self):
         self.verify(self.fixtures())
         releases = json.dumps([[{"tag_name": "v1.10.0", "draft": True}]])
-        with patch.dict(os.environ, self.release_env(manual=True), clear=True), \
+        with patch.dict(os.environ, self.release_env(), clear=True), \
                 patch.object(bundle.subprocess, "check_output", return_value=releases) as api, \
                 patch.object(bundle.subprocess, "run") as run, self.assertRaises(ValueError):
             bundle.publish(self.root / "release", "1.10.0")
-        self.assertEqual(api.call_count, 1)  # Reject before even looking up/creating a tag.
+        self.assertEqual(api.call_count, 1)  # Reject before even looking up the tag.
         run.assert_not_called()
 
     def test_moved_remote_tag_blocks_publication(self):
         self.verify(self.fixtures())
-        for manual in (False, True):
-            with self.subTest(manual=manual), patch.dict(os.environ, self.release_env(manual), clear=True), \
-                    patch.object(bundle.subprocess, "check_output", side_effect=["[]", self.tag_response("b" * 40)]), \
-                    patch.object(bundle.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "no longer points"):
-                bundle.publish(self.root / "release", "1.10.0")
-            run.assert_not_called()
+        with patch.dict(os.environ, self.release_env(), clear=True), \
+                patch.object(bundle.subprocess, "check_output", side_effect=["[]", self.tag_response("b" * 40)]), \
+                patch.object(bundle.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "no longer points"):
+            bundle.publish(self.root / "release", "1.10.0")
+        run.assert_not_called()
 
-    def test_publish_creates_missing_manual_tag_once_then_verifies_and_publishes(self):
+    def test_publish_verifies_existing_tag_and_draft_without_creating_tag(self):
         self.verify(self.fixtures())
         output = self.root / "release"
-        for mode in ("manual-missing", "manual-existing", "tag-existing", "tag-annotated"):
+        for mode in ("tag-existing", "tag-annotated"):
             responses = ["[]"]
-            if mode == "manual-missing":
-                responses.append(self.missing_tag())
             responses.append(self.tag_response(kind="tag" if mode == "tag-annotated" else "commit"))
             if mode == "tag-annotated":
                 responses.append(json.dumps({"object": {"type": "commit", "sha": "a" * 40, "url": "fixture"}}))
@@ -412,18 +422,13 @@ class ReleaseBundleTests(unittest.TestCase):
                     for path in output.iterdir():
                         shutil.copy2(path, Path(command[-1]) / path.name)
 
-            with self.subTest(mode=mode), patch.dict(os.environ, self.release_env(mode.startswith("manual")), clear=True), \
+            with self.subTest(mode=mode), patch.dict(os.environ, self.release_env(), clear=True), \
                     patch.object(bundle.subprocess, "check_output", side_effect=api), \
                     patch.object(bundle.subprocess, "run", side_effect=run):
                 bundle.publish(output, "1.10.0")
-            creates = [command for command in events if command[:4] == ["gh", "api", "--method", "POST"]]
-            self.assertEqual(len(creates), int(mode == "manual-missing"))
-            if creates:
-                self.assertEqual(creates[0], ["gh", "api", "--method", "POST", "repos/{owner}/{repo}/git/refs",
-                                             "-f", "ref=refs/tags/v1.10.0", "-f", "sha=" + "a" * 40])
-                index = events.index(creates[0])
-                self.assertEqual(events[index + 1][:3], ["gh", "api", "--include"])
-                self.assertEqual(events[index + 2][:3], ["gh", "release", "create"])
+            self.assertFalse(any("--method" in command for command in events))
+            self.assertEqual([command[2] for command in events if command[:2] == ["gh", "release"]],
+                             ["create", "download", "edit"])
             draft = next(command for command in events if command[:3] == ["gh", "release", "create"])
             self.assertIn("--verify-tag", draft)
             self.assertIn("--draft", draft)
@@ -432,13 +437,33 @@ class ReleaseBundleTests(unittest.TestCase):
 
     def test_missing_triggered_tag_is_never_recreated(self):
         self.verify(self.fixtures())
-        # An injected request on a push cannot authorize creation either.
-        env = dict(self.release_env(), REQUESTED_RELEASE_TAG="v1.10.0")
-        with patch.dict(os.environ, env, clear=True), \
+        with patch.dict(os.environ, self.release_env(), clear=True), \
                 patch.object(bundle.subprocess, "check_output", side_effect=["[]", self.missing_tag()]), \
                 patch.object(bundle.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "never recreate"):
             bundle.publish(self.root / "release", "1.10.0")
         run.assert_not_called()
+
+    def test_incomplete_or_changed_draft_is_never_published(self):
+        self.verify(self.fixtures())
+        output = self.root / "release"
+        for mode in ("missing", "changed"):
+            def run(command, **kwargs):
+                if command[:3] == ["gh", "release", "download"]:
+                    for path in output.iterdir():
+                        shutil.copy2(path, Path(command[-1]) / path.name)
+                    asset = Path(command[-1]) / "Omni-OS-Setup-1.10.0.exe"
+                    if mode == "missing":
+                        asset.unlink()
+                    else:
+                        asset.write_bytes(b"MZtampered")
+
+            with self.subTest(mode=mode), patch.dict(os.environ, self.release_env(), clear=True), \
+                    patch.object(bundle.subprocess, "check_output", side_effect=["[]", self.tag_response()]), \
+                    patch.object(bundle.subprocess, "run", side_effect=run) as commands, \
+                    self.assertRaisesRegex(ValueError, "manual recovery required"):
+                bundle.publish(output, "1.10.0")
+            self.assertEqual([call.args[0][:3] for call in commands.call_args_list],
+                             [["gh", "release", "create"], ["gh", "release", "download"]])
 
     def test_tag_lookup_errors_are_not_missing(self):
         self.verify(self.fixtures())
@@ -446,55 +471,54 @@ class ReleaseBundleTests(unittest.TestCase):
                        'HTTP/2.0 403 Forbidden\n\n{}', 'HTTP/2.0 500 Server Error\n\n{}',
                        'gh: authentication failed (HTTP 404)', ''):
             error = subprocess.CalledProcessError(1, ["gh", "api"], output=output)
-            with self.subTest(output=output), patch.dict(os.environ, self.release_env(manual=True), clear=True), \
+            with self.subTest(output=output), patch.dict(os.environ, self.release_env(), clear=True), \
                     patch.object(bundle.subprocess, "check_output", side_effect=["[]", error]), \
                     patch.object(bundle.subprocess, "run") as run, self.assertRaises(subprocess.CalledProcessError):
                 bundle.publish(self.root / "release", "1.10.0")
             run.assert_not_called()
 
-    def test_tag_create_conflict_is_not_retried(self):
+    def test_missing_tag_is_not_retried_or_written(self):
         self.verify(self.fixtures())
-        with patch.dict(os.environ, self.release_env(manual=True), clear=True), \
+        with patch.dict(os.environ, self.release_env(), clear=True), \
                 patch.object(bundle.subprocess, "check_output", side_effect=["[]", self.missing_tag()]) as api, \
-                patch.object(bundle.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["gh", "api"])) as run, \
-                self.assertRaises(subprocess.CalledProcessError):
+                patch.object(bundle.subprocess, "run") as run, self.assertRaises(ValueError):
             bundle.publish(self.root / "release", "1.10.0")
-        self.assertEqual(run.call_count, 1)
+        run.assert_not_called()
         self.assertEqual(api.call_count, 2)
 
-    def test_malformed_tag_lookup_never_authorizes_creation(self):
+    def test_malformed_tag_lookup_never_authorizes_publication(self):
         self.verify(self.fixtures())
         for response in (self.tag_response().replace("refs/tags/v1.10.0", "refs/tags/v1.10.0-extra"),
                          'HTTP/2.0 200 OK\n\n{"ref":"refs/tags/v1.10.0","object":null}',
                          'HTTP/2.0 201 Created\n\n{}', 'not an HTTP response'):
-            with self.subTest(response=response), patch.dict(os.environ, self.release_env(manual=True), clear=True), \
+            with self.subTest(response=response), patch.dict(os.environ, self.release_env(), clear=True), \
                     patch.object(bundle.subprocess, "check_output", side_effect=["[]", response]), \
                     patch.object(bundle.subprocess, "run") as run, self.assertRaises(ValueError):
                 bundle.publish(self.root / "release", "1.10.0")
             run.assert_not_called()
 
-    def test_created_tag_is_rechecked_before_draft(self):
-        self.verify(self.fixtures())
-        for response in (self.missing_tag(), self.tag_response("b" * 40)):
-            with self.subTest(response=response), patch.dict(os.environ, self.release_env(manual=True), clear=True), \
-                    patch.object(bundle.subprocess, "check_output", side_effect=["[]", self.missing_tag(), response]), \
+    def test_manual_publication_fails_before_api_even_on_existing_tag(self):
+        for tag in (False, True):
+            env = dict(self.release_env(manual=not tag), GITHUB_EVENT_NAME="workflow_dispatch")
+            with self.subTest(tag=tag), patch.dict(os.environ, env, clear=True), \
+                    patch.object(bundle.subprocess, "check_output") as api, \
                     patch.object(bundle.subprocess, "run") as run, self.assertRaises(ValueError):
                 bundle.publish(self.root / "release", "1.10.0")
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(run.call_args.args[0][:4], ["gh", "api", "--method", "POST"])
+            api.assert_not_called()
+            run.assert_not_called()
 
     def test_mismatched_publication_version_fails_before_api(self):
-        with patch.dict(os.environ, self.release_env(manual=True), clear=True), \
+        with patch.dict(os.environ, self.release_env(), clear=True), \
                 patch.object(bundle.subprocess, "check_output") as api, \
                 patch.object(bundle.subprocess, "run") as run, self.assertRaises(ValueError):
             bundle.publish(self.root / "release", "9.9.9")
         api.assert_not_called()
         run.assert_not_called()
 
-    def test_changed_publication_checksums_block_tag_creation(self):
+    def test_changed_publication_checksums_block_publication(self):
         self.verify(self.fixtures())
         (self.root / "release/Omni-OS-Setup-1.10.0.exe").write_bytes(b"MZchanged")
-        with patch.dict(os.environ, self.release_env(manual=True), clear=True), \
+        with patch.dict(os.environ, self.release_env(), clear=True), \
                 patch.object(bundle.subprocess, "check_output") as api, \
                 patch.object(bundle.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "checksums changed"):
             bundle.publish(self.root / "release", "1.10.0")

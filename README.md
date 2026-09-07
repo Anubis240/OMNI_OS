@@ -139,13 +139,21 @@ space for both download and extraction; each compressed release asset must be be
 
 `.github/workflows/ci.yml` runs syntax checks and stdlib unit tests on Windows/Python
 3.11 and 3.12, Ubuntu/Python 3.12, and macOS/Python 3.12; Ubuntu also runs actionlint.
-PRs and ordinary `main` pushes do **not** run the expensive builds. For a single-run
-release, use **Run workflow** on the intended commit's branch and set the optional
-`release_tag` input to e.g. `v1.10.0`. This builds version `1.10.0`, validates all
-targets, then creates the tag and publishes without paying for a second tag-triggered
-build. Leave the input empty on a branch for a **build-only** rehearsal. Tags and
-manual dispatch build all four targets in isolated Python 3.12 environments, after
-tests pass:
+PRs, ordinary `main` pushes and **Run workflow** (`workflow_dispatch`, even on an
+existing tag) run **tests only**, never native builds or publication. To request a
+release after the intended commit is ready, create a new exact version tag locally
+and push that tag explicitly (example; do not reuse an existing release tag):
+
+```bash
+git tag v1.10.0 <intended-commit-sha>
+git push origin refs/tags/v1.10.0
+```
+
+Only a `push` event creating a new `refs/tags/v*` tag (`github.event.created == true`)
+enables build/release jobs. Updates (including forced updates) and deletions of
+existing tags never enable these jobs. Strict version
+validation rejects malformed tags before dependency installation. Valid tag pushes
+build all four targets in isolated Python 3.12 environments, after tests pass:
 
 | Runner | Native distribution |
 |---|---|
@@ -156,16 +164,15 @@ tests pass:
 
 macOS ZIP creation/extraction uses Apple's `ditto` to preserve symlinks and executable
 bits; Linux tar preserves permissions. Windows/macOS/Linux each build their own runtime,
-not cross-compiled copies. No application/API secrets are provided to builds. Branch
-dispatches without a release tag use `0.0.<run_number>`. All distribution and
+not cross-compiled copies. No application/API secrets are provided to builds.
+The pushed tag supplies the numeric build version. All distribution and
 diagnostic artifacts expire after
 **one day**, are uploaded without redundant artifact compression, and remain private
 with the repository. This workflow does not change account spending limits.
 
 Only exact tags `vX.Y.Z` (nonnegative ASCII integers, no leading zeroes, suffixes or
-paths) can publish a Release, including the optional dispatch input. A manual run
-selected on an existing tag follows the same gates. The requested tag is ignored
-outside `workflow_dispatch`; malformed dispatch input fails before dependency installation.
+paths) pushed to the repository can publish a Release. Manual dispatch cannot
+authorize publication, including when selected on an existing tag.
 The release job requires **all four** matrix builds to succeed, downloads only artifacts
 matching `bundle-<run_id>-<target>` from the same run, and requires the exact four target
 directories. Each manifest must match target, numeric version, commit, run ID, exact
@@ -173,15 +180,12 @@ asset names, size and SHA-256. Archives are checked for unsafe paths/links; all 
 assets must be nonempty and below 2 GiB. Only then is aggregate `SHA256SUMS` generated.
 Stable per-target artifact names and `overwrite: true` let only the owning job replace
 its artifact on a failed-job retry; no matrix aggregate output can lose target names.
-After validation and the existing release/draft check, an explicit release dispatch
-may create a missing tag at this run's `GITHUB_SHA`. Existing tags must peel to that
-same commit and are never moved or forced; missing tag-triggered refs are never
-recreated. Only an explicit HTTP 404 permits creation; other API/authentication
-errors and creation conflicts stop the run, without retrying writes. The created
-tag is re-read and its commit verified before drafting. Tag creation uses the
-release job's `GITHUB_TOKEN`, whose tag pushes do not trigger another workflow run.
-No tag or release is created by a failed build or artifact validation; a later
-failure may leave the immutable tag or draft for manual recovery.
+The workflow/helper never creates, recreates or moves a tag. After validation and
+the existing release/draft check, the remote tag must exist and peel to this run's
+`GITHUB_SHA` before drafting. A missing or moved tag, API/authentication error or
+malformed reply stops publication without writing a tag. A failed build or artifact
+validation cannot create a release; the user-pushed tag remains. A later failure
+may leave an unpublished draft for manual recovery.
 
 The release job uses `gh release create --verify-tag --generate-notes` to create a draft,
 re-downloads all six uploaded assets and verifies their hashes before publishing.

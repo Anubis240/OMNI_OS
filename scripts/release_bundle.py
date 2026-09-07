@@ -32,9 +32,8 @@ BASELINE = re.compile(
 
 
 def version_from_env(env):
-    requested = requested_release_tag(env)
-    if requested or env.get("GITHUB_REF_TYPE") == "tag":
-        tag = requested or env.get("GITHUB_REF_NAME", "")
+    if env.get("GITHUB_REF_TYPE") == "tag":
+        tag = env.get("GITHUB_REF_NAME", "")
         if not re.fullmatch("v" + VERSION, tag):
             raise ValueError("Release tag must be exactly vX.Y.Z, without leading zeroes")
         return tag[1:]
@@ -44,13 +43,11 @@ def version_from_env(env):
     return "0.0." + run
 
 
-def requested_release_tag(env):
-    return env.get("REQUESTED_RELEASE_TAG", "") if env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" else ""
-
-
 def release_version_from_env(env):
-    if not requested_release_tag(env) and env.get("GITHUB_REF_TYPE") != "tag":
-        raise ValueError("Release requires a tag or an explicit workflow_dispatch release_tag")
+    if (env.get("GITHUB_EVENT_NAME") != "push" or env.get("GITHUB_REF_TYPE") != "tag"
+            or not env.get("GITHUB_REF", "").startswith("refs/tags/v")
+            or env["GITHUB_REF"] != "refs/tags/" + env.get("GITHUB_REF_NAME", "")):
+        raise ValueError("Release requires a push of an exact vX.Y.Z tag")
     return version_from_env(env)
 
 
@@ -393,7 +390,7 @@ def verify_artifacts(downloads, output, version, commit, run_id):
 
 def remote_tag_reference(tag):
     # Parse the actual HTTP status, never an error-message substring. Only an
-    # explicit 404 permits creation; auth, transport and malformed replies fail.
+    # explicit 404 means absent; auth, transport and malformed replies fail.
     command = ["gh", "api", "--include", f"repos/{{owner}}/{{repo}}/git/ref/tags/{tag}"]
     try:
         response = subprocess.check_output(command, text=True, stderr=subprocess.PIPE)
@@ -434,18 +431,7 @@ def publish(output, version):
     # artifacts from a different commit. Peel annotated tags, bounded to 5 levels.
     reference = remote_tag_reference(tag)
     if reference is None:
-        if requested_release_tag(os.environ) != tag:
-            raise ValueError("Triggered release tag is missing; never recreate it")
-        commit = os.environ["GITHUB_SHA"]
-        if not re.fullmatch(r"[0-9a-f]{40}", commit):
-            raise ValueError("Invalid release commit")
-        # Create only, never PATCH/force or retry a conflicting writer. A tag
-        # created with GITHUB_TOKEN does not trigger another build workflow.
-        subprocess.run(["gh", "api", "--method", "POST", "repos/{owner}/{repo}/git/refs",
-                        "-f", f"ref=refs/tags/{tag}", "-f", f"sha={commit}"], check=True)
-        reference = remote_tag_reference(tag)
-        if reference is None:
-            raise ValueError("Created tag is missing; manual recovery required")
+        raise ValueError("Triggered release tag is missing; never recreate it")
     for _ in range(5):
         if reference["type"] != "tag":
             break
