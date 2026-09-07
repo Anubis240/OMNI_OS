@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import plistlib
 import posixpath
 import re
 import shutil
@@ -59,7 +60,7 @@ def asset_names(target, version):
         return [f"Omni-OS-Windows-x64-{version}.zip", f"Omni-OS-Setup-{version}.exe"]
     if target == "linux-x64":
         return [f"Omni-OS-Linux-x64-{version}.tar.gz"]
-    return [f"Omni-OS-macOS-{target.split('-')[1]}-{version}.zip"]
+    return [f"Omni-OS-macOS-{target.split('-')[1]}-{version}.dmg"]
 
 
 def digest(path):
@@ -483,24 +484,20 @@ def manifest_difference(before, after):
 @contextmanager
 def macos_package_report(target):
     path = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / f"smoke-package-{target}.json"
-    report = {"target": target, "stage": "pre-zip-verify", "errors": [], "native_verify": {},
+    report = {"target": target, "stage": "pre-image-verify", "errors": [], "native_verify": {},
+              "native_commands": [], "retained_paths": [],
               "manifests": {}, "diff": None,
               "limitations": "Manifest equality does not prove equal xattrs, resource forks or ACLs; "
                              "only file hashes, relative paths, types, link targets and modes are compared."}
     failed = False
     try:
         yield report
-    except Exception as error:
+    except BaseException as error:
         failed = True
-        report["errors"].append({"stage": report["stage"], "type": type(error).__name__,
-                                 "message": str(error)})
-        if isinstance(error, subprocess.CalledProcessError):
-            report["errors"][-1].update(returncode=error.returncode,
-                                        stdout=error.stdout, stderr=error.stderr)
+        report["errors"].append(native_error_record(error, report["stage"]))
         raise
     finally:
-        # This scope ends BEFORE extraction cleanup. Never replace a gate's
-        # original exception with a secondary report-writing error.
+        # Never replace a gate's original exception with a report-writing error.
         try:
             path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         except OSError as error:
@@ -512,49 +509,168 @@ def macos_package_report(target):
 def verify_macos_signature(root, diagnostics=None):
     command = ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(root)]
     if diagnostics is None:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, timeout=120)
         return
     try:
-        result = subprocess.run(command, check=True, text=True, capture_output=True)
-    except subprocess.CalledProcessError as error:
-        diagnostics["native_verify"][diagnostics["stage"]] = {
-            "returncode": error.returncode, "stdout": error.stdout, "stderr": error.stderr}
+        result = subprocess.run(command, check=True, text=True, capture_output=True, timeout=120)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        diagnostics["native_verify"][diagnostics["stage"]] = native_error_record(error, diagnostics["stage"])
         raise
     else:
         diagnostics["native_verify"][diagnostics["stage"]] = {
             "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 
+def native_error_record(error, stage):
+    record = {"stage": stage, "type": type(error).__name__, "message": str(error)}
+    if isinstance(error, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+        record["command"] = error.cmd
+        record["returncode"] = getattr(error, "returncode", None)
+        for name in ("stdout", "stderr"):
+            value = getattr(error, name, None)
+            record[name] = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+    return record
+
+
+def run_hdiutil(arguments, diagnostics, *, timeout=120):
+    command = ["/usr/bin/hdiutil", *map(str, arguments)]
+    record = {"stage": diagnostics["stage"], "command": command}
+    diagnostics["native_commands"].append(record)
+    try:
+        result = subprocess.run(command, check=True, text=True, capture_output=True, timeout=timeout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        record.update(native_error_record(error, diagnostics["stage"]))
+        raise
+    record.update(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
+    return result
+
+
+@contextmanager
+def mounted_macos_image(image, mountpoint, diagnostics, *, readonly=False):
+    """Own just this mountpoint; even an interrupted/partial attach gets rollback.
+
+    If detach cannot confirm success, retain the workspace. Never recursively
+    delete a possibly mounted filesystem (including through temp finalizers).
+    """
+    mountpoint.mkdir()
+    failed = False
+    try:
+        result = run_hdiutil(["attach", image, "-plist", "-nobrowse", "-mountpoint", mountpoint,
+                              *(["-readonly"] if readonly else [])], diagnostics)
+        entities = plistlib.loads(result.stdout.encode("utf-8"))["system-entities"]
+        if not any(entity.get("mount-point") == str(mountpoint) for entity in entities):
+            raise ValueError("hdiutil did not confirm the requested mountpoint")
+        yield mountpoint
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        stage = diagnostics["stage"]
+        diagnostics["stage"] = "detach-readonly" if readonly else "detach-writable"
+        try:
+            run_hdiutil(["detach", mountpoint], diagnostics)
+        except BaseException as error:
+            diagnostics["retained_paths"].append(str(mountpoint.parent))
+            diagnostics["errors"].append(native_error_record(error, diagnostics["stage"]))
+            if not failed:
+                stage = diagnostics["stage"]
+                raise
+        finally:
+            diagnostics["stage"] = stage
+
+
+def macos_image_size_mib(root):
+    # Reserve at least each file's logical, block-rounded size: sparse/compressed
+    # source extents may expand on copy. Include directory/link allocation too.
+    allocated = 0
+    for path in (root, *root.rglob("*")):
+        info = path.lstat()
+        allocated += max(getattr(info, "st_blocks", 0) * 512,
+                         ((info.st_size + 4095) // 4096) * 4096)
+    mib = 1024 ** 2
+    return (allocated * 6 + 5 * mib - 1) // (5 * mib) + 256
+
+
+def verify_dmg(path):
+    """Portable format gate only; native mounting/smoke happens on the builder."""
+    if path.suffix != ".dmg" or path.stat().st_size < 512:
+        raise ValueError("Invalid DMG extension/size")
+    with path.open("rb") as stream:
+        stream.seek(-512, os.SEEK_END)
+        if stream.read(4) != b"koly":
+            raise ValueError("DMG is missing its UDIF trailer")
+
+
+def compare_macos_image(root, before, diagnostics, key):
+    after = browser_tree_manifest(root, all_modes=True)
+    diagnostics["manifests"][key] = after
+    difference = manifest_difference(before, after)
+    diagnostics["diff" if key == "after" else "copy_diff"] = difference
+    if before != after:
+        raise ValueError("macOS image changed app bytes, paths, types, modes or links")
+
+
 def package_macos(root, archive, target):
     if sys.platform != "darwin":
         raise RuntimeError("macOS package diagnostics require a native macOS runner")
-    with tempfile.TemporaryDirectory(prefix="omni-final-package-") as temporary:
-        with macos_package_report(target) as diagnostics:
+    with macos_package_report(target) as diagnostics:
+        # mkdtemp has no recursive finalizer: failed detaches must leave it alone.
+        temporary = Path(tempfile.mkdtemp(prefix="omni-final-package-")).resolve()
+        diagnostics["workspace"] = str(temporary)
+        failed = False
+        try:
+            root = root.resolve()
+            archive = archive.resolve()
+            if archive.suffix != ".dmg":
+                raise ValueError("macOS packages require .dmg")
             verify_macos_signature(root, diagnostics)
-            diagnostics["stage"] = "pre-zip-manifest"
-            # Freeze BEFORE ditto: never compare against a potentially mutated
-            # build tree after archiving/extraction.
+            diagnostics["stage"] = "pre-image-manifest"
+            # Freeze before any copy; never rebaseline from a mutated source.
             before = browser_tree_manifest(root, all_modes=True)
             diagnostics["manifests"]["before"] = before
-            diagnostics["stage"] = "archive"
-            subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
-                            str(root), str(archive)], check=True)
-            diagnostics["stage"] = "archive-members"
-            archive_members_safe(archive)
-            diagnostics["stage"] = "extract"
-            subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), temporary],
-                           check=True, text=True, capture_output=True)
-            extracted = Path(temporary) / root.name
-            diagnostics["stage"] = "post-zip-privacy"
-            privacy(extracted)
-            diagnostics["stage"] = "post-zip-manifest"
-            after = browser_tree_manifest(extracted, all_modes=True)
-            diagnostics["manifests"]["after"] = after
-            diagnostics["diff"] = manifest_difference(before, after)
-            report = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / f"smoke-{target}.json"
-            report.unlink(missing_ok=True)
-            smoke_extracted(extracted, report, diagnostics=diagnostics)
+            diagnostics["stage"] = "create-image"
+            image = temporary / "transport.sparseimage"
+            run_hdiutil(["create", image, "-size", f"{macos_image_size_mib(root)}m",
+                         "-fs", "APFS", "-volname", "Omni-OS", "-type", "SPARSE"], diagnostics, timeout=300)
+            diagnostics["stage"] = "attach-writable"
+            with mounted_macos_image(image, temporary / "writable", diagnostics) as mounted:
+                diagnostics["stage"] = "copy-image"
+                copied = mounted / root.name
+                # No ditto/-srcfolder: ._ files are literal signed resources,
+                # even when their contents look exactly like AppleDouble.
+                shutil.copytree(root, copied, symlinks=True)
+                diagnostics["stage"] = "copy-image-manifest"
+                compare_macos_image(copied, before, diagnostics, "copied")
+                diagnostics["stage"] = "copy-image-verify"
+                verify_macos_signature(copied, diagnostics)
+            diagnostics["stage"] = "convert-image"
+            run_hdiutil(["convert", image, "-format", "UDZO", "-o", archive], diagnostics, timeout=600)
+            diagnostics["stage"] = "image-format"
+            verify_dmg(archive)
+            diagnostics["stage"] = "attach-readonly"
+            with mounted_macos_image(archive, temporary / "readonly", diagnostics, readonly=True) as mounted:
+                extracted = mounted / root.name
+                diagnostics["stage"] = "post-image-privacy"
+                privacy(extracted)
+                diagnostics["stage"] = "post-image-manifest"
+                compare_macos_image(extracted, before, diagnostics, "after")
+                report = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / f"smoke-{target}.json"
+                report.unlink(missing_ok=True)
+                smoke_extracted(extracted, report, diagnostics=diagnostics)
             diagnostics["stage"] = "complete"
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            if not diagnostics["retained_paths"]:
+                try:
+                    shutil.rmtree(temporary)
+                except OSError as error:
+                    diagnostics["retained_paths"].append(str(temporary))
+                    diagnostics["errors"].append(native_error_record(error, "cleanup"))
+                    if not failed:
+                        diagnostics["stage"] = "cleanup"
+                        raise
 
 
 def smoke_extracted(root, report, qt="offscreen", *, diagnostics=None):
@@ -563,7 +679,7 @@ def smoke_extracted(root, report, qt="offscreen", *, diagnostics=None):
                   else root / ("Omni-OS.exe" if sys.platform == "win32" else "Omni-OS"))
     if root.suffix == ".app":
         if diagnostics is not None:
-            diagnostics["stage"] = "post-zip-verify"
+            diagnostics["stage"] = "post-image-verify"
         verify_macos_signature(root, diagnostics)
     if diagnostics is not None:
         diagnostics["stage"] = "smoke"
@@ -675,6 +791,8 @@ def verify_artifacts(downloads, output, version, commit, run_id):
                 with path.open("rb") as stream:
                     if stream.read(2) != b"MZ":
                         raise ValueError("Installer is not a PE executable")
+            elif name.endswith(".dmg"):
+                verify_dmg(path)
             else:
                 archive_members_safe(path)
             verified.append(path)

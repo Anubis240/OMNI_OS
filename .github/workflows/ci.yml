@@ -106,7 +106,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc)) { throw 'Runner must provide Inno Setup 6' }
           & $iscc "/DAppVersion=$env:APP_VERSION" installer/installer.iss
           if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
-      - name: Privacy gate, final archives, fresh extraction and scrubbed-environment smoke
+      - name: Privacy gate, final ZIP/tar/DMG, fresh extraction or mount and scrubbed-environment smoke
         timeout-minutes: 25
         run: |
           & $env:BUILD_PYTHON -S scripts/release_bundle.py package --target $env:BUNDLE_TARGET

@@ -109,9 +109,12 @@ After all four native builds pass, download from this repository's **GitHub Rele
 - `Omni-OS-Setup-X.Y.Z.exe`: per-user installer, defaults to `%LOCALAPPDATA%\Programs\Omni-OS`.
 - `Omni-OS-Windows-x64-X.Y.Z.zip`: extract the **entire** archive to a writable directory,
   then run `Omni-OS\Omni-OS.exe`. Do not run inside the ZIP or copy the EXE alone.
-- `Omni-OS-macOS-x64-X.Y.Z.zip` or `Omni-OS-macOS-arm64-X.Y.Z.zip`: choose your CPU,
-  extract with Archive Utility or `ditto -x -k archive.zip destination`, and move the
-  entire `Omni-OS.app` into Applications. These are native apps, not universal binaries.
+- `Omni-OS-macOS-x64-X.Y.Z.dmg` or `Omni-OS-macOS-arm64-X.Y.Z.dmg`: choose your CPU,
+  open the DMG in Finder, drag the entire `Omni-OS.app` into Applications, then eject
+  the image. These are native apps, not universal binaries. To mount from Terminal:
+  `hdiutil attach -readonly -nobrowse Omni-OS-macOS-arm64-X.Y.Z.dmg`; after copying,
+  eject with `hdiutil detach /Volumes/Omni-OS` (use the actual mountpoint printed by
+  attach if that volume name was already in use). Launch the installed app.
 - `Omni-OS-Linux-x64-X.Y.Z.tar.gz`: `tar -xzf archive.tar.gz`, keep the whole `Omni-OS`
   folder and run `./Omni-OS/Omni-OS`. No AppImage/FUSE is required.
 - `SHA256SUMS`: aggregate SHA-256 checksums for all five binaries (compare with
@@ -159,11 +162,24 @@ build all four targets in isolated Python 3.12 environments, after tests pass:
 |---|---|
 | `windows-2022`, x64 | Portable ZIP and per-user Inno Setup 6 installer |
 | `ubuntu-22.04`, x64 | onedir tar.gz |
-| `macos-15-intel`, x64 | `.app` ZIP |
-| `macos-15`, arm64 | `.app` ZIP |
+| `macos-15-intel`, x64 | `.app` in APFS DMG |
+| `macos-15`, arm64 | `.app` in APFS DMG |
 
-macOS ZIP creation/extraction uses Apple's `ditto` to preserve symlinks and executable
-bits; Linux tar preserves permissions. Windows/macOS/Linux each build their own runtime,
+macOS packaging creates an empty APFS sparse image with `hdiutil`, mounts it, and
+copies the original app using Python `shutil.copytree(symlinks=True)`. Literal `._`
+resources remain ordinary files, even with AppleDouble-formatted bytes; no ZIP
+extraction or `hdiutil -srcfolder` copying can reinterpret them. The helper compares
+paths, file hashes, types, modes and link targets against a snapshot taken before
+copying and verifies `codesign --verify --deep --strict --verbose=4`. It then detaches,
+converts to compressed UDZO DMG, mounts that final image read-only, repeats the
+comparison/signature gate and runs the smoke test from that mount. Any difference
+blocks the artifact manifest; packaging never re-signs the app. Manifest equality
+does not prove equal xattrs, resource forks or ACLs; the native signature gate is
+still required. `smoke-package-<target>.json` records stages, native command output,
+manifest differences and errors even on failure. Detach failures block packaging
+and retain the temporary workspace, recorded in `retained_paths`, rather than
+recursively deleting a potentially mounted filesystem. Linux tar preserves permissions.
+Windows/macOS/Linux each build their own runtime,
 not cross-compiled copies. No application/API secrets are provided to builds.
 The pushed tag supplies the numeric build version. All distribution and
 diagnostic artifacts expire after
@@ -176,7 +192,9 @@ authorize publication, including when selected on an existing tag.
 The release job requires **all four** matrix builds to succeed, downloads only artifacts
 matching `bundle-<run_id>-<target>` from the same run, and requires the exact four target
 directories. Each manifest must match target, numeric version, commit, run ID, exact
-asset names, size and SHA-256. Archives are checked for unsafe paths/links; all five
+asset names, size and SHA-256. ZIP/tar archives are checked for unsafe paths/links;
+DMGs require the `.dmg` extension and UDIF `koly` trailer (native contents were checked
+on the macOS builder, not mounted by the Linux release job). All five
 assets must be nonempty and below 2 GiB. Only then is aggregate `SHA256SUMS` generated.
 Stable per-target artifact names and `overwrite: true` let only the owning job replace
 its artifact on a failed-job retry; no matrix aggregate output can lose target names.
@@ -202,8 +220,8 @@ application, performs local NudeNet inference, and renders inline HTML offline i
 `about:blank` headlessly with
 each bundled browser in temporary profiles. It does not import `main`, start voice,
 create app configuration/keys/certificates, contact APIs, or require Internet.
-CI first archives, then extracts into a new temporary directory and runs **that final
-package**, with a fresh HOME and PATH limited to OS bins, without inherited browser,
+CI first packages, then extracts the final ZIP/tar or mounts the final DMG read-only
+and runs **that final package**, with a fresh HOME and PATH limited to OS bins, without inherited browser,
 Python, venv, Homebrew or API-key environment. The frozen entry point restores bundled
 browser resolution. Both Windows ZIP and silently installed setup payload are smoked.
 All seven checks, a successful exit, and a JSON report **outside the whole bundle**
@@ -241,6 +259,24 @@ fully locked, so these are not bit-for-bit reproducible builds. The pin/closure 
 must be validated by actual native CI. Until those jobs run successfully, additional
 OS/architecture support is a **release target, not a verified runtime claim**. macOS
 13/14, ARM Linux/Windows, notarization and complete hardware/GUI coverage are not claimed.
+
+### Local macOS packaging (Terminal)
+
+On the matching macOS 15+ CPU, build `dist/Omni-OS.app` using the same isolated
+Python 3.12/PyInstaller/browser steps as CI. From that clean checkout, package and
+validate it without publishing:
+
+```bash
+APP_VERSION=1.10.0 GITHUB_SHA="$(git rev-parse HEAD)" GITHUB_RUN_ID=0 \
+  .venv-ci/bin/python -S scripts/release_bundle.py package --target macos-arm64
+# Use --target macos-x64 for an Intel build; release-assets must not exist yet.
+```
+
+This runs the same integrity, signature and smoke gates, not a cross-build. Allow
+temporary space outside `release-assets` for the sparse image, final compressed DMG
+and app: image capacity reserves block-rounded source allocation plus 20% and
+256 MiB. The final asset must still be below 2 GiB. A local pass does not establish
+notarization, Gatekeeper approval or clean-machine/native CI coverage.
 
 ### Local Windows build (PowerShell)
 

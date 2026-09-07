@@ -34,6 +34,8 @@ class ReleaseBundleTests(unittest.TestCase):
     def test_expected_five_distinct_assets(self):
         names = [name for target in bundle.TARGETS for name in bundle.asset_names(target, "1.10.0")]
         self.assertEqual(len(set(names)), 5)
+        self.assertEqual([name for name in names if name.endswith(".dmg")],
+                         ["Omni-OS-macOS-x64-1.10.0.dmg", "Omni-OS-macOS-arm64-1.10.0.dmg"])
         with self.assertRaises(ValueError):
             bundle.asset_names("macos-universal", "1.10.0")
 
@@ -292,6 +294,8 @@ class ReleaseBundleTests(unittest.TestCase):
                 path = directory / name
                 if name.endswith(".exe"):
                     path.write_bytes(b"MZfixture")
+                elif name.endswith(".dmg"):
+                    path.write_bytes(b"fixture payload" + b"koly" + bytes(508))
                 elif name.endswith(".zip"):
                     with zipfile.ZipFile(path, "w") as archive:
                         archive.writestr("Omni-OS/fixture", "fixture")
@@ -349,6 +353,28 @@ class ReleaseBundleTests(unittest.TestCase):
     def test_oversize_asset_blocks_release(self):
         with patch.object(bundle, "MAX_ASSET", 5), self.assertRaises(ValueError):
             self.verify(self.fixtures())
+
+    def test_dmg_format_checked_even_with_matching_checksum(self):
+        downloads = self.fixtures()
+        directory = downloads / "bundle-123-macos-arm64"
+        path = directory / bundle.asset_names("macos-arm64", "1.10.0")[0]
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for payload in (b"koly", b"koly" + bytes(1020), bytes(1024)):
+            path.write_bytes(payload)
+            manifest["assets"][path.name] = dict(sha256=bundle.digest(path), size=len(payload))
+            manifest_path.write_text(json.dumps(manifest))
+            with self.subTest(size=len(payload)), self.assertRaisesRegex(ValueError, "DMG"):
+                self.verify(downloads)
+        self.assertFalse((self.root / "release").exists())
+
+    def test_old_mac_zip_is_not_an_expected_asset(self):
+        downloads = self.fixtures()
+        directory = downloads / "bundle-123-macos-x64"
+        path = directory / bundle.asset_names("macos-x64", "1.10.0")[0]
+        path.rename(path.with_suffix(".zip"))
+        with self.assertRaisesRegex(ValueError, "Unexpected artifact file set"):
+            self.verify(downloads)
 
     def test_all_seven_checks_and_xcb_are_required(self):
         path = self.root / "report.json"
