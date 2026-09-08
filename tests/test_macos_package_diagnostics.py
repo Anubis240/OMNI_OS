@@ -11,7 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from scripts import release_bundle as bundle
 
@@ -35,7 +35,8 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
 
     @contextmanager
     def native_fixture(self, *, target="macos-arm64", failures=(), mutation=None,
-                       malformed=False, cleanup_failure=False):
+                       malformed=False, cleanup_failure=False, detach_results=None):
+        detach_results = {stage: iter(results) for stage, results in (detach_results or {}).items()}
         original_copytree = shutil.copytree
         original_rmtree = shutil.rmtree
         original_mkdtemp = tempfile.mkdtemp
@@ -95,6 +96,7 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
                     stdout = ("bad plist" if malformed else plistlib.dumps({"system-entities": [
                         {"dev-entry": "/dev/mock", "mount-point": str(mountpoint)}]}).decode())
                 elif verb == "detach":
+                    self.assertEqual(len(command), 3)
                     stage = "detach-" + ("readonly" if Path(command[2]).name == "readonly" else "writable")
                 elif verb == "create":
                     stage = "create-image"
@@ -115,6 +117,11 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
                 else:
                     self.fail(f"Unexpected native command: {command}")
             self.events.append(stage)
+            if stage in detach_results:
+                error = next(detach_results[stage], None)
+                if error is not None:
+                    error.cmd = command
+                    raise error
             if stage in failures:
                 raise self.detach_error if stage.startswith("detach-") else self.native_error
             return subprocess.CompletedProcess(command, 0, stdout, "native stderr")
@@ -137,6 +144,7 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
             stack.enter_context(patch.object(bundle.shutil, "copytree", side_effect=copytree))
             cleanup = stack.enter_context(patch.object(bundle.shutil, "rmtree", side_effect=rmtree))
             stack.enter_context(patch.object(bundle.subprocess, "run", side_effect=native_run))
+            self.sleep = stack.enter_context(patch.object(bundle.time, "sleep"))
             stack.enter_context(patch.object(bundle.subprocess, "Popen", side_effect=smoke))
             stack.enter_context(patch.object(bundle, "verify_report"))
             archives = stack.enter_context(patch.object(bundle, "archive_members_safe"))
@@ -150,6 +158,7 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
         for target in ("macos-arm64", "macos-x64"):
             with self.subTest(target=target), self.native_fixture(target=target):
                 bundle.package(target, "1.10.0", self.output / target)
+                self.sleep.assert_not_called()
             report = self.report(target)
             self.assertEqual(report["stage"], "complete")
             self.assertEqual(report["errors"], [])
@@ -210,11 +219,79 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
                     bundle.package("macos-arm64", "1.10.0", self.output / str(index))
                 self.assertIs(raised.exception, self.native_error if len(failures) > 1 else self.detach_error)
                 self.assertFalse(any(Path(call.args[0]) == self.workspace for call in cleanup.call_args_list))
+                self.assertEqual(self.sleep.call_args_list, [call(1), call(2), call(4)])
             report = self.report()
+            stage = next(stage for stage in failures if stage.startswith("detach-"))
+            attempts = [record for record in report["native_commands"] if record["stage"] == stage]
+            self.assertEqual(len(attempts), 4)
+            self.assertTrue(all(record["returncode"] == 16 for record in attempts))
+            self.assertTrue((self.workspace / stage.removeprefix("detach-")).is_dir())
+            self.assertEqual(report["stage"], stage if len(failures) == 1 else
+                             next(failure for failure in failures if failure != stage))
             self.assertEqual(report["retained_paths"], [str(self.workspace)])
             self.assertTrue(self.workspace.is_dir())
             self.assertTrue(any(error.get("stderr") == "Resource busy" for error in report["errors"]))
             self.assertFalse((self.output / str(index) / "manifest.json").exists())
+
+    def test_busy_detach_recovers_without_retaining_workspace(self):
+        for stage in ("detach-writable", "detach-readonly"):
+            for busy_count in (1, 3):
+                error = subprocess.CalledProcessError(16, ["detach fixture"],
+                                                     output="busy stdout", stderr="localized message")
+                output = self.output / f"{stage}-{busy_count}"
+                with self.subTest(stage=stage, busy_count=busy_count), self.native_fixture(
+                        detach_results={stage: [error] * busy_count}):
+                    bundle.package("macos-arm64", "1.10.0", output)
+                    self.assertEqual(self.sleep.call_args_list,
+                                     [call(delay) for delay in (1, 2, 4)[:busy_count]])
+                report = self.report()
+                attempts = [record for record in report["native_commands"] if record["stage"] == stage]
+                self.assertEqual([record["returncode"] for record in attempts], [16] * busy_count + [0])
+                self.assertEqual(attempts[0]["stdout"], "busy stdout")
+                self.assertEqual(attempts[0]["stderr"], "localized message")
+                self.assertTrue(all(record["command"] == attempts[0]["command"] for record in attempts))
+                self.assertEqual(report["stage"], "complete")
+                self.assertEqual(report["retained_paths"], [])
+                self.assertFalse(self.workspace.exists())
+                self.assertTrue((output / "manifest.json").is_file())
+
+    def test_nonbusy_and_timeout_detach_fail_without_retry(self):
+        errors = [subprocess.CalledProcessError(code, ["detach fixture"], stderr="Resource busy")
+                  for code in (1, 17)]
+        errors.append(subprocess.TimeoutExpired(["detach fixture"], 120, stderr=b"Resource busy"))
+        for index, error in enumerate(errors):
+            with self.subTest(error=error), self.native_fixture(
+                    detach_results={"detach-writable": [error]}) as cleanup:
+                with self.assertRaises(type(error)) as raised:
+                    bundle.package("macos-arm64", "1.10.0", self.output / str(index))
+                self.assertIs(raised.exception, error)
+                self.sleep.assert_not_called()
+                cleanup.assert_not_called()
+            report = self.report()
+            attempts = [record for record in report["native_commands"] if record["stage"] == "detach-writable"]
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(report["stage"], "detach-writable")
+            self.assertEqual(report["retained_paths"], [str(self.workspace)])
+            self.assertTrue((self.workspace / "writable" / self.root.name / "resource").is_file())
+            self.assertFalse((self.output / str(index) / "manifest.json").exists())
+
+    def test_attach_rollback_retries_busy_and_preserves_attach_error(self):
+        for stage in ("attach-writable", "attach-readonly"):
+            error = subprocess.CalledProcessError(16, ["detach fixture"])
+            detach_stage = stage.replace("attach-", "detach-")
+            with self.subTest(stage=stage), self.native_fixture(
+                    failures={stage}, detach_results={detach_stage: [error]}):
+                with self.assertRaises(subprocess.CalledProcessError) as raised:
+                    bundle.package("macos-arm64", "1.10.0", self.output / stage)
+                self.assertIs(raised.exception, self.native_error)
+                self.sleep.assert_called_once_with(1)
+            report = self.report()
+            attempts = [record for record in report["native_commands"] if record["stage"] == detach_stage]
+            self.assertEqual([record["returncode"] for record in attempts], [16, 0])
+            self.assertEqual(report["stage"], stage)
+            self.assertEqual(report["retained_paths"], [])
+            self.assertFalse(self.workspace.exists())
+            self.assertFalse((self.output / stage / "manifest.json").exists())
 
     def test_invalid_attach_plist_rolls_back(self):
         with self.native_fixture(malformed=True), self.assertRaises(plistlib.InvalidFileException):

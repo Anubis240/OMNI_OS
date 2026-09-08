@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 
 
@@ -545,6 +547,17 @@ def run_hdiutil(arguments, diagnostics, *, timeout=120):
     return result
 
 
+def detach_macos_image(mountpoint, diagnostics):
+    """Retry only EBUSY with bounded backoff; never force an unmount."""
+    for delay in (1, 2, 4, None):
+        try:
+            return run_hdiutil(["detach", mountpoint], diagnostics)
+        except subprocess.CalledProcessError as error:
+            if error.returncode != errno.EBUSY or delay is None:
+                raise
+        time.sleep(delay)
+
+
 @contextmanager
 def mounted_macos_image(image, mountpoint, diagnostics, *, readonly=False):
     """Own just this mountpoint; even an interrupted/partial attach gets rollback.
@@ -568,7 +581,7 @@ def mounted_macos_image(image, mountpoint, diagnostics, *, readonly=False):
         stage = diagnostics["stage"]
         diagnostics["stage"] = "detach-readonly" if readonly else "detach-writable"
         try:
-            run_hdiutil(["detach", mountpoint], diagnostics)
+            detach_macos_image(mountpoint, diagnostics)
         except BaseException as error:
             diagnostics["retained_paths"].append(str(mountpoint.parent))
             diagnostics["errors"].append(native_error_record(error, diagnostics["stage"]))
