@@ -77,6 +77,10 @@ class SettingsPanel(QWidget):
         col.addWidget(self._build_trader_section())
         col.addWidget(self._build_claude_section())
         col.addWidget(self._build_codex_section())
+        col.addWidget(self._build_opencode_section())
+        col.addWidget(self._build_openhands_section())
+        col.addWidget(self._build_grok_section())
+        col.addWidget(self._build_blackbox_section())
         col.addWidget(self._build_remote_dashboard_section())
         col.addWidget(self._build_api_keys_section())
         col.addWidget(self._build_mcp_section())
@@ -234,6 +238,10 @@ class SettingsPanel(QWidget):
         self._new_companion_backend.addItem("Voice (real-time)", userData="gemini_live")
         self._new_companion_backend.addItem("Text (Claude-powered)", userData="claude_agent")
         self._new_companion_backend.addItem("Text (Codex-powered)", userData="codex_agent")
+        self._new_companion_backend.addItem("Text (OpenCode-powered)", userData="opencode_agent")
+        self._new_companion_backend.addItem("Text (OpenHands-powered)", userData="openhands_agent")
+        self._new_companion_backend.addItem("Text (Grok Build-powered)", userData="grok_agent")
+        self._new_companion_backend.addItem("Text (Blackbox-powered)", userData="blackbox_agent")
         self._new_companion_backend.setFont(QFont("Segoe UI", 9))
         self._new_companion_backend.setStyleSheet(
             f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
@@ -332,6 +340,8 @@ class SettingsPanel(QWidget):
             rlay.addWidget(dot)
             backend_label = {
                 "gemini_live": "Voice", "claude_agent": "Text (Claude)", "codex_agent": "Text (Codex)",
+                "opencode_agent": "Text (OpenCode)", "openhands_agent": "Text (OpenHands)",
+                "grok_agent": "Text (Grok Build)", "blackbox_agent": "Text (Blackbox)",
             }.get(comp.get("backend"), comp.get("backend", "?"))
             lbl = QLabel(("★ " if is_active else "") + f"{comp['name']}  —  {backend_label}")
             lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold if is_active else QFont.Weight.Normal))
@@ -393,11 +403,21 @@ class SettingsPanel(QWidget):
         if self.settings.get("active_companion_id") == companion_id:
             self.settings["active_companion_id"] = ""
         # Harmless no-op in whichever module the companion's backend never
-        # actually used — both just pop a dict key that may not be there.
+        # actually used — each just pops a dict key that may not be there
+        # (or, for openhands/blackbox, is simply a no-op — see those
+        # modules' forget_session docstrings).
         from actions.claude_companion import forget_session as forget_claude_session
         from actions.codex_companion import forget_session as forget_codex_session
+        from actions.opencode_companion import forget_session as forget_opencode_session
+        from actions.openhands_companion import forget_session as forget_openhands_session
+        from actions.grok_companion import forget_session as forget_grok_session
+        from actions.blackbox_companion import forget_session as forget_blackbox_session
         forget_claude_session(companion_id)
         forget_codex_session(companion_id)
+        forget_opencode_session(companion_id)
+        forget_openhands_session(companion_id)
+        forget_grok_session(companion_id)
+        forget_blackbox_session(companion_id)
         self._refresh_companions_list()
         self._persist("Companion removed.")
 
@@ -511,6 +531,121 @@ class SettingsPanel(QWidget):
             "vaultDir": self._codex_vault.text().strip(),
         }
         self._persist("Codex delegation settings saved.")
+
+    # ---------- OpenCode / OpenHands / Grok Build / Blackbox delegation ----------
+    # All four follow the exact same {enabled, cliPath, vaultDir} shape as Codex
+    # above — see core/settings_store.py's comment and each actions/*_companion.py
+    # module for how confidently that backend's CLI flags were verified.
+
+    def _build_agent_cli_section(self, *, key: str, section_title: str, product_name: str,
+                                  note: str, attr_prefix: str, placeholder: str):
+        """Shared builder for the four simpler CLI-delegation sections below
+        (no special .cmd/.ps1/.bat wrapper-script warning like Claude/Codex
+        have — this project has no confirmed evidence any of these four ship
+        that same npm-wrapper distribution pattern, so it isn't invented
+        here). Returns the section widget; the four thin wrappers below just
+        supply the copy and field names."""
+        C = self._C
+        wrap, lay = self._section(section_title)
+
+        note_lbl = QLabel(note)
+        note_lbl.setFont(QFont("Segoe UI", 8))
+        note_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note_lbl.setWordWrap(True)
+        lay.addWidget(note_lbl)
+
+        ca = self.settings.get(key, {})
+        enabled_cb = QCheckBox(f"Enable {product_name} delegation")
+        enabled_cb.setFont(QFont("Segoe UI", 9))
+        enabled_cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        enabled_cb.setChecked(bool(ca.get("enabled")))
+        lay.addWidget(enabled_cb)
+        setattr(self, f"_{attr_prefix}_enabled", enabled_cb)
+
+        cli_input = self._labeled_input(lay, "CLI path", placeholder)
+        cli_input.setText(ca.get("cliPath", ""))
+        setattr(self, f"_{attr_prefix}_cli", cli_input)
+        lay.addWidget(self._make_button("BROWSE…", lambda: self._on_browse_agent_cli(attr_prefix)))
+
+        vault_input = self._labeled_input(lay, "Working directory (vault/project root)")
+        vault_input.setText(ca.get("vaultDir", ""))
+        setattr(self, f"_{attr_prefix}_vault", vault_input)
+        lay.addWidget(self._make_button("BROWSE…", lambda: self._browse_dir(vault_input)))
+
+        lay.addWidget(self._make_button("SAVE", lambda: self._on_save_agent_cli(key, attr_prefix, product_name)))
+        return wrap
+
+    def _on_browse_agent_cli(self, attr_prefix: str):
+        path, _ = QFileDialog.getOpenFileName(self, "Select CLI executable", "", "Executables (*.exe);;All files (*)")
+        if path:
+            getattr(self, f"_{attr_prefix}_cli").setText(path)
+
+    def _on_save_agent_cli(self, key: str, attr_prefix: str, product_name: str):
+        cli = getattr(self, f"_{attr_prefix}_cli").text().strip()
+        enabled = getattr(self, f"_{attr_prefix}_enabled").isChecked()
+        if enabled and not cli:
+            self._status_sig.emit(f"Set a {product_name} CLI path before enabling delegation.", True)
+            return
+        self.settings[key] = {
+            "enabled": enabled, "cliPath": cli,
+            "vaultDir": getattr(self, f"_{attr_prefix}_vault").text().strip(),
+        }
+        self._persist(f"{product_name} delegation settings saved.")
+
+    def _build_opencode_section(self) -> QWidget:
+        return self._build_agent_cli_section(
+            key="opencode_agent", section_title="OPENCODE DELEGATION", product_name="OpenCode",
+            attr_prefix="opencode",
+            placeholder=r"C:\Users\you\AppData\Local\Programs\opencode\opencode.exe",
+            note=(
+                "Same idea as Claude Code delegation above, but for a companion set to "
+                "\"Text (OpenCode-powered)\" — hands that companion's conversation off to "
+                "a local OpenCode CLI session. Continuity between turns is scoped to the "
+                "working directory below (OpenCode's own --continue semantics), so give "
+                "each OpenCode-backed companion its own directory if you run more than one. "
+                "Off by default."
+            ),
+        )
+
+    def _build_openhands_section(self) -> QWidget:
+        return self._build_agent_cli_section(
+            key="openhands_agent", section_title="OPENHANDS DELEGATION", product_name="OpenHands",
+            attr_prefix="openhands",
+            placeholder=r"C:\Users\you\AppData\Local\Programs\openhands\openhands.exe",
+            note=(
+                "Same idea as Claude Code delegation above, but for a companion set to "
+                "\"Text (OpenHands-powered)\". Runs in OpenHands' headless mode, which has "
+                "no documented resume flag — each turn is an independent task rather than a "
+                "continued conversation (see actions/openhands_companion.py). Off by default."
+            ),
+        )
+
+    def _build_grok_section(self) -> QWidget:
+        return self._build_agent_cli_section(
+            key="grok_agent", section_title="GROK BUILD DELEGATION", product_name="Grok Build",
+            attr_prefix="grok",
+            placeholder=r"C:\Users\you\AppData\Local\Programs\grok\grok.exe",
+            note=(
+                "Same idea as Claude Code delegation above, but for a companion set to "
+                "\"Text (Grok Build-powered)\" — xAI's coding CLI. Its flags were verified "
+                "against community docs only, not an official reference (see "
+                "actions/grok_companion.py) — check `grok --help` if delegation misbehaves. "
+                "Off by default."
+            ),
+        )
+
+    def _build_blackbox_section(self) -> QWidget:
+        return self._build_agent_cli_section(
+            key="blackbox_agent", section_title="BLACKBOX DELEGATION", product_name="Blackbox",
+            attr_prefix="blackbox",
+            placeholder=r"C:\Users\you\AppData\Local\Programs\blackbox\blackbox.exe",
+            note=(
+                "Same idea as Claude Code delegation above, but for a companion set to "
+                "\"Text (Blackbox-powered)\". Lowest-confidence of the four CLI backends — "
+                "only its one-shot prompt flag is documented; no multi-turn continuity "
+                "(see actions/blackbox_companion.py). Off by default."
+            ),
+        )
 
     # ---------- Remote Dashboard ----------
 

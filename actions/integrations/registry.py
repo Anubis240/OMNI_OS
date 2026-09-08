@@ -21,6 +21,7 @@ from . import (
     huggingface,
     jira,
     notion,
+    obsidian,
     onedrive,
     ollama_local,
     openai_api,
@@ -36,6 +37,7 @@ from . import (
 _STANDALONE_MODULES = {
     "github": github,
     "notion": notion,
+    "obsidian": obsidian,
     "slack": slack,
     "trello": trello,
     "discord": discord_bot,

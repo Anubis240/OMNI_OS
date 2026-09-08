@@ -1247,12 +1247,38 @@ class TraderPanel(QWidget):
         # irreversible actions (see the wallet's "I OWN THIS RISK" typed
         # ack) — a click confirmation is lighter since resetting the paper
         # ledger risks no real funds, unlike wallet key material.
-        reply = QMessageBox.question(
-            self, "Reset ledger?",
-            "This permanently wipes the trade history, P&L, and watchlist — there's no undo.\n\nReset the ledger?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        #
+        # Bug found by GEMZ4US 2026-09-08 (shipped in v1.10.3, fixed here):
+        # the plain QMessageBox.question() convenience call renders with
+        # every piece of app-supplied text invisible — message body AND
+        # both button labels — leaving only the OS-drawn title bar legible.
+        # Root cause: this app runs QApplication.setStyle("Fusion") (see
+        # ui.py's JarvisUI.__init__), and on a Windows box with the OS set
+        # to dark mode, Qt6's Fusion style picks up a dark-mode-derived
+        # default QPalette for text color while a stock QMessageBox's own
+        # box/button faces don't follow along the same way — light text on
+        # a light face. world_panel.py's own "Remove sub-agent" confirm
+        # dialog already worked around exactly this by overriding QLabel's
+        # color explicitly; that fix was incomplete (never covered
+        # QPushButton, so button labels alone stayed invisible there too —
+        # fixed alongside this one). Building the box manually (instead of
+        # the one-line .question() helper) so a stylesheet can be attached
+        # before .exec().
+        C = self._C
+        box = QMessageBox(self)
+        box.setWindowTitle("Reset ledger?")
+        box.setText("This permanently wipes the trade history, P&L, and watchlist, and stops "
+                    "the trader if it's running — there's no undo.\n\nReset the ledger?")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(
+            f"QMessageBox {{ background: {C.PANEL_BG}; }} "
+            f"QLabel {{ color: {C.TEXT}; background: transparent; }} "
+            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; "
+            f"border-radius: 4px; padding: 4px 14px; }}"
         )
+        reply = box.exec()
         if reply != QMessageBox.StandardButton.Yes:
             return
         self.engine.reset()

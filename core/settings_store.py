@@ -40,6 +40,17 @@ DEFAULT_SETTINGS = {
                     # same shape as claude_agent minus extraDir (no confirmed CLI-level
                     # equivalent to add_dirs; codex's --sandbox mode governs write access
                     # to the --cd'd workspace instead). See actions/codex_companion.py.
+    # Four more CLI-delegation backends, same {enabled, cliPath, vaultDir} shape as
+    # codex_agent — added 2026-09-09 after reviewing the Hermes Agent skill catalog's
+    # "delegate coding to CLI X" family. Each backend's own module documents exactly
+    # how confidently its flags were verified (opencode_companion.py and
+    # openhands_companion.py against each project's official docs; grok_companion.py
+    # and blackbox_companion.py against community sources only — check `--help`
+    # before relying on either in production).
+    "opencode_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},
+    "openhands_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},
+    "grok_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},
+    "blackbox_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},
     "trader": {"enabled": False},  # optional crypto trading panel add-on, off by default
     "live_model": "",   # Gemini Live model override for the default "Omni" identity
                         # (a companion's own "model" field still wins over this — see
@@ -51,8 +62,10 @@ DEFAULT_SETTINGS = {
     "companions": [],    # [{id, name, backend, model, system_prompt, avatar,
                          #   voice, memory_namespace, mcp_server_ids, enabled, specialty}]
                          # backend: "gemini_live" (realtime voice) | "claude_agent" |
-                         # "codex_agent" (both turn-based text/tools, different CLI —
-                         # main.py's _AGENT_BACKENDS/_agent_send_fn() dispatch on this).
+                         # "codex_agent" | "opencode_agent" | "openhands_agent" |
+                         # "grok_agent" | "blackbox_agent" (all turn-based text/tools,
+                         # different CLI each — main.py's _AGENT_BACKENDS/
+                         # _agent_send_fn() dispatch on this).
                          # system_prompt only needs to define the persona/identity — the
                          # shared tool-routing/safety rules (core/shared_rules.txt) are
                          # always appended automatically by main.py::_build_config().
@@ -102,6 +115,10 @@ INTEGRATION_CATALOG = [
     {"id": "notion", "name": "Notion", "category": "Productivity", "auth_type": "credentials",
      "fields": [{"key": "token", "label": "Internal Integration Token", "secret": True}],
      "help": "notion.so/my-integrations — then share each page/database with the integration.", "implemented": True},
+    {"id": "obsidian", "name": "Obsidian", "category": "Note-Taking", "auth_type": "local",
+     "fields": [{"key": "vault_path", "label": "Vault folder path", "secret": False}],
+     "help": "Local files only — no account, no network call. Point this at your vault's root folder "
+             "(the one containing your .md notes and its own .obsidian/ subfolder).", "implemented": True},
     {"id": "slack", "name": "Slack", "category": "Communication", "auth_type": "credentials",
      "fields": [{"key": "bot_token", "label": "Bot User OAuth Token", "secret": True}],
      "help": "api.slack.com/apps — create an app in your workspace, install it, copy the xoxb- token.", "implemented": True},

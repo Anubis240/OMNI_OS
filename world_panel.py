@@ -23,6 +23,35 @@ from PyQt6.QtWidgets import (
 
 from core import settings_store
 
+# One id -> (forget_session, get_status) pair per agent-backend companion
+# type — mirrors main.py's own _AGENT_BACKENDS/_agent_send_fn dispatch (see
+# that module's comment for why every backend shares this same shape).
+# Centralized here instead of repeated per call site since this panel needs
+# both functions, at three different call sites, for all six backends.
+def _agent_backend_fns():
+    from actions.claude_companion import forget_session as forget_claude, get_status as status_claude
+    from actions.codex_companion import forget_session as forget_codex, get_status as status_codex
+    from actions.opencode_companion import forget_session as forget_opencode, get_status as status_opencode
+    from actions.openhands_companion import forget_session as forget_openhands, get_status as status_openhands
+    from actions.grok_companion import forget_session as forget_grok, get_status as status_grok
+    from actions.blackbox_companion import forget_session as forget_blackbox, get_status as status_blackbox
+    return {
+        "claude_agent": (forget_claude, status_claude),
+        "codex_agent": (forget_codex, status_codex),
+        "opencode_agent": (forget_opencode, status_opencode),
+        "openhands_agent": (forget_openhands, status_openhands),
+        "grok_agent": (forget_grok, status_grok),
+        "blackbox_agent": (forget_blackbox, status_blackbox),
+    }
+
+
+def _forget_session_everywhere(companion_id: str) -> None:
+    """Calls every backend's forget_session — harmless no-op in whichever
+    module the companion's actual backend never used (same reasoning as
+    settings_panel.py's identical helper)."""
+    for forget, _ in _agent_backend_fns().values():
+        forget(companion_id)
+
 
 class WorldPanel(QWidget):
     def __init__(self, parent=None):
@@ -91,10 +120,7 @@ class WorldPanel(QWidget):
         if dlg.exec():
             # identity (or backend) changed — start its next turn fresh.
             # Harmless no-op in whichever module it didn't actually use.
-            from actions.claude_companion import forget_session as forget_claude_session
-            from actions.codex_companion import forget_session as forget_codex_session
-            forget_claude_session(companion_id)
-            forget_codex_session(companion_id)
+            _forget_session_everywhere(companion_id)
             self.refresh()
             if self.on_companion_added:
                 self.on_companion_added()
@@ -111,7 +137,17 @@ class WorldPanel(QWidget):
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         box.setDefaultButton(QMessageBox.StandardButton.No)
         box.setStyleSheet(
-            f"QMessageBox {{ background: {C.PANEL_BG}; }} QLabel {{ color: {C.TEXT}; background: transparent; }}"
+            # QPushButton rule added 2026-09-09 — GEMZ4US's bug report found
+            # the sibling RESET LEDGER dialog (trader_panel.py::_on_reset)
+            # had invisible button labels under Fusion-style + Windows dark
+            # mode; this dialog's QLabel-only override had the same gap for
+            # its own buttons, just never reported since deleting a
+            # sub-agent wasn't tested that session. See _on_reset's comment
+            # for the root-cause explanation.
+            f"QMessageBox {{ background: {C.PANEL_BG}; }} "
+            f"QLabel {{ color: {C.TEXT}; background: transparent; }} "
+            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; "
+            f"border-radius: 4px; padding: 4px 14px; }}"
         )
         if box.exec() != QMessageBox.StandardButton.Yes:
             return
@@ -121,10 +157,7 @@ class WorldPanel(QWidget):
             settings["active_companion_id"] = ""
         settings_store.save_settings(settings)
 
-        from actions.claude_companion import forget_session as forget_claude_session
-        from actions.codex_companion import forget_session as forget_codex_session
-        forget_claude_session(companion_id)
-        forget_codex_session(companion_id)
+        _forget_session_everywhere(companion_id)
 
         self.refresh()
         if self.on_companion_added:
@@ -251,13 +284,12 @@ class _GraphCanvas(QWidget):
     def refresh_statuses(self):
         if not self._sub_cards:
             return
-        from actions.claude_companion import get_status as claude_status
-        from actions.codex_companion import get_status as codex_status
+        backend_fns = _agent_backend_fns()
         settings = settings_store.load_settings()
         backend_by_id = {c["id"]: c.get("backend") for c in settings["companions"]}
         any_running = False
         for cid, card in self._sub_cards.items():
-            get_status = codex_status if backend_by_id.get(cid) == "codex_agent" else claude_status
+            _, get_status = backend_fns.get(backend_by_id.get(cid), backend_fns["claude_agent"])
             status = get_status(cid)
             card.set_status(status)
             any_running = any_running or status == "running"

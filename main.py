@@ -127,6 +127,12 @@ from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.image_generator   import generate_image
 from actions.launch_trader     import launch_trader
+from actions.blockchain_readonly import (
+    check_wallet_balance, check_token_balance, check_gas_price,
+    TOOL_DECLARATIONS as BLOCKCHAIN_TOOL_DECLARATIONS,
+)
+from actions.action_items      import extract_action_items, TOOL_DECLARATIONS as ACTION_ITEMS_TOOL_DECLARATIONS
+from actions.weekly_review     import weekly_review, TOOL_DECLARATIONS as WEEKLY_REVIEW_TOOL_DECLARATIONS
 from actions.integrations      import registry as integration_registry
 from core import settings_store, mcp_registry
 
@@ -159,6 +165,10 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 TOOL_CALL_TIMEOUT   = 200  # see the try/except around _execute_tool() in _receive_audio() —
                            # generous ceiling above claude_agent's own 180s internal timeout
+SEND_RESPONSE_TIMEOUT = 30  # see _receive_audio()'s send_tool_response wrap — much shorter
+                            # than TOOL_CALL_TIMEOUT since this is just a network send on an
+                            # already-open session, not arbitrary tool work; a hang here means
+                            # the connection is bad, so recovery is a reconnect, not a retry
 
 def _load_vault_memory_index() -> str:
     """Reads the index of Claude's memory (the user's 'second brain') from
@@ -750,6 +760,13 @@ TOOL_DECLARATIONS = [
     },
 ]
 
+# Appended rather than inlined above so each module's own TOOL_DECLARATIONS
+# list (imported at the top of this file) stays the single source of truth
+# for its schema — no risk of this copy drifting from the real one.
+TOOL_DECLARATIONS += (
+    BLOCKCHAIN_TOOL_DECLARATIONS + ACTION_ITEMS_TOOL_DECLARATIONS + WEEKLY_REVIEW_TOOL_DECLARATIONS
+)
+
 class _ReconnectRequested(Exception):
     """Raised to force run()'s connect loop to drop and re-establish the
     Live session — used when the user picks a different voice, since
@@ -758,12 +775,17 @@ class _ReconnectRequested(Exception):
 
 # Companion backends with their own turn-based text session and no live-
 # voice equivalent (contrast "gemini_live", which drives the real-time
-# session directly). Both claude_agent and codex_agent share the exact
-# same async send(companion, text) -> str calling shape (see
-# actions/claude_companion.py and actions/codex_companion.py) even though
-# they drive completely different CLIs underneath — a future backend just
-# needs to match that shape and get one more branch below.
-_AGENT_BACKENDS = {"claude_agent", "codex_agent"}
+# session directly). All six share the exact same async
+# send(companion, text) -> str calling shape (see actions/claude_companion.py,
+# actions/codex_companion.py, actions/opencode_companion.py,
+# actions/openhands_companion.py, actions/grok_companion.py,
+# actions/blackbox_companion.py) even though they drive completely
+# different CLIs underneath — a future backend just needs to match that
+# shape and get one more branch below.
+_AGENT_BACKENDS = {
+    "claude_agent", "codex_agent",
+    "opencode_agent", "openhands_agent", "grok_agent", "blackbox_agent",
+}
 
 
 def _agent_send_fn(backend: str | None):
@@ -772,6 +794,18 @@ def _agent_send_fn(backend: str | None):
         return send
     if backend == "codex_agent":
         from actions.codex_companion import send
+        return send
+    if backend == "opencode_agent":
+        from actions.opencode_companion import send
+        return send
+    if backend == "openhands_agent":
+        from actions.openhands_companion import send
+        return send
+    if backend == "grok_agent":
+        from actions.grok_companion import send
+        return send
+    if backend == "blackbox_agent":
+        from actions.blackbox_companion import send
         return send
     return None
 
@@ -1298,6 +1332,30 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: desktop_control(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name in ("check_wallet_balance", "check_token_balance", "check_gas_price"):
+                fn = {"check_wallet_balance": check_wallet_balance,
+                      "check_token_balance": check_token_balance,
+                      "check_gas_price": check_gas_price}[name]
+                r = await loop.run_in_executor(None, lambda: fn(parameters=args, player=self.ui))
+                result = r or "Done."
+
+            elif name == "extract_action_items":
+                # Namespace resolved here, not inside the module — see
+                # actions/action_items.py's docstring; same reasoning as the
+                # save_memory branch above.
+                namespace = self._companion.get("memory_namespace") if self._companion else None
+                r = await loop.run_in_executor(
+                    None, lambda: extract_action_items(parameters=args, player=self.ui, namespace=namespace)
+                )
+                result = r or "Done."
+
+            elif name == "weekly_review":
+                namespace = self._companion.get("memory_namespace") if self._companion else None
+                r = await loop.run_in_executor(
+                    None, lambda: weekly_review(parameters=args, player=self.ui, namespace=namespace)
+                )
+                result = r or "Done."
+
             elif name == "code_helper":
                 r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
                 result = r or "Done."
@@ -1556,9 +1614,26 @@ class JarvisLive:
                                     response={"error": "Tool call timed out"},
                                 )
                             fn_responses.append(fr)
-                        await self.session.send_tool_response(
-                            function_responses=fn_responses
-                        )
+                        try:
+                            # Found via GEMZ4US's 2026-09-08 report: Bug 11's
+                            # own 200s tool-execution ceiling above never
+                            # fired during an occurrence that ran ~12 minutes
+                            # — because this line, sending the result back to
+                            # Gemini, had no timeout of its own. A stuck
+                            # *tool* is recoverable locally (send a synthetic
+                            # error response, keep the session alive); a
+                            # stuck *send back to Gemini* means the
+                            # connection itself is almost certainly bad, so
+                            # the only real recovery is the reconnect this
+                            # exception triggers via run()'s outer TaskGroup
+                            # handler, not another local synthetic response.
+                            await asyncio.wait_for(
+                                self.session.send_tool_response(function_responses=fn_responses),
+                                timeout=SEND_RESPONSE_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError:
+                            self.ui.write_log("SYS: Lost the connection sending a tool result back — reconnecting.")
+                            raise _ReconnectRequested()
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
