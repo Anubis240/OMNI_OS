@@ -994,6 +994,26 @@ class DashboardServer:
         self._shared_files[file_id] = p
         return f"{self.get_url()}/f/{file_id}"
 
+    def _remove_client(self, websocket) -> None:
+        """The single place a control-channel client is ever removed from
+        self._clients — broadcast()'s dead-send path, the /ws heartbeat's
+        timeout/send-failure paths, and the /ws handler's own finally block
+        all route through here. Centralized because two of those paths used
+        to race: broadcast() removing the last client directly (via `self.
+        _clients -= dead`) made the heartbeat/finally cleanup's own
+        was-it-still-there check see it already gone, so the disconnect
+        callback silently never fired and the desktop stayed stuck on
+        CONNECTED (confirmed 2026-09-07, Codex review). Only the removal
+        that actually empties the set fires the callback, so it fires
+        exactly once regardless of which path gets there first."""
+        was_present = websocket in self._clients
+        self._clients.discard(websocket)
+        if was_present and not self._clients and self._disconnect_callback:
+            try:
+                self._disconnect_callback()
+            except Exception:
+                pass
+
     async def broadcast(self, msg: dict) -> None:
         self._history.append(msg)
         if len(self._history) > 100:
@@ -1004,7 +1024,8 @@ class DashboardServer:
                 await ws.send_json(msg)
             except Exception:
                 dead.add(ws)
-        self._clients -= dead
+        for ws in dead:
+            self._remove_client(ws)
 
     async def broadcast_audio(self, chunk: bytes) -> None:
         """Fan a raw PCM16 chunk of Seraph's speech out to every connected phone."""
@@ -1200,17 +1221,12 @@ class DashboardServer:
             # called from the heartbeat task actually unblocks a
             # concurrently-pending receive_json() with a clean
             # WebSocketDisconnect on every ASGI server, or leaves it
-            # hanging until some other trigger. Only firing the callback
-            # when the client was actually still present avoids a double
-            # "disconnected" log line if both paths do end up running.
+            # hanging until some other trigger. Routes through
+            # self._remove_client() (not its own was-present check) so it
+            # can never race broadcast()'s own removal path — see that
+            # method's docstring.
             def _cleanup():
-                was_present = websocket in self._clients
-                self._clients.discard(websocket)
-                if was_present and not self._clients and self._disconnect_callback:
-                    try:
-                        self._disconnect_callback()
-                    except Exception:
-                        pass
+                self._remove_client(websocket)
 
             async def _heartbeat():
                 nonlocal last_seen

@@ -1479,6 +1479,19 @@ class SetupOverlay(QWidget):
 class MainWindow(QMainWindow):
     _log_sig   = pyqtSignal(str)
     _state_sig = pyqtSignal(str)
+    # Voice/tool-call path only (see actions/launch_trader.py) — that path
+    # runs on main.py's background asyncio thread (asyncio.run(jarvis.run())
+    # in its own threading.Thread, separate from ui.root.mainloop()'s real
+    # Qt event loop on the main thread). open_trader_panel() used to be
+    # called directly from there, constructing/reparenting QWidgets off the
+    # GUI thread — a real cross-thread Qt violation, and the best-evidenced
+    # trigger found yet for Bug 11's extended-unresponsiveness reports
+    # (2026-09-07: an OS-confirmed hang reproduced specifically on a
+    # voice-triggered trader-panel open, not a mouse-clicked one — mouse
+    # clicks are already delivered on the GUI thread, so they never hit
+    # this path). Routed through a signal, same pattern as _log_sig, so Qt
+    # auto-queues it onto the GUI thread regardless of the caller's thread.
+    _open_trader_sig = pyqtSignal()
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1612,6 +1625,12 @@ class MainWindow(QMainWindow):
             pass  # nothing was connected yet (first build)
         self._log_sig.connect(self._log.append_log)
 
+        try:
+            self._open_trader_sig.disconnect()
+        except TypeError:
+            pass  # nothing was connected yet (first build)
+        self._open_trader_sig.connect(self.open_trader_panel)
+
     def _position_overlays(self):
         """Places the floating top bar / status card / chat panel /
         companion switcher over the orb. Called once from _build_ui() and
@@ -1631,7 +1650,13 @@ class MainWindow(QMainWindow):
             self._status_card.adjustSize()
             self._status_card.move(_SIDEBAR_W + 16, 68)
         if hasattr(self, "_chat_panel"):
-            self._chat_panel.resize(_CHAT_PANEL_W, max(240, H - 68 - 16))
+            # Bottom margin is 30, not 16 — the "© KONDUX" corner label's
+            # top edge sits at H-22 (see below), so 16 let the panel's
+            # rounded bottom-right corner overlap the label. 30 clears it
+            # with a clean ~8px gap instead of nudging the label itself,
+            # which would leave it with almost no margin above the actual
+            # window edge.
+            self._chat_panel.resize(_CHAT_PANEL_W, max(240, H - 68 - 30))
             self._chat_panel.move(max(_SIDEBAR_W + 16, W - _CHAT_PANEL_W - 16), 68)
         if hasattr(self, "_companion_switcher"):
             sw_w = 220
@@ -2583,7 +2608,13 @@ class JarvisUI:
         self._win.on_trader_clicked = cb
 
     def open_trader_panel(self):
-        self._win.open_trader_panel()
+        # Emit, don't call directly — this is reached from the voice/tool-call
+        # path (actions/launch_trader.py) on main.py's background asyncio
+        # thread, never the Qt GUI thread. Calling self._win.open_trader_panel()
+        # straight from there would construct/reparent QWidgets off the GUI
+        # thread — see _open_trader_sig's docstring on MainWindow for why
+        # this is believed to be Bug 11's actual mechanism.
+        self._win._open_trader_sig.emit()
 
     def get_trader_state(self) -> dict | None:
         return self._win.get_trader_state()

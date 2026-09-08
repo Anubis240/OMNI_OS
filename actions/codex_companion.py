@@ -5,13 +5,30 @@ OpenAI's Codex CLI directly via subprocess + its `--json` NDJSON event
 stream, since there's no Codex equivalent of the (Anthropic-specific)
 claude_agent_sdk package claude_companion.py uses.
 
-Verified against OpenAI's own docs before writing this (developers.openai.com/
-codex/noninteractive, /codex/cli/reference) rather than guessed — the flags and
-event schema below are sourced from there, not inferred:
+Verified against OpenAI's own docs (developers.openai.com/codex/noninteractive,
+/codex/agent-approvals-security) — the flags and event schema below are
+sourced from there, not inferred. Two things fixed 2026-09-08 after a Codex
+code review found them, each re-verified independently rather than taken on
+the review's word:
 
-  codex exec "<prompt>" --cd <dir> --sandbox workspace-write \
-      --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json
-  codex exec resume <THREAD_ID> "<prompt>" --cd <dir> ... --json
+  1. `--cd` (and every other global option) is a `codex exec`-level flag —
+     it must come BEFORE `resume <id> <prompt>`, not after. A live CLI test
+     (0.153.4) confirmed the old ordering below actually failed whenever
+     vaultDir was configured on a resumed turn:
+       codex exec --json --skip-git-repo-check --cd <dir> resume <id> "<prompt>"
+     (was: `... resume <id> "<prompt>" ... --cd <dir>` — rejected outright.)
+
+  2. `--dangerously-bypass-approvals-and-sandbox` (aka `--yolo`) is
+     documented as "No sandbox; no approvals (not recommended)" — genuinely
+     unrestricted machine access, a materially bigger blast radius than
+     claude_agent's bypassPermissions mode this was modeled on. The
+     review's suggested replacement, `--approve-for-me`, isn't a real
+     documented flag (checked — absent from both the noninteractive and
+     approvals-security docs). The actual documented non-interactive-safe
+     combination is `--sandbox workspace-write --ask-for-approval never`:
+     never blocks on a prompt (no hang risk with no human present, same
+     requirement the old flag was trying to satisfy), but keeps filesystem
+     access scoped to the working directory instead of the whole machine.
 
 --json streams one JSON object per line:
   {"type": "thread.started", "thread_id": "..."}
@@ -37,6 +54,12 @@ _sessions: dict[str, str] = {}
 # status badges — same contract as claude_companion.get_status.
 _status: dict[str, str] = {}
 
+# companion id -> asyncio.Lock, so two overlapping voice/text turns for the
+# SAME companion can't both resume (or both start) its shared Codex thread
+# id concurrently — found in review: without this, the first turn to finish
+# could also flip _status back to "idle" while the other was still running.
+_locks: dict[str, asyncio.Lock] = {}
+
 
 def get_status(companion_id: str) -> str:
     return _status.get(companion_id, "idle")
@@ -52,37 +75,55 @@ async def send(companion: dict, text: str) -> str:
     if not ca.get("enabled") or not ca.get("cliPath"):
         return "Codex delegation isn't set up yet — enable it and set a CLI path in Settings."
 
-    _status[companion["id"]] = "running"
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(_run_codex, companion["id"], text, ca), timeout=TIMEOUT
-        )
-    except asyncio.TimeoutError:
-        return "Timed out before finishing."
-    except Exception as e:
-        return f"Error: {e}"
-    finally:
-        _status[companion["id"]] = "idle"
+    companion_id = companion["id"]
+    lock = _locks.setdefault(companion_id, asyncio.Lock())
+    async with lock:
+        _status[companion_id] = "running"
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_run_codex, companion, text, ca), timeout=TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            return "Timed out before finishing."
+        except Exception as e:
+            return f"Error: {e}"
+        finally:
+            _status[companion_id] = "idle"
 
 
-def _run_codex(companion_id: str, text: str, ca: dict) -> str:
+def _run_codex(companion: dict, text: str, ca: dict) -> str:
+    companion_id = companion["id"]
     cli_path = ca["cliPath"]
     cwd = ca.get("vaultDir") or None
     thread_id = _sessions.get(companion_id)
 
-    # Positional args first (prompt, or "resume <id> <prompt>"), matching
-    # the exact ordering in OpenAI's own documented examples, then flags.
-    if thread_id:
-        argv = [cli_path, "exec", "resume", thread_id, text]
-    else:
-        argv = [cli_path, "exec", text]
-    argv += ["--json", "--skip-git-repo-check"]
+    # Global options (--json, --skip-git-repo-check, --cd, sandbox/approval)
+    # must all precede the subcommand/prompt — codex exec rejects --cd (and
+    # presumably any other global flag) placed after `resume`. See the
+    # module docstring for the live-tested confirmation.
+    argv = [cli_path, "exec", "--json", "--skip-git-repo-check"]
     if cwd:
         argv += ["--cd", cwd]
-    # No human is present to approve commands in a headless voice-assistant
-    # invocation — same trust model as claude_agent's permission_mode=
-    # "bypassPermissions" (see actions/claude_agent.py).
-    argv += ["--dangerously-bypass-approvals-and-sandbox"]
+    # Never blocks on an approval prompt (no human is present to answer one
+    # in a headless voice-assistant invocation), while keeping filesystem
+    # access scoped to the working directory — see module docstring for why
+    # this replaced the old unrestricted bypass flag.
+    argv += ["--sandbox", "workspace-write", "--ask-for-approval", "never"]
+
+    prompt = text
+    if not thread_id:
+        # Only the first turn of a new thread needs the persona — a resumed
+        # thread already has it from that first turn's context, and Codex
+        # has no documented per-turn "developer instruction" flag to prefer
+        # over this composition (checked against the same docs above).
+        identity = (companion.get("system_prompt") or "").strip()
+        if identity:
+            prompt = f"{identity}\n\nUser request:\n{text}"
+
+    if thread_id:
+        argv += ["resume", thread_id, prompt]
+    else:
+        argv += [prompt]
 
     try:
         # A second, inner timeout on top of the caller's asyncio.wait_for:
@@ -140,3 +181,5 @@ def forget_session(companion_id: str) -> None:
     removes a companion via Settings. Same contract as
     claude_companion.forget_session."""
     _sessions.pop(companion_id, None)
+    _locks.pop(companion_id, None)  # don't accumulate lock objects for
+    # companions that get deleted and never recreated with the same id.

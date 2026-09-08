@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
+    QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
     QVBoxLayout, QWidget,
 )
 
@@ -327,14 +327,23 @@ class TraderPanel(QWidget):
             live = " (LIVE)" if event.get("live") else ""
             tx = event.get("txHash")
             tx_part = f" — tx {_full_tx_hash(tx)[:10]}…" if tx else ""
-            return f"BUY{live} {event.get('symbol')} qty={event.get('qty', 0):.4f} @ ${event.get('priceUsd', 0):.6f}{tx_part}"
+            # cost includes swap fee/slippage/gas on top of qty*price (see
+            # engine._execute_buy) — shown explicitly so "why doesn't cost
+            # match qty*price" isn't left for the reader to reverse-engineer
+            # from a balance delta (found live: a tester spent real effort
+            # inferring this from Balance before/after instead).
+            cost = event.get("costUsd")
+            cost_part = f" cost=${cost:.2f}" if cost is not None else ""
+            return f"BUY{live} {event.get('symbol')} qty={event.get('qty', 0):.4f} @ ${event.get('priceUsd', 0):.6f}{cost_part}{tx_part}"
         if etype == "sell":
             live = " (LIVE)" if event.get("live") else ""
             pnl = event.get("pnlUsd", 0)
             sign = "+" if pnl >= 0 else ""
             tx = event.get("txHash")
             tx_part = f" — tx {_full_tx_hash(tx)[:10]}…" if tx else ""
-            return f"SELL{live} {event.get('symbol')} pnl={sign}${pnl:.2f} ({event.get('reason', '')}){tx_part}"
+            proceeds = event.get("proceedsUsd")
+            proceeds_part = f" proceeds=${proceeds:.2f}" if proceeds is not None else ""
+            return f"SELL{live} {event.get('symbol')} pnl={sign}${pnl:.2f}{proceeds_part} ({event.get('reason', '')}){tx_part}"
         if etype == "scan":
             n = len(event.get("candidates", []))
             return f"SCAN: {n} candidate(s) passed signal threshold"
@@ -1231,6 +1240,21 @@ class TraderPanel(QWidget):
         self._append_feed_text("SYS: config saved")
 
     def _on_reset(self):
+        # Flagged 2026-09-07: this button sits directly next to SAVE CONFIG
+        # and used to fire on a single click, wiping the persisted trade
+        # ledger/P&L history with no way back. A confirmation dialog is the
+        # same weight of gate as this file already uses elsewhere for
+        # irreversible actions (see the wallet's "I OWN THIS RISK" typed
+        # ack) — a click confirmation is lighter since resetting the paper
+        # ledger risks no real funds, unlike wallet key material.
+        reply = QMessageBox.question(
+            self, "Reset ledger?",
+            "This permanently wipes the trade history, P&L, and watchlist — there's no undo.\n\nReset the ledger?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
         self.engine.reset()
         self._refresh_stats()
         self._refresh_positions()
