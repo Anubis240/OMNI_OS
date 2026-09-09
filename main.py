@@ -927,10 +927,7 @@ class JarvisLive:
                     # originating phone's own optimistic local echo showed it.
                     if self._dashboard:
                         asyncio.create_task(self._dashboard.broadcast({"type": "you", "text": text}))
-                    await self.session.send_client_content(
-                        turns={"parts": [{"text": text}]},
-                        turn_complete=True,
-                    )
+                    await self._send_text_safe(text)
                     self.ui.write_log(f"[Phone]: {text}")
                 else:
                     print(f"[Dashboard] Dropped command (no session): {text}")
@@ -981,6 +978,44 @@ class JarvisLive:
         self._reconnect_event.clear()
         raise _ReconnectRequested()
 
+    async def _send_text_safe(self, text: str) -> bool:
+        """Wraps session.send_client_content with the same timeout/recovery
+        reasoning as _receive_audio's send_tool_response fix (see
+        SEND_RESPONSE_TIMEOUT's own comment): a stuck send to Gemini almost
+        always means the connection itself is bad, and no local retry can
+        fix that — only a reconnect can.
+
+        Found via GEMZ4US's 2026-09-09 report: three separate call sites
+        (_process_dashboard_commands' phone-typed relay, _on_text_command's
+        desktop-typed input, and speak()'s programmatic announcements) all
+        called send_client_content bare, with no timeout — and one of them
+        (_process_dashboard_commands) runs via a plain create_task() for the
+        app's entire lifetime, started BEFORE run()'s per-connection
+        TaskGroup even exists (see run()), so it is never torn down or
+        replaced on a reconnect. A hang there wedges every future phone-
+        typed message forever, immune to waiting or retrying, until the
+        whole app is restarted — exactly the symptom reported: Omega's
+        reply pipeline going fully unresponsive to typed input (voice and
+        text, either channel) across multiple attempts and several minutes,
+        at low CPU/MEM (ruling out a Bug 11-style freeze), cleared only by a
+        full restart. Setting _reconnect_event here at least gets a fresh
+        `session` object under the dead one for the next attempt, on top of
+        this call's own timeout stopping this specific hang from being
+        permanent."""
+        if not self.session:
+            return False
+        try:
+            await asyncio.wait_for(
+                self.session.send_client_content(turns={"parts": [{"text": text}]}, turn_complete=True),
+                timeout=SEND_RESPONSE_TIMEOUT,
+            )
+            return True
+        except asyncio.TimeoutError:
+            self.ui.write_log("SYS: Lost the connection sending a message — reconnecting.")
+            if self._loop:
+                self._loop.call_soon_threadsafe(self._reconnect_event.set)
+            return False
+
     def _on_text_command(self, text: str):
         if not self._loop:
             return
@@ -998,13 +1033,7 @@ class JarvisLive:
             return
         if not self.session:
             return
-        asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
-                turn_complete=True
-            ),
-            self._loop
-        )
+        asyncio.run_coroutine_threadsafe(self._send_text_safe(text), self._loop)
 
     async def _handle_agent_companion_text(self, companion: dict, send_fn, text: str) -> None:
         self.ui.write_log(f"SYS: {companion['name']} is thinking…")
@@ -1052,13 +1081,7 @@ class JarvisLive:
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
-        asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
-                turn_complete=True
-            ),
-            self._loop
-        )
+        asyncio.run_coroutine_threadsafe(self._send_text_safe(text), self._loop)
 
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]

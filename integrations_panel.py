@@ -435,7 +435,16 @@ class _ConnectDialog(QDialog):
         settings.setdefault("integrations", {})[conn_id] = values
         settings_store.save_settings(settings)
         self._settings = settings
-        self.saved.emit(f"{self._entry['name']} saved.", False)
+        # "takes effect on next reconnect" wording added 2026-09-10 — found
+        # via GEMZ4US's report that main.py::_build_config() (which reads
+        # integration_registry.get_active_tool_declarations()) only runs
+        # once per Gemini Live connection, same as the companion-switch
+        # confirmation already says below. Without this, connecting GitHub
+        # mid-session silently doesn't add its tools until the next
+        # reconnect — Omni fell back to delegating through claude_agent
+        # instead (which returned inaccurate data), with nothing telling
+        # the tester a reconnect was needed first.
+        self.saved.emit(f"{self._entry['name']} saved — takes effect on next reconnect.", False)
         if not self._entry.get("connect_action"):
             self.accept()
         else:
@@ -468,7 +477,7 @@ class _ConnectDialog(QDialog):
         settings = settings_store.load_settings()
         settings.get("integrations", {}).pop(conn_id, None)
         settings_store.save_settings(settings)
-        self.saved.emit(f"{self._entry['name']} disconnected.", False)
+        self.saved.emit(f"{self._entry['name']} disconnected — takes effect on next reconnect.", False)
         self.accept()
 
     def _open_family_dialog(self, family_entry: dict):
