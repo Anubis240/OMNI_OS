@@ -478,12 +478,35 @@ _APP_HTML = """<!DOCTYPE html>
   var playCtx = null, nextPlayTime = 0;
   var micCtx = null, micStream = null, micNode = null, micGain = null;
   var recording = false;
+  // GEMZ4US, Bug 12 (documented since the first beta report, root-caused
+  // 2026-09-11): "first voice attempt after a reconnect is silent on both
+  // devices, second attempt works." ensureAudioWs() only ever gets called
+  // from startMic() — the socket is opened lazily, on the mic tap itself —
+  // so any reconnect scenario (screen lock/unlock, a network blip) leaves
+  // audioWs CLOSED until the next tap re-opens it. getUserMedia() usually
+  // resolves fast when permission was already granted, so onaudioprocess
+  // starts firing well before a fresh WSS handshake (TLS negotiation over a
+  // just-woken mobile radio) actually completes — and every frame captured
+  // during that window was silently dropped by the `readyState === OPEN`
+  // check below, with no buffering and no retry. A short utterance spoken
+  // right after tapping mic could complete entirely inside that window,
+  // explaining why it reached neither device: the frames never left the
+  // phone. Buffering here (bounded, and only while actively recording —
+  // stopMic() clears it) instead of dropping preserves exactly that window.
+  var pendingMicFrames = [];
+  var MAX_PENDING_MIC_FRAMES = 150;  // ~1-3s of audio depending on device sample rate — generous
+                                      // headroom over a real WSS handshake, not "buffer forever"
 
   function ensureAudioWs() {
     if (audioWs && (audioWs.readyState === WebSocket.OPEN || audioWs.readyState === WebSocket.CONNECTING)) return;
     audioWs = new WebSocket(proto + '://' + location.host + '/ws/audio?token=' + encodeURIComponent(token));
     audioWs.binaryType = 'arraybuffer';
-    audioWs.onopen  = function() { audioReady = true; voiceStatusEl.textContent = 'voice ready — tap mic to talk'; };
+    audioWs.onopen  = function() {
+      audioReady = true;
+      voiceStatusEl.textContent = 'voice ready — tap mic to talk';
+      for (var i = 0; i < pendingMicFrames.length; i++) audioWs.send(pendingMicFrames[i]);
+      pendingMicFrames = [];
+    };
     audioWs.onclose = function() { audioReady = false; voiceStatusEl.textContent = 'voice disconnected'; };
     audioWs.onmessage = function(ev) { playChunk(ev.data); };
   }
@@ -573,7 +596,13 @@ _APP_HTML = """<!DOCTYPE html>
         var s = Math.max(-1, Math.min(1, down[i]));
         int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
-      if (audioWs && audioWs.readyState === WebSocket.OPEN) audioWs.send(int16.buffer);
+      if (audioWs && audioWs.readyState === WebSocket.OPEN) {
+        audioWs.send(int16.buffer);
+      } else if (pendingMicFrames.length < MAX_PENDING_MIC_FRAMES) {
+        // Socket still (re)connecting — hold the frame instead of dropping
+        // it; onopen above flushes this in order the moment it's ready.
+        pendingMicFrames.push(int16.buffer);
+      }
     };
     // Route through a silent gain node rather than straight to destination —
     // keeps the processing graph alive without echoing the mic back out loud.
@@ -591,6 +620,7 @@ _APP_HTML = """<!DOCTYPE html>
 
   function stopMic() {
     recording = false;
+    pendingMicFrames = [];  // don't ship stale audio on some later, unrelated reconnect
     if (micNode) { try { micNode.disconnect(); } catch (_) {} micNode = null; }
     if (micGain) { try { micGain.disconnect(); } catch (_) {} micGain = null; }
     if (micCtx)  { try { micCtx.close(); } catch (_) {} micCtx = null; }
