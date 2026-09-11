@@ -39,6 +39,9 @@ class SettingsPanel(QWidget):
         self._mcp_rows: dict[str, dict] = {}
         self._skill_rows: dict[str, dict] = {}
         self._companion_mcp_checks: dict[str, QCheckBox] = {}  # server id -> checkbox, in the add-companion form
+        self._editing_skill_id: str | None = None  # set while the "Add a skill" form is
+                                                     # editing an existing skill in place —
+                                                     # see _on_edit_skill/_on_save_skill
 
         self._status_sig.connect(self._show_status)
         self._build_ui()
@@ -944,7 +947,17 @@ class SettingsPanel(QWidget):
         self._new_skill_content.setFixedHeight(80)
         self._new_skill_content.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px;")
         lay.addWidget(self._new_skill_content)
-        lay.addWidget(self._make_button("+ ADD SKILL", self._on_add_skill, C.GREEN))
+        btn_row = QHBoxLayout()
+        # GEMZ4US 2026-09-10: "no way to view or edit a saved skill's
+        # instructions" — clicking EDIT on a row below loads it into this
+        # same form and flips this button into an in-place update instead
+        # of an append; _on_cancel_skill_edit backs out without saving.
+        self._skill_save_btn = self._make_button("+ ADD SKILL", self._on_save_skill, C.GREEN)
+        btn_row.addWidget(self._skill_save_btn)
+        self._skill_cancel_btn = self._make_button("CANCEL", self._on_cancel_skill_edit, C.TEXT_MED)
+        self._skill_cancel_btn.setVisible(False)
+        btn_row.addWidget(self._skill_cancel_btn)
+        lay.addLayout(btn_row)
         return wrap
 
     def _refresh_skills_list(self):
@@ -970,31 +983,61 @@ class SettingsPanel(QWidget):
             cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             cb.setChecked(bool(skill.get("enabled")))
             # GEMZ4US 2026-09-10: clicking the skill's name (to see its
-            # instructions) silently toggled it off instead — no way to
-            # view/edit a saved skill's instructions at all, short of
-            # removing and recreating it. A real edit view is a bigger
-            # change; this at least makes the toggle behavior and the
-            # remove-to-edit workaround discoverable on hover.
-            cb.setToolTip(f"Click to enable/disable \"{skill['name']}\". Instructions aren't "
-                          "shown or editable here — remove and re-add to change them.")
+            # instructions) silently toggled it off instead of showing them —
+            # this checkbox is only ever a toggle, never a way to view/edit.
+            # Use the EDIT button beside it for that now.
+            cb.setToolTip(f"Click to enable/disable \"{skill['name']}\". Use EDIT to view or "
+                          "change its instructions.")
             cb.toggled.connect(lambda checked, sid=skill["id"]: self._on_toggle_skill(sid, checked))
             rlay.addWidget(cb, stretch=1)
+            edit_btn = self._make_button("EDIT", lambda _c=False, sid=skill["id"]: self._on_edit_skill(sid), C.ACC2)
+            rlay.addWidget(edit_btn)
             remove_btn = self._make_button("REMOVE", lambda _c=False, sid=skill["id"]: self._on_remove_skill(sid), C.RED)
             rlay.addWidget(remove_btn)
             self._skills_list_layout.addWidget(row)
 
-    def _on_add_skill(self):
+    def _on_save_skill(self):
         name = self._new_skill_name.text().strip()
         content = self._new_skill_content.toPlainText().strip()
         if not name or not content:
             self._status_sig.emit("Skills need both a name and instructions.", True)
             return
-        self.settings["skills"].append({
-            "id": settings_store.new_id(), "name": name, "content": content, "enabled": True,
-        })
+        if self._editing_skill_id:
+            for skill in self.settings["skills"]:
+                if skill["id"] == self._editing_skill_id:
+                    skill["name"] = name
+                    skill["content"] = content
+                    break
+            message = f"Updated skill \"{name}\" — takes effect on next reconnect."
+            self._editing_skill_id = None
+            self._skill_save_btn.setText("+ ADD SKILL")
+            self._skill_cancel_btn.setVisible(False)
+        else:
+            self.settings["skills"].append({
+                "id": settings_store.new_id(), "name": name, "content": content, "enabled": True,
+            })
+            message = f"Added skill \"{name}\" — takes effect on next reconnect."
         self._new_skill_name.clear(); self._new_skill_content.clear()
         self._refresh_skills_list()
-        self._persist(f"Added skill \"{name}\" — takes effect on next reconnect.")
+        self._persist(message)
+
+    def _on_edit_skill(self, skill_id: str):
+        for skill in self.settings["skills"]:
+            if skill["id"] == skill_id:
+                self._editing_skill_id = skill_id
+                self._new_skill_name.setText(skill["name"])
+                self._new_skill_content.setPlainText(skill["content"])
+                self._skill_save_btn.setText("UPDATE SKILL")
+                self._skill_cancel_btn.setVisible(True)
+                self._new_skill_name.setFocus()
+                break
+
+    def _on_cancel_skill_edit(self):
+        self._editing_skill_id = None
+        self._new_skill_name.clear()
+        self._new_skill_content.clear()
+        self._skill_save_btn.setText("+ ADD SKILL")
+        self._skill_cancel_btn.setVisible(False)
 
     def _on_toggle_skill(self, skill_id: str, checked: bool):
         # GEMZ4US 2026-09-10: reported as "the SKILLS feature doesn't work" —
@@ -1015,6 +1058,8 @@ class SettingsPanel(QWidget):
         self._persist(f"Skill {state} — takes effect on next reconnect.")
 
     def _on_remove_skill(self, skill_id: str):
+        if self._editing_skill_id == skill_id:
+            self._on_cancel_skill_edit()  # don't leave the form mid-edit on a now-deleted skill
         self.settings["skills"] = [s for s in self.settings["skills"] if s["id"] != skill_id]
         self._refresh_skills_list()
         self._persist("Skill removed — takes effect on next reconnect.")
