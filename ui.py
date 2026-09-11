@@ -2058,6 +2058,14 @@ class MainWindow(QMainWindow):
         current = settings.get("active_companion_id") or ""
         idx = ids.index(current) if current in ids else 0
         idx = (idx + direction) % len(ids)
+        if ids[idx] == current:
+            # GEMZ4US: "stacked identical log lines when the companion selector
+            # is clicked repeatedly." Root cause: with no custom companions
+            # configured, ids has exactly one entry, so idx always lands back
+            # on it — every click re-ran the save/animate/log below for a
+            # "switch" that never actually changed anything. Bail out before
+            # any of that when the target is already the active one.
+            return
         settings["active_companion_id"] = ids[idx]
         settings_store.save_settings(settings)
         self._refresh_companion_switcher()
