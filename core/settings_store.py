@@ -215,7 +215,31 @@ INTEGRATION_CATALOG = [
 def load_settings() -> dict:
     try:
         data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
     except Exception:
+        # GEMZ4US 2026-09-10: reported GitHub's saved token (and possibly
+        # other settings — not fully checked) missing after updating to
+        # v1.11.1, with no explicit disconnect action taken. Nothing found
+        # in the installer or this file's own merge logic that would explain
+        # that (config\* is excluded from the installer's [Files] on
+        # purpose, specifically to survive updates — see installer.iss).
+        # But this except clause WAS a real, separate risk regardless of
+        # whether it explains that report: a settings.json that fails to
+        # parse for any reason (an interrupted write, a disk hiccup, two
+        # processes writing at once) silently fell back to `data = {}` —
+        # every companion, skill, integration, and key gone with no warning
+        # and no way back, only discovered whenever the user next noticed
+        # something missing. Back the unreadable file up before falling back
+        # to defaults, so a bad settings.json is a recoverable inconvenience,
+        # not a silent, permanent data loss.
+        try:
+            import shutil
+            from datetime import datetime
+            backup = SETTINGS_PATH.with_suffix(f".corrupt-{datetime.now():%Y%m%d-%H%M%S}.json")
+            shutil.copy2(SETTINGS_PATH, backup)
+        except Exception:
+            pass
         data = {}
     merged = json.loads(json.dumps(DEFAULT_SETTINGS))  # deep copy
     for key in DEFAULT_SETTINGS:

@@ -15,7 +15,17 @@ SYSTEM_NOTE = (
     "so your own process can finish and report back immediately. NEVER run a "
     "long-lived server in the foreground of a tool call; it will never return and "
     "you will time out. After launching, verify it actually started (check the "
-    "log or port), then report the local URL back in one short sentence."
+    "log or port), then report the local URL back in one short sentence.\n\n"
+    "Accuracy note: your reply is read aloud or shown as-is, with no chance for "
+    "the user to see your reasoning or double-check a citation. Found via beta "
+    "testing (2026-09-10): a query about a GitHub repo's PRs/CI came back with "
+    "an otherwise-accurate top-line answer plus one fabricated specific — a "
+    "branch name that didn't exist, built from a real issue number with matching "
+    "subject matter, so it read as plausible rather than obviously wrong. Never "
+    "state a specific named artifact — a branch, PR, commit, filename, or exact "
+    "figure — unless you actually confirmed it via a real tool call in this same "
+    "turn. If you're inferring, extrapolating, or unsure, say so explicitly "
+    "rather than presenting a plausible guess as a checked fact."
 )
 
 

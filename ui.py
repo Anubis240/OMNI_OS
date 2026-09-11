@@ -79,6 +79,16 @@ class C:
     TEXT      = "#f0f0f0"
     TEXT_DIM  = "#575757"
     TEXT_MED  = "#9e9e9e"
+    # GEMZ4US 2026-09-10: TEXT_DIM measures ~2.7:1 against PANEL_BG — well
+    # under WCAG AA's 4.5:1 body-text minimum — and was doing double duty for
+    # both throwaway field placeholders (fine, low-stakes) and permanent
+    # per-section help text carrying real operational info ("Off by default",
+    # "never by voice"). TEXT_MED measures ~7.4:1, comfortably clears AA, and
+    # already existed in this palette (sidebar icons) — reused here rather
+    # than inventing a new tone. TEXT_HELP is just a semantic alias so call
+    # sites read as "this is help text" rather than "this happens to reuse
+    # the medium tone" (settings_panel.py's nine per-section note labels).
+    TEXT_HELP = "#9e9e9e"
     WHITE     = "#ffffff"
     DARK      = "#000000"
     BAR_BG    = "#0a0a0c"
@@ -833,11 +843,35 @@ class LogWidget(QTextBrowser):
             QTimer.singleShot(20, self._next)
             return
 
+        # GEMZ4US 2026-09-10: asked directly what determines chat-log text
+        # color, after noticing Omni's normal replies render cyan/blue (not
+        # the expected accent color) and one delegated reply rendered in a
+        # red/pink tone read as "magenta". Root cause, found by tracing every
+        # write_log() call site: this matching was never updated for the
+        # rebrand. The default identity's own replies are prefixed "Omni:"
+        # (main.py's speak()/_receive_audio) — not "Jarvis:" — so they never
+        # matched the intended "ai" (accent-color) branch and always fell
+        # through to the generic "sys" default, which is why every normal
+        # reply looked cyan/blue instead of the accent color. Added "omni:"
+        # as its own recognized prefix rather than replacing "jarvis:" —
+        # the many bracket-prefixed tool/status lines ("[Code] ...",
+        # "[YouTube] ...", etc.) already rely on that same "sys" default and
+        # must keep it, and one remaining call site (screen_processor.py)
+        # still genuinely logs "Jarvis:". That leftover also explains a
+        # tester's separate recollection of a companion literally *named*
+        # "Jarvis" rendering in orange — confirming this is a literal-prefix
+        # match, not delegation- or source-based coloring. Separately,
+        # `"err" in tl` matched that substring anywhere in the text, not just
+        # genuine ERR: lines — so any reply merely containing "err" (French
+        # "erreur", or plain English words like "interrupt") got miscolored
+        # red/pink, the likely explanation for the reported "magenta" reply.
+        # Anchored it to the actual "ERR:" prefix main.py uses instead.
         tl = self._text.lower()
         if   tl.startswith("you:"):    self._tag = "you"
         elif tl.startswith("jarvis:"): self._tag = "ai"
+        elif tl.startswith("omni:"):   self._tag = "ai"
         elif tl.startswith("file:"):   self._tag = "file"
-        elif "err" in tl:              self._tag = "err"
+        elif tl.startswith("err:"):    self._tag = "err"
         else:                          self._tag = "sys"
         self._tmr.start(6)
 
@@ -1518,6 +1552,7 @@ class MainWindow(QMainWindow):
         self._current_file: str | None = None
         self._face_path       = face_path
         self.voice              = load_saved_voice()
+        self._app_start_t     = time.time()  # see _update_metrics's UP readout
 
         self._build_ui()
 
@@ -1725,8 +1760,16 @@ class MainWindow(QMainWindow):
             self._bar_tmp.set_value(0, "N/A")
 
         try:
-            boot_t  = psutil.boot_time()
-            elapsed = time.time() - boot_t
+            # GEMZ4US 2026-09-10: UP kept climbing across confirmed genuine
+            # app restarts (chat log cleared, fresh "online" line) — because
+            # this was reading psutil.boot_time(), i.e. Windows' own uptime,
+            # not Omni-OS's. Harmless as coded, but testers have specifically
+            # relied on this readout as a restart-confirmation signal, so it
+            # tracking the wrong process was actively misleading. Now reads
+            # this process's own start time (captured in MainWindow.__init__)
+            # instead — resets to 00:00 on every real launch, which is what
+            # "UP" next to CPU/MEM/NET/GPU (all Omni-relevant gauges) implies.
+            elapsed = time.time() - self._app_start_t
             h = int(elapsed // 3600)
             m = int((elapsed % 3600) // 60)
             self._uptime_lbl.setText(f"UP  {h:02d}:{m:02d}")
@@ -2525,6 +2568,21 @@ class JarvisUI:
     def __init__(self, face_path: str, size=None):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        # GEMZ4US 2026-09-10: reported every sidebar icon's hover tooltip as
+        # completely absent ("no label, tooltip, or any other identifying
+        # text ... anywhere"), despite every one of them (see _build_sidebar)
+        # already calling setToolTip() with real text. Same root cause as the
+        # QMessageBox bug fixed twice already this project (trader_panel.py,
+        # world_panel.py): Fusion + Windows dark mode derives a dark-mode
+        # QPalette for native widget text, but QToolTip's own face doesn't
+        # follow along the same way — the tooltip wasn't missing, it was
+        # rendering illegibly (dark-on-dark or light-on-light) every time.
+        # A global QToolTip stylesheet, same fix shape as those two, covers
+        # every tooltip in the app in one place instead of per-widget.
+        self._app.setStyleSheet(
+            f"QToolTip {{ color: {C.TEXT}; background-color: {C.PANEL_BG}; "
+            f"border: 1px solid {C.BORDER_A}; padding: 4px 6px; }}"
+        )
         self._win = MainWindow(face_path)
         self._win.show()
         self.root = _RootShim(self._app)

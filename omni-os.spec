@@ -26,7 +26,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_all, copy_metada
 
 block_cipher = None
 PROJECT_DIR = Path(SPECPATH)
-APP_VERSION = os.environ.get("APP_VERSION", "1.11.1")
+APP_VERSION = os.environ.get("APP_VERSION", "1.11.2")
 if os.environ.get("CI") and "APP_VERSION" not in os.environ:
     raise RuntimeError("CI must supply validated APP_VERSION")
 if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", APP_VERSION):

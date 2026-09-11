@@ -840,6 +840,7 @@ class JarvisLive:
                                             # summarized and saved to memory on disconnect/shutdown
         self._dashboard = None      # DashboardServer | None — remote/phone control, started once in run()
         self._phone_active = False  # True while the phone mic is actively streaming audio
+        self._connection_count = 0  # see run()'s "SYS: OMNI-OS online." vs "SYS: Reconnected." split
         self._resumption_handle: str | None = None  # last Gemini Live session-resumption handle
                                                       # (see session_resumption_update handling in
                                                       # _receive_audio) — fed back into _build_config()
@@ -1748,7 +1749,21 @@ class JarvisLive:
 
                     print("[JARVIS] ✅ Connected.")
                     self.ui.set_state("LISTENING")
-                    self.ui.write_log("SYS: OMNI-OS online.")
+                    # GEMZ4US 2026-09-10: this line fires on every reconnect
+                    # (voice/companion change, a dropped connection, the
+                    # v1.11.1 stuck-send recovery, or any other transient
+                    # error the loop below silently retries after) — not
+                    # just a genuine app restart — but it always read "OMNI-
+                    # OS online.", identical either way. A tester had to
+                    # invent their own workaround (cross-checking this line
+                    # against whether the chat log also got cleared) to tell
+                    # a real restart apart from an in-place reconnect. Now
+                    # says so directly instead of requiring that inference.
+                    self._connection_count += 1
+                    if self._connection_count == 1:
+                        self.ui.write_log("SYS: OMNI-OS online.")
+                    else:
+                        self.ui.write_log(f"SYS: Reconnected (session #{self._connection_count}).")
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())

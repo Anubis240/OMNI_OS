@@ -141,7 +141,7 @@ class SettingsPanel(QWidget):
             "the trader panel's own command bar — never by voice."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -172,7 +172,7 @@ class SettingsPanel(QWidget):
             "Claude side. With no companion active, Omni's default identity is used."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -433,7 +433,7 @@ class SettingsPanel(QWidget):
             "\"delegate to Claude\" tool just declines politely until this is set up."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -474,7 +474,7 @@ class SettingsPanel(QWidget):
             "local OpenAI Codex CLI session instead. Off by default."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -550,7 +550,7 @@ class SettingsPanel(QWidget):
 
         note_lbl = QLabel(note)
         note_lbl.setFont(QFont("Segoe UI", 8))
-        note_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note_lbl.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note_lbl.setWordWrap(True)
         lay.addWidget(note_lbl)
 
@@ -664,7 +664,7 @@ class SettingsPanel(QWidget):
             "(unrelated to Omni's own identity), which defaults to the same port."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -743,7 +743,7 @@ class SettingsPanel(QWidget):
             "or a companion set to the Claude backend below."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -835,7 +835,7 @@ class SettingsPanel(QWidget):
         C = self._C
         note = QLabel("Tools from servers added here become available for Omni to call, alongside its built-in tools.")
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -898,21 +898,25 @@ class SettingsPanel(QWidget):
         })
         self._new_mcp_name.clear(); self._new_mcp_url.clear(); self._new_mcp_key.clear()
         self._refresh_mcp_list()
-        self._persist(f"Added MCP server \"{name}\".")
+        self._persist(f"Added MCP server \"{name}\" — takes effect on next reconnect.")
 
     def _on_remove_mcp_server(self, server_id: str):
         self.settings["mcp_servers"] = [s for s in self.settings["mcp_servers"] if s["id"] != server_id]
         self._refresh_mcp_list()
-        self._persist("Server removed.")
+        self._persist("Server removed — takes effect on next reconnect.")
 
     # ---------- Skills ----------
 
     def _build_skills_section(self) -> QWidget:
         wrap, lay = self._section("SKILLS")
         C = self._C
-        note = QLabel("Named blocks of extra instructions, appended to the active companion's system prompt when enabled.")
+        note = QLabel(
+            "Named blocks of extra instructions, appended to the active companion's "
+            "system prompt when enabled. Like every other setting on this page, changes "
+            "take effect on the next reconnect, not mid-conversation."
+        )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -965,6 +969,14 @@ class SettingsPanel(QWidget):
             cb.setFont(QFont("Segoe UI", 8))
             cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             cb.setChecked(bool(skill.get("enabled")))
+            # GEMZ4US 2026-09-10: clicking the skill's name (to see its
+            # instructions) silently toggled it off instead — no way to
+            # view/edit a saved skill's instructions at all, short of
+            # removing and recreating it. A real edit view is a bigger
+            # change; this at least makes the toggle behavior and the
+            # remove-to-edit workaround discoverable on hover.
+            cb.setToolTip(f"Click to enable/disable \"{skill['name']}\". Instructions aren't "
+                          "shown or editable here — remove and re-add to change them.")
             cb.toggled.connect(lambda checked, sid=skill["id"]: self._on_toggle_skill(sid, checked))
             rlay.addWidget(cb, stretch=1)
             remove_btn = self._make_button("REMOVE", lambda _c=False, sid=skill["id"]: self._on_remove_skill(sid), C.RED)
@@ -982,18 +994,30 @@ class SettingsPanel(QWidget):
         })
         self._new_skill_name.clear(); self._new_skill_content.clear()
         self._refresh_skills_list()
-        self._persist(f"Added skill \"{name}\".")
+        self._persist(f"Added skill \"{name}\" — takes effect on next reconnect.")
 
     def _on_toggle_skill(self, skill_id: str, checked: bool):
+        # GEMZ4US 2026-09-10: reported as "the SKILLS feature doesn't work" —
+        # a skill toggled on, live, had zero effect on the same session's
+        # replies. Root cause: this is the same tool-declaration-staleness
+        # class already fixed for Integrations (see integrations_panel.py),
+        # just for the system_instruction as a whole instead of just tools —
+        # _build_config() (main.py) only reads settings["skills"] once per
+        # connection, at connect time. Toggling a skill mid-session was never
+        # going to change the live Gemini session's system prompt; nothing
+        # was broken, it just gave zero indication a reconnect was needed —
+        # the toggle didn't even show a status message before this fix, so
+        # "silently did nothing" was the only signal a user got either way.
         for skill in self.settings["skills"]:
             if skill["id"] == skill_id:
                 skill["enabled"] = checked
-        self._persist(None)
+        state = "enabled" if checked else "disabled"
+        self._persist(f"Skill {state} — takes effect on next reconnect.")
 
     def _on_remove_skill(self, skill_id: str):
         self.settings["skills"] = [s for s in self.settings["skills"] if s["id"] != skill_id]
         self._refresh_skills_list()
-        self._persist("Skill removed.")
+        self._persist("Skill removed — takes effect on next reconnect.")
 
     # ---------- persistence ----------
 
