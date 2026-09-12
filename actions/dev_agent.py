@@ -601,6 +601,17 @@ def dev_agent(
     if not description:
         return "Please describe the project you want me to build, sir."
 
+    # 2026-09-12 security audit, Critical #3: builds a real project on disk,
+    # installs whatever dependencies the plan names (pip install can run
+    # arbitrary setup.py/build-hook code), and then runs it — real human
+    # confirmation first, same as code_helper's run/build gate.
+    confirm = getattr(player, "confirm_action", None)
+    if not (callable(confirm) and confirm(
+        f"Build a new project (\"{description[:80]}\")? This installs dependencies "
+        f"and runs code on your computer."
+    )):
+        return "Build cancelled — not confirmed."
+
     return _build_project(
         description  = description,
         language     = language,

@@ -631,12 +631,19 @@ def computer_settings(
         player.write_log(f"[Settings] {action}")
 
     if action in _DANGEROUS_ACTIONS:
-        confirmed = str(params.get("confirmed", "")).lower()
-        if confirmed not in ("yes", "true", "1", "confirm"):
-            return (
-                f"This will {action} the computer. "
-                f"Please confirm by calling again with confirmed=yes."
-            )
+        # 2026-09-12 security audit, Critical #1: this used to accept a
+        # model-settable confirmed="yes" parameter as "confirmation" — that's
+        # the model confirming its own decision, not a real human answer, so
+        # a prompt-injected or simply overzealous turn could just set it
+        # itself and go straight to shutting the machine down. Routes through
+        # a real modal dialog now (MainWindow.confirm_action, via ui.py's
+        # JarvisUI facade), same shape as the Trader panel's own
+        # destructive-action confirms (trader_panel.py's reset-ledger box).
+        confirm = getattr(player, "confirm_action", None)
+        if not callable(confirm):
+            return f"Cannot {action} the computer without a way to confirm with you first."
+        if not confirm(f"Omni wants to {action} this computer. Allow it?"):
+            return f"{action.capitalize()} cancelled — not confirmed."
 
     if action == "volume_set":
         try:

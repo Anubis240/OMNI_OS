@@ -1,7 +1,6 @@
 #desktop.py
 import os
 import sys
-import json
 import shutil
 import subprocess
 import tempfile
@@ -22,11 +21,6 @@ _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 def _get_base_dir() -> Path:
     return get_data_dir()
 
-def _get_api_key() -> str:
-    path = _get_base_dir() / "config" / "api_keys.json"
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-    
 def _get_desktop() -> Path:
     if _OS == "Linux":
         xdg = os.environ.get("XDG_DESKTOP_DIR", "")
@@ -34,121 +28,23 @@ def _get_desktop() -> Path:
             return Path(xdg)
     return Path.home() / "Desktop"
 
-def _build_sandbox() -> dict:
-    import time
+# 2026-09-12 security audit, Critical #2: this used to have a "task"
+# action (plus a catch-all fallback for any unrecognized action string)
+# that asked a second Gemini call to generate Python from a free-text
+# description, then ran the result via exec() in a hand-rolled sandbox
+# (_build_sandbox) that still handed the generated code `ctypes` (raw
+# Win32/memory access) and `pyautogui` (full keyboard/mouse control).
+# Removed rather than patched: a restricted-__builtins__ exec() was never a
+# real security boundary in Python to begin with — code can reach
+# dangerous objects through ordinary object introspection
+# (().__class__.__base__.__subclasses__() and similar) without ever
+# touching __builtins__ — so shrinking what the sandbox explicitly grants
+# doesn't close the actual hole, and the "hard rules" given to the
+# code-generating prompt were a request to a language model, not an
+# enforcement mechanism. desktop_control() below now rejects both the old
+# "task" action and any other unrecognized action with a clear message
+# instead of generating and running code for it.
 
-    safe_builtins = {
-        "print": print,
-        "len": len, "str": str, "int": int, "float": float,
-        "bool": bool, "list": list, "dict": dict, "tuple": tuple,
-        "range": range, "enumerate": enumerate, "sorted": sorted,
-        "isinstance": isinstance, "hasattr": hasattr, "getattr": getattr,
-        "max": max, "min": min, "sum": sum, "abs": abs,
-        "zip": zip, "map": map, "filter": filter,
-    }
-
-    sandbox = {
-        "__builtins__": safe_builtins,
-        "Path": Path,
-        "time": time,
-        "shutil": type("shutil", (), {
-            "copy2":      shutil.copy2,
-            "copytree":   shutil.copytree,
-            "disk_usage": shutil.disk_usage,
-        })(),
-        "os_path": os.path,  
-    }
-
-    if _PYAUTOGUI:
-        sandbox["pyautogui"] = pyautogui
-
-    if _OS == "Windows":
-        try:
-            import ctypes
-            import winreg
-            sandbox["ctypes"] = ctypes
-            sandbox["winreg"] = type("winreg", (), {
-                # Sadece okuma
-                "OpenKey":      winreg.OpenKey,
-                "QueryValueEx": winreg.QueryValueEx,
-                "HKEY_CURRENT_USER": winreg.HKEY_CURRENT_USER,
-            })()
-        except ImportError:
-            pass
-
-    return sandbox
-
-
-def _execute_generated_code(code: str, player=None) -> str:
-    if not code or code.strip() == "UNSAFE":
-        return "This action cannot be performed safely."
-
-    # Kod temizleme
-    if code.startswith("```"):
-        lines = code.split("\n")
-        code  = "\n".join(lines[1:-1]).strip()
-
-    sandbox      = _build_sandbox()
-    output_lines = []
-    sandbox["__builtins__"]["print"] = lambda *a: output_lines.append(" ".join(str(x) for x in a))
-
-    try:
-        exec(compile(code, "<jarvis_desktop>", "exec"), sandbox)
-        return "\n".join(output_lines) if output_lines else "Done."
-    except Exception as e:
-        print(f"[Desktop] Exec error: {e}\nCode:\n{code[:300]}")
-        return f"Execution error: {e}"
-
-
-def _ask_gemini_for_desktop_action(task: str) -> str:
-
-    from google import genai
-    client = genai.Client(api_key=_get_api_key())
-
-    desktop = str(_get_desktop())
-
-    os_specific = ""
-    if _OS == "Windows":
-        os_specific = "- ctypes (Windows API calls, read-only)\n- winreg (registry READ only)"
-    elif _OS == "Darwin":
-        os_specific = "- subprocess is NOT available; use pyautogui or Path only"
-    else:
-        os_specific = "- subprocess is NOT available; use pyautogui or Path only"
-
-    prompt = f"""You are a desktop automation assistant.
-Current OS: {_OS}
-Desktop path: {desktop}
-
-Generate safe Python code to accomplish the task below.
-Allowed modules ONLY:
-- pyautogui (mouse, keyboard — if needed)
-- pathlib.Path (file/folder inspection only, no deletion)
-- shutil.copy2, shutil.copytree, shutil.disk_usage (NO move, NO rmtree)
-- os_path (os.path equivalent, read-only)
-- time.sleep
-{os_specific}
-
-Hard rules:
-- NO file deletion (no unlink, no rmtree, no remove)
-- NO subprocess calls
-- NO exec() or eval() inside the code
-- NO import statements (modules are pre-injected)
-- NO file write operations except explicitly requested
-- If task cannot be done safely with these tools, output exactly: UNSAFE
-
-Output ONLY the Python code. No explanation, no markdown, no backticks.
-
-Task: {task}"""
-
-    try:
-        response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        code = response.text.strip()
-        if code.startswith("```"):
-            lines = code.split("\n")
-            code  = "\n".join(lines[1:-1]).strip()
-        return code
-    except Exception as e:
-        return f"ERROR: {e}"
 
 def set_wallpaper(image_path: str) -> str:
     path = Path(image_path).expanduser().resolve()
@@ -418,16 +314,17 @@ def desktop_control(
     """
     parameters:
         action : wallpaper | wallpaper_url | current_wallpaper |
-                 organize  | clean | list | stats |
-                 task (AI-powered)
+                 organize  | clean | list | stats
         path   : image path for 'wallpaper'
         url    : image URL for 'wallpaper_url'
         mode   : 'by_type' or 'by_date' for 'organize'
-        task   : natural language description for AI-powered actions
+
+    'task' (free-form AI-generated desktop actions) was removed 2026-09-12 —
+    see the module-level comment above set_wallpaper() for why.
     """
     params = parameters or {}
     action = params.get("action", "").lower().strip()
-    task   = params.get("task", "").strip()
+    task   = params.get("task", "").strip()  # only checked below to redirect a caller still using it
 
     if player:
         player.write_log(f"[desktop] {action or task[:40]}")
@@ -457,22 +354,17 @@ def desktop_control(
             return get_desktop_stats()
 
         elif action == "task" or task:
-            actual_task = task or params.get("description", "")
-            if not actual_task:
-                return "Please describe what you want to do on the desktop."
-
-            print(f"[Desktop] Asking Gemini: {actual_task}")
-            if player:
-                player.write_log("[Desktop] Generating action...")
-
-            code = _ask_gemini_for_desktop_action(actual_task)
-            return _execute_generated_code(code, player=player)
+            # Removed 2026-09-12 (security audit, Critical #2) — this used
+            # to generate and exec() arbitrary Python for free-text desktop
+            # tasks. See the module-level comment above set_wallpaper() for
+            # why that was removed rather than patched.
+            return ("Free-form desktop tasks are no longer supported for safety reasons. "
+                    "Use wallpaper, wallpaper_url, current_wallpaper, organize, clean, list, "
+                    "or stats instead.")
 
         else:
-            if action:
-                code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
-            return "No action or task specified."
+            return f"Unknown action: '{action}'. Use wallpaper, wallpaper_url, current_wallpaper, " \
+                   f"organize, clean, list, or stats."
 
     except Exception as e:
         print(f"[Desktop] Error: {e}")

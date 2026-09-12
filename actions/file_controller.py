@@ -27,6 +27,17 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
+def _confirm(player, message: str) -> bool:
+    """2026-09-12 security audit, Critical #1: delete/move are irreversible
+    (or hard to undo) and _is_safe_path's scope is your entire home
+    directory, so these two actions get a real human confirmation — the
+    same modal-dialog mechanism as computer_settings.py's shutdown/restart
+    gate — instead of running the instant the model decides to call them.
+    Fails closed: no player, or a player without confirm_action, means no."""
+    confirm = getattr(player, "confirm_action", None)
+    return bool(callable(confirm) and confirm(message))
+
+
 def _get_desktop() -> Path:
     if _OS == "Linux":
         xdg = os.environ.get("XDG_DESKTOP_DIR", "")
@@ -520,10 +531,15 @@ def file_controller(
             return create_folder(path, name=name)
 
         elif action == "delete":
+            if not _confirm(player, f"Delete \"{name or path}\"? This cannot be undone."):
+                return "Delete cancelled — not confirmed."
             return delete_file(path, name=name)
 
         elif action == "move":
-            return move_file(path, name=name, destination=params.get("destination", ""))
+            destination = params.get("destination", "")
+            if not _confirm(player, f"Move \"{name or path}\" to \"{destination}\"?"):
+                return "Move cancelled — not confirmed."
+            return move_file(path, name=name, destination=destination)
 
         elif action == "copy":
             return copy_file(path, name=name, destination=params.get("destination", ""))

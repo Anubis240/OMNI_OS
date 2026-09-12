@@ -48,7 +48,40 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded["dashboard_port"], 8123)
         self.assertEqual(loaded["skills"], [{"name": "Local skill", "enabled": True}])
         self.assertNotIn("unknown_setting", loaded)
-        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["dashboard_port"], 8123)
+
+        # 2026-09-12 security audit fix: settings.json is now DPAPI-encrypted
+        # at rest (see core/settings_store.py's _ENC_MAGIC/_encrypt_bytes) —
+        # the raw file is no longer plain JSON where DPAPI is available
+        # (every real Windows install; not necessarily true on a non-Windows
+        # CI runner, which is why this branches instead of assuming either).
+        raw = self.path.read_bytes()
+        if settings_store._dpapi_available():
+            self.assertTrue(raw.startswith(settings_store._ENC_MAGIC))
+            decrypted = json.loads(
+                settings_store._decrypt_bytes(raw[len(settings_store._ENC_MAGIC):]).decode("utf-8")
+            )
+            self.assertEqual(decrypted["dashboard_port"], 8123)
+        else:
+            self.assertEqual(json.loads(raw.decode("utf-8"))["dashboard_port"], 8123)
+
+    def test_legacy_plaintext_settings_still_load_and_get_encrypted_on_next_save(self):
+        # Every install from before 2026-09-12 has a plain-JSON settings.json
+        # on disk with no _ENC_MAGIC prefix — this must keep loading
+        # correctly with no separate migration step, and then start getting
+        # encrypted (where DPAPI is available) the next time anything saves.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"dashboard_port": 9001}), encoding="utf-8")
+
+        loaded = settings_store.load_settings()
+        self.assertEqual(loaded["dashboard_port"], 9001)
+
+        settings_store.save_settings(loaded)
+        raw = self.path.read_bytes()
+        if settings_store._dpapi_available():
+            self.assertTrue(raw.startswith(settings_store._ENC_MAGIC))
+        else:
+            self.assertFalse(raw.startswith(settings_store._ENC_MAGIC))
+        self.assertEqual(settings_store.load_settings()["dashboard_port"], 9001)
 
     def test_invalid_json_falls_back_to_defaults_without_overwriting_file(self):
         self.path.parent.mkdir(parents=True)

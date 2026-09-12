@@ -550,6 +550,20 @@ def code_helper(
         action = _detect_intent(description, file_path, code)
         print(f"[Code] 🤖 Auto-detected: {action}")
 
+    if action in ("run", "build"):
+        # 2026-09-12 security audit, Critical #3: this actually executes
+        # code — a real interpreter, real filesystem/network access, no
+        # sandbox — so unlike write/edit/explain (which only touch a file
+        # or answer in words) it gets a real human confirmation first.
+        # Checked after "auto" resolves above, since auto-detect can itself
+        # land on run/build without the model ever saying so explicitly.
+        confirm = getattr(player, "confirm_action", None)
+        target = file_path or output_path or "the generated code"
+        if not (callable(confirm) and confirm(
+            f"Run/build \"{target}\"? This executes real code on your computer."
+        )):
+            return f"{action.capitalize()} cancelled — not confirmed."
+
     if action == "write":
         return _write_action(description, language, output_path, player)
 

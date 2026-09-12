@@ -438,11 +438,10 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "wallpaper | wallpaper_url | organize | clean | list | stats | task"},
+                "action": {"type": "STRING", "description": "wallpaper | wallpaper_url | organize | clean | list | stats"},
                 "path":   {"type": "STRING", "description": "Image path for wallpaper"},
                 "url":    {"type": "STRING", "description": "Image URL for wallpaper_url"},
                 "mode":   {"type": "STRING", "description": "by_type or by_date for organize"},
-                "task":   {"type": "STRING", "description": "Natural language desktop task"},
             },
             "required": ["action"]
         }

@@ -247,6 +247,19 @@ def send_message(
     if not _PYAUTOGUI:
         return "PyAutoGUI is not installed — cannot control the desktop."
 
+    # 2026-09-12 security audit, Critical #1: sending a message is exactly
+    # the "explicit permission required" category Claude itself follows for
+    # actions on the user's behalf — the same standard applies one layer
+    # down here, since the model can be steered into calling this by content
+    # it didn't originate (a web page, an uploaded file, an MCP tool result).
+    # Real modal confirmation, not a model-settable parameter.
+    confirm = getattr(player, "confirm_action", None)
+    preview_msg = message_text[:80] + ("…" if len(message_text) > 80 else "")
+    if not (callable(confirm) and confirm(
+        f"Send this {platform} message to {receiver}?\n\n\"{preview_msg}\""
+    )):
+        return "Message cancelled — not confirmed."
+
     preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
     print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
     if player:

@@ -212,9 +212,56 @@ INTEGRATION_CATALOG = [
 ]
 
 
+# 2026-09-12 security audit, High #4: settings.json holds every credential
+# this app is trusted with — the Gemini/OpenAI/Anthropic keys, all 30
+# integration tokens, MCP server keys, custom API keys — as plain JSON on
+# disk, unlike trader/wallet/local_wallet.py's private key, which is
+# already correctly DPAPI-encrypted. Reusing that exact pattern here:
+# encrypted at rest via Windows DPAPI (win32crypt, tied to this OS user
+# account, same as the wallet), transparent to every one of the ~30+
+# call sites across the codebase that already call load_settings()/
+# save_settings() — they keep getting/giving a plain dict either way, only
+# the on-disk bytes change.
+#
+# _ENC_MAGIC marks an encrypted file so a pre-2026-09-12 plaintext
+# settings.json (every existing install) is still read correctly with no
+# separate migration step: it simply lacks the prefix, falls through to the
+# plain-JSON path below exactly as it always has, and gets written back out
+# encrypted the very next time anything calls save_settings() — which
+# happens on almost any settings change.
+_ENC_MAGIC = b"OMNIENC1:"
+
+
+def _dpapi_available() -> bool:
+    try:
+        import win32crypt  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _encrypt_bytes(data: bytes) -> bytes:
+    import win32crypt
+    return win32crypt.CryptProtectData(data, None, None, None, None, 0)
+
+
+def _decrypt_bytes(blob: bytes) -> bytes:
+    import win32crypt
+    _, data = win32crypt.CryptUnprotectData(blob, None, None, None, 0)
+    return data
+
+
 def load_settings() -> dict:
     try:
-        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        raw = SETTINGS_PATH.read_bytes()
+        if raw.startswith(_ENC_MAGIC):
+            if not _dpapi_available():
+                raise RuntimeError(
+                    "settings.json is encrypted but Windows DPAPI (pywin32) is "
+                    "unavailable on this system — cannot decrypt your settings."
+                )
+            raw = _decrypt_bytes(raw[len(_ENC_MAGIC):])
+        data = json.loads(raw.decode("utf-8"))
     except FileNotFoundError:
         data = {}
     except Exception:
@@ -260,7 +307,22 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict) -> None:
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    payload = json.dumps(settings, indent=2).encode("utf-8")
+    if _dpapi_available():
+        SETTINGS_PATH.write_bytes(_ENC_MAGIC + _encrypt_bytes(payload))
+    else:
+        # DPAPI genuinely missing (a broken/dev environment without pywin32
+        # — the shipped Windows installer always bundles it, see
+        # requirements.txt). Unlike the wallet, which fails closed and just
+        # disables itself, settings.json is load-bearing for the entire
+        # app (companions, skills, MCP servers, integrations, trader
+        # config) — refusing to save here would make Omni-OS unusable
+        # rather than degrading one optional feature, so this degrades to
+        # plaintext instead of failing outright. Loud on purpose: this
+        # should never happen on a real install.
+        print("[Settings] WARNING: Windows DPAPI unavailable — saving settings.json "
+              "UNENCRYPTED. This should not happen on a real Omni-OS install.")
+        SETTINGS_PATH.write_bytes(payload)
 
 
 def new_id() -> str:

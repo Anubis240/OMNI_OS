@@ -24,8 +24,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
-    QTextEdit, QTextBrowser, QVBoxLayout, QWidget, QProgressBar,
+    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+    QStackedWidget, QTextEdit, QTextBrowser, QVBoxLayout, QWidget, QProgressBar,
 )
 
 from core.app_paths import get_data_dir, get_resource_dir
@@ -37,6 +37,12 @@ API_FILE   = CONFIG_DIR / "api_keys.json"
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
+# How long a background-thread caller (a tool call, see main.py::_execute_tool)
+# will block waiting for the user to answer a confirm_action() dialog before
+# giving up and treating it as "not confirmed" — fails closed, comfortably
+# under main.py's own TOOL_CALL_TIMEOUT (200s) so this times out first with a
+# clean answer instead of the whole tool-call machinery timing out messily.
+CONFIRM_TIMEOUT_S = 120
 _SIDEBAR_W    = 64    # docked icon-only nav column, flush left
 _STATUS_CARD_W = 220  # floating system-status card, top-left over the orb
 _CHAT_PANEL_W  = 340  # floating chat panel, right side over the orb
@@ -1510,6 +1516,26 @@ class SetupOverlay(QWidget):
         self.done.emit(key, self._sel_os)
 
 
+class _ConfirmRequest:
+    """Payload carried across MainWindow._confirm_sig — a tool-execution call
+    (see main.py::_execute_tool) runs on a background executor thread and
+    needs a real, human-answered yes/no before a destructive action proceeds
+    (file delete/move, OS shutdown/restart, sending a message, running
+    generated code, ...). A plain return value can't cross the emit() back to
+    the caller, so the event/result pair here does: the GUI thread's slot
+    (MainWindow._on_confirm_requested) sets `result` and then `event`, and the
+    waiting background thread (MainWindow.confirm_action) wakes up on
+    `event.wait()` and reads `result` straight after. Same cross-thread-signal
+    shape as _open_trader_sig, just carrying a two-way answer instead of a
+    fire-and-forget."""
+    __slots__ = ("message", "event", "result")
+
+    def __init__(self, message: str):
+        self.message = message
+        self.event = threading.Event()
+        self.result = False
+
+
 class MainWindow(QMainWindow):
     _log_sig   = pyqtSignal(str)
     _state_sig = pyqtSignal(str)
@@ -1526,6 +1552,14 @@ class MainWindow(QMainWindow):
     # this path). Routed through a signal, same pattern as _log_sig, so Qt
     # auto-queues it onto the GUI thread regardless of the caller's thread.
     _open_trader_sig = pyqtSignal()
+    # Same cross-thread-marshaling reason as _open_trader_sig above, for a
+    # different problem: main.py::_execute_tool's destructive-action branches
+    # run on a background executor thread and need to show a REAL modal
+    # confirmation dialog (not a model-settable "confirmed=yes" parameter,
+    # which a prompt-injected or overzealous model turn can just set itself —
+    # see the 2026-09-12 security audit's Critical #1) and block for an
+    # actual human answer. object = a _ConfirmRequest.
+    _confirm_sig = pyqtSignal(str, object)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1665,6 +1699,50 @@ class MainWindow(QMainWindow):
         except TypeError:
             pass  # nothing was connected yet (first build)
         self._open_trader_sig.connect(self.open_trader_panel)
+
+        try:
+            self._confirm_sig.disconnect()
+        except TypeError:
+            pass  # nothing was connected yet (first build)
+        self._confirm_sig.connect(self._on_confirm_requested)
+
+    def _on_confirm_requested(self, message: str, req: "_ConfirmRequest") -> None:
+        """GUI-thread slot for _confirm_sig — builds and shows the actual
+        modal dialog, then wakes up whichever background thread is blocked in
+        confirm_action() waiting on req.event. Manually-styled QMessageBox,
+        not the one-line .question() helper, for the same reason as
+        trader_panel.py's reset-ledger confirm and world_panel.py's
+        remove-sub-agent confirm: QApplication.setStyle("Fusion") + Windows
+        dark mode renders a stock QMessageBox's text/buttons illegible
+        (dark-mode-derived QPalette text color vs. a face that doesn't follow
+        along) unless a stylesheet is attached before .exec()."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Confirm action")
+        box.setText(message)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(
+            f"QMessageBox {{ background: {C.PANEL_BG}; }} "
+            f"QLabel {{ color: {C.TEXT}; background: transparent; }} "
+            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; "
+            f"border-radius: 4px; padding: 4px 14px; }}"
+        )
+        reply = box.exec()
+        req.result = (reply == QMessageBox.StandardButton.Yes)
+        req.event.set()
+
+    def confirm_action(self, message: str, timeout: float = CONFIRM_TIMEOUT_S) -> bool:
+        """Thread-safe: safe to call from the background executor thread
+        main.py's tool calls actually run on (see _execute_tool). Blocks the
+        CALLING thread — never the GUI thread, which stays free to paint the
+        dialog _confirm_sig marshals onto it — until the user answers or
+        `timeout` elapses. Fails closed: a timeout, or the window not being
+        ready yet, is treated as "not confirmed", never as "confirmed"."""
+        req = _ConfirmRequest(message)
+        self._confirm_sig.emit(message, req)
+        req.event.wait(timeout)
+        return req.result if req.event.is_set() else False
 
     def _position_overlays(self):
         """Places the floating top bar / status card / chat panel /
@@ -2699,6 +2777,14 @@ class JarvisUI:
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
+
+    def confirm_action(self, message: str) -> bool:
+        """Blocks the calling thread until the user answers a real modal
+        confirmation dialog, or CONFIRM_TIMEOUT_S elapses (fails closed).
+        Safe to call from a background thread — see MainWindow.confirm_action
+        and _ConfirmRequest's docstrings for why this needs to be more than a
+        plain signal emit()."""
+        return self._win.confirm_action(message)
 
     def wait_for_api_key(self):
         while not self._win._ready:
