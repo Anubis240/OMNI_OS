@@ -2150,7 +2150,14 @@ class MainWindow(QMainWindow):
         new_color = companion_color(ids[idx], companions) if ids[idx] else C.PRI
         self.hud.animate_companion_switch(new_color)
         name = "Omni (default)" if not ids[idx] else next(c["name"] for c in companions if c["id"] == ids[idx])
-        self._log.append_log(f"SYS: Switched to {name} — takes effect on next reconnect.")
+        # 2026-09-11 report (GEMZ4US, Section C3): "takes effect on next
+        # reconnect" was true but misleading — nothing forced that next
+        # reconnect, so a switch could sit unapplied indefinitely in a
+        # stable session. Reuses the same immediate-reconnect callback
+        # World Panel already relies on (main.py::_on_companions_changed)
+        # instead of leaving it to chance.
+        self._log.append_log(f"SYS: Switched to {name} — reconnecting now.")
+        self._notify_companions_changed()
 
     def _refresh_companion_switcher(self):
         from core import settings_store
@@ -2448,6 +2455,7 @@ class MainWindow(QMainWindow):
         if self._settings_panel is None:
             from settings_panel import SettingsPanel  # deferred: see settings_panel.py's module docstring
             self._settings_panel = SettingsPanel()
+            self._settings_panel.on_companions_changed = self._notify_companions_changed
             self._center_stack.addWidget(self._settings_panel)
         return self._settings_panel
 
@@ -2463,6 +2471,9 @@ class MainWindow(QMainWindow):
             self.set_left_panel_extra(None)
             self._set_home_overlays_visible(False)
             self._set_status_card_mode("hidden")
+            panel.refresh_companions()  # see that method's docstring — World Panel can
+                                         # change companions out from under this panel's
+                                         # own cached settings dict while it's not visible
         self._refresh_trader_visibility()  # settings may have just changed (e.g. trader toggle)
         self._refresh_companion_switcher()  # or the active companion
 

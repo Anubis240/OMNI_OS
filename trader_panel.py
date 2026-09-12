@@ -18,9 +18,9 @@ import webbrowser
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
-    QVBoxLayout, QWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from trader import chains as chains_mod
@@ -51,6 +51,71 @@ def _full_tx_hash(tx_hash: str) -> str:
 
 def _looks_like_private_key(raw: str) -> bool:
     return bool(_PRIVATE_KEY_RE.match(raw.strip()))
+
+
+class _SecretRevealDialog(QDialog):
+    """2026-09-12 security audit (GEMZ4US, Section A — safety-critical):
+    CREATE and EXPORT used to print a wallet's raw recovery phrase/private
+    key straight into the Event Feed (_append_feed_text) — permanent for
+    the rest of the session, unmasked, scrollable. Two real wallets were
+    retired after their seed phrase sat visible there. This shows the
+    secret exactly once, in a dialog the user must explicitly acknowledge
+    and close, and never touches the feed or any persisted log."""
+
+    def __init__(self, C, title: str, label: str, secret: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(440)
+        self.setStyleSheet(f"QDialog {{ background: {C.PANEL_BG}; }}")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(12)
+
+        warn = QLabel(
+            "⚠ Shown once. Write it down and store it somewhere safe — the only "
+            "way to see it again after closing this window is to re-export."
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet(f"color: {C.RED}; font-weight: bold; background: transparent;")
+        lay.addWidget(warn)
+
+        lbl = QLabel(label)
+        lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(lbl)
+
+        box = QTextEdit()
+        box.setPlainText(secret)
+        box.setReadOnly(True)
+        box.setFixedHeight(90)
+        box.setStyleSheet(
+            f"QTextEdit {{ color: {C.TEXT}; background: {C.PANEL2_BG}; "
+            f"border: 1px solid {C.BORDER_A}; border-radius: 4px; padding: 8px; "
+            f"font-family: Consolas, monospace; }}"
+        )
+        lay.addWidget(box)
+
+        ack = QCheckBox("I've saved this somewhere safe")
+        ack.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        lay.addWidget(ack)
+
+        close_btn = QPushButton("Close")
+        close_btn.setEnabled(False)
+        close_btn.setStyleSheet(
+            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; "
+            f"border: 1px solid {C.BORDER_A}; border-radius: 4px; padding: 6px 16px; }} "
+            f"QPushButton:disabled {{ color: {C.TEXT_DIM}; }}"
+        )
+        ack.toggled.connect(close_btn.setEnabled)
+        close_btn.clicked.connect(self.accept)
+        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+    def closeEvent(self, event):
+        # The window's own [X] would otherwise let the phrase vanish without
+        # the "I've saved this" acknowledgment ever being required — force
+        # the same accept() path either way.
+        event.accept()
 
 _CONFIG_FIELDS = [
     ("tradeSizeMinUsd", "Trade size min $"),
@@ -671,8 +736,42 @@ class TraderPanel(QWidget):
             self._append_feed_text('SYS: type "I OWN THIS RISK" in the field first — this stores real key material on this device.')
         return ok
 
+    def _confirm_warning(self, title: str, message: str) -> bool:
+        """2026-09-12 security audit, GEMZ4US Sections A3/B1: CREATE/EXPORT
+        (raw key material on screen) and REMOVE (permanent, no undo) each
+        get their own distinct confirmation, separate from the general
+        "I OWN THIS RISK" wallet-unlock phrase — that phrase is about
+        accepting the wallet feature's risk in general, not about this
+        specific action right now. Same styled-QMessageBox pattern as
+        _on_reset's ledger-wipe confirm."""
+        C = self._C
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(message)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(
+            f"QMessageBox {{ background: {C.PANEL_BG}; }} "
+            f"QLabel {{ color: {C.TEXT}; background: transparent; }} "
+            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; "
+            f"border-radius: 4px; padding: 4px 14px; }}"
+        )
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _reveal_secret(self, title: str, label: str, secret: str) -> None:
+        """Shows `secret` exactly once in a modal dialog — see
+        _SecretRevealDialog's docstring for why this replaced writing it
+        into the Event Feed."""
+        _SecretRevealDialog(self._C, title, label, secret, parent=self).exec()
+
     def _on_wallet_create(self):
         if not self._risk_acknowledged():
+            return
+        if not self._confirm_warning(
+            "Show raw key material?",
+            "Creating a wallet will show its recovery phrase once, right after. Continue?"
+        ):
             return
         try:
             result = local_wallet.create()
@@ -682,7 +781,9 @@ class TraderPanel(QWidget):
         self._risk_ack_input.clear()
         self._refresh_wallet_status()
         self._append_feed_text(f"OK: wallet created — {result['address']}")
-        self._append_feed_text(f"⚠ RECOVERY PHRASE (shown once, write it down): {result['mnemonic']}")
+        self._reveal_secret(
+            "Recovery Phrase", "Your new wallet's recovery phrase:", result["mnemonic"]
+        )
 
     def _on_wallet_import(self):
         if not self._risk_acknowledged():
@@ -707,13 +808,21 @@ class TraderPanel(QWidget):
     def _on_wallet_export(self):
         if not self._risk_acknowledged():
             return
+        if not self._confirm_warning(
+            "Show raw key material?",
+            "This will display your wallet's raw private key or recovery phrase on "
+            "screen. Continue?"
+        ):
+            return
         try:
             secret = local_wallet.export_secret()
         except Exception as err:
             self._append_feed_text(f"SYS: export failed: {err}")
             return
         self._risk_ack_input.clear()
-        self._append_feed_text(f"⚠ EXPORTED {secret['type']} (shown once): {secret['value']}")
+        self._append_feed_text(f"OK: wallet exported ({secret['type']})")
+        label = "Recovery Phrase" if secret["type"] == "mnemonic" else "Private Key"
+        self._reveal_secret(label, f"Your wallet's {label.lower()}:", secret["value"])
 
     def _on_wallet_lock_unlock(self):
         st = local_wallet.status()
@@ -733,6 +842,18 @@ class TraderPanel(QWidget):
 
     def _on_wallet_remove(self):
         if not self._risk_acknowledged():
+            return
+        # 2026-09-11 report (GEMZ4US, Section B1): the README/PRD claimed
+        # wallet removal gets "an explicit confirmation dialog" — it only
+        # ever had the same "I OWN THIS RISK" gate shared with create/
+        # import/export, no distinct dialog. That phrase is about accepting
+        # the wallet feature's risk in general; removal is the one action
+        # here with no undo at all, so it gets its own confirmation too.
+        if not self._confirm_warning(
+            "Remove wallet?",
+            "This permanently removes the stored wallet from this device — there's no "
+            "undo. You'll need its recovery phrase or private key to use it again. Continue?"
+        ):
             return
         if self.engine.armed_live:
             self.engine.disarm_live("wallet removed")

@@ -21,7 +21,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from core import settings_store
@@ -44,6 +44,13 @@ class SettingsPanel(QWidget):
                                                      # see _on_edit_skill/_on_save_skill
 
         self._status_sig.connect(self._show_status)
+        self.on_companions_changed = None  # callable: () -> None — wired by
+                                             # ui.py::_ensure_settings_panel to
+                                             # MainWindow._notify_companions_changed,
+                                             # same callback World Panel already uses
+                                             # to force an immediate reconnect after
+                                             # a companion change (see
+                                             # _on_set_active_companion's docstring)
         self._build_ui()
 
     # ---------- layout ----------
@@ -363,14 +370,27 @@ class SettingsPanel(QWidget):
             self._companions_list_layout.addWidget(row)
 
     def _on_set_active_companion(self, companion_id: str):
+        # 2026-09-11 report (GEMZ4US, Section C3): this used to only persist
+        # the change and print "takes effect on next reconnect" — nothing
+        # actually forced that next reconnect to happen, so it only applied
+        # whenever some UNRELATED event (voice change, a dropped connection)
+        # happened to reconnect anyway, which could be minutes or never in a
+        # stable session. World Panel already had a proven fix for exactly
+        # this shape of problem (on_companion_added -> immediate reconnect,
+        # see main.py::_on_companions_changed) — reused here instead of
+        # inventing a second mechanism.
         self.settings["active_companion_id"] = companion_id
         self._refresh_companions_list()
-        self._persist("Active companion changed — takes effect on next reconnect.")
+        self._persist("Active companion changed — reconnecting now.")
+        if self.on_companions_changed:
+            self.on_companions_changed()
 
     def _on_use_default_companion(self):
         self.settings["active_companion_id"] = ""
         self._refresh_companions_list()
-        self._persist("Switched back to the default Omni companion.")
+        self._persist("Switched back to the default Omni companion — reconnecting now.")
+        if self.on_companions_changed:
+            self.on_companions_changed()
 
     def _on_save_live_model(self):
         self.settings["live_model"] = self._live_model.text().strip()
@@ -401,7 +421,44 @@ class SettingsPanel(QWidget):
         self._refresh_companions_list()
         self._persist(f"Added companion \"{name}\".")
 
+    def refresh_companions(self) -> None:
+        """Reloads settings from disk and rebuilds the companions list.
+        2026-09-11 report (GEMZ4US, Section B2): a companion deleted via the
+        World Panel appeared to "survive" in Settings until removed there
+        directly. Root cause — this panel is constructed once and reused
+        for the app's whole lifetime (see ui.py::_ensure_settings_panel),
+        caching `self.settings` in memory at construction time; the World
+        Panel's own delete path correctly writes to disk and notifies
+        main.py to reconnect, but had no way to tell an already-open
+        Settings panel its cached dict just went stale. The deletion was
+        never lost — Settings just hadn't re-read the file. Called every
+        time this panel is shown (MainWindow._toggle_settings_panel)."""
+        self.settings = settings_store.load_settings()
+        self._refresh_companions_list()
+
     def _on_remove_companion(self, companion_id: str):
+        name = next((c["name"] for c in self.settings["companions"] if c["id"] == companion_id), "this companion")
+        box = QMessageBox(self)
+        box.setWindowTitle("Remove companion")
+        box.setText(f'Remove "{name}"? This cannot be undone.')
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(
+            # 2026-09-11 report (GEMZ4US, Section B2): this REMOVE button
+            # used to fire instantly on a single click, no confirmation at
+            # all — the one companion-management action that's actually
+            # permanent (World Panel's own delete already had this exact
+            # dialog, matching the Fusion+dark-mode QMessageBox styling
+            # fix already established in trader_panel.py/world_panel.py).
+            f"QMessageBox {{ background: {self._C.PANEL_BG}; }} "
+            f"QLabel {{ color: {self._C.TEXT}; background: transparent; }} "
+            f"QPushButton {{ color: {self._C.TEXT}; background: {self._C.PANEL2_BG}; "
+            f"border: 1px solid {self._C.BORDER_A}; border-radius: 4px; padding: 4px 14px; }}"
+        )
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
         self.settings["companions"] = [c for c in self.settings["companions"] if c["id"] != companion_id]
         if self.settings.get("active_companion_id") == companion_id:
             self.settings["active_companion_id"] = ""

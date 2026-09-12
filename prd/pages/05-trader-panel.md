@@ -22,11 +22,11 @@ An optional, self-contained crypto trading feature (off by default — enabled v
 ### Wallet Row
 | Field | Type | Notes |
 |---|---|---|
-| Create wallet | Button | Generates a new wallet |
+| Create wallet | Button | Generates a new wallet; the recovery phrase is shown exactly once in a modal dialog (`_SecretRevealDialog`) the user must acknowledge and close — never written to the Event Feed |
 | Import wallet | Button + text input | Accepts a private key; `_looks_like_private_key` sanity-checks the format before accepting |
-| Export wallet | Button | Reveals the private key (behind the same risk-acknowledgment gate as arming live trading) |
-| Lock/Unlock | Button | Toggles wallet accessibility without removing it |
-| Remove wallet | Button | Confirmation-gated |
+| Export wallet | Button | Reveals the private key or recovery phrase in the same one-time modal as Create, behind its own distinct confirmation on top of the general risk-acknowledgment gate |
+| Lock/Unlock | Button | Toggles wallet accessibility without removing it — does **not** require the risk-acknowledgment phrase, unlike Create/Import/Export/Remove |
+| Remove wallet | Button | Its own distinct confirmation dialog, on top of the general risk-acknowledgment gate |
 
 ### Arm/Disarm Live Trading
 | Field | Type | Notes |
@@ -61,7 +61,7 @@ Free-text commands parsed by `TraderEngine.command()` — natural-language-ish t
 | API | Trigger | Notes |
 |---|---|---|
 | Seraph pre-trade risk gate (MCP) | Every buy/sell, manual or automatic | `_risk_check` builds gate args from a schema (`_build_gate_args`) and polls for a verdict |
-| Per-chain RPC (Uniswap V2/V3 router + quoter contracts) | A live-armed trade execution on a live-enabled chain | Chain registry in `trader/chains.py`: 7 of 9 cataloged chains have live trading contract addresses (Ethereum, Optimism, Unichain, World Chain, Robinhood Chain, Base, Arbitrum); Polygon and Soneium and Ink are cataloged for price/analytics only, not live execution — see [enum-dictionary.md](../appendix/enum-dictionary.md) |
+| Per-chain RPC (Uniswap V2/V3 router + quoter contracts) | A live-armed trade execution on a live-enabled chain | Two separate gates, corrected 2026-09-12 after GEMZ4US's doc review caught this conflated: (1) **capability** — `trader/chains.py`'s registry gives 7 of 9 cataloged chains live trading contract addresses (Ethereum, Optimism, Unichain, World Chain, Robinhood Chain, Base, Arbitrum); Polygon, Soneium, and Ink are cataloged for price/analytics only. (2) **actually enabled** — `TraderEngine._is_chain_live_enabled()` additionally requires the chain to be in the trading config's `chains` list, whose shipped default (`DEFAULT_CONFIG["chains"]`, `trader/engine.py`) is `["ethereum"]` only. So out of the box, only Ethereum executes live trades even though 6 more chains are technically wired — and there's currently no UI field to add more (`_CONFIG_FIELDS` in `trader_panel.py` has no `chains` entry; changing it means hand-editing the trader config file). See [enum-dictionary.md](../appendix/enum-dictionary.md) |
 | DexScreener / market-data feed | Trending suggestions refresh | `trending_suggestions`/`cached_suggestions` |
 
 ## Business Rules

@@ -85,22 +85,22 @@ Any non-`gemini_live` backend is eligible as a `delegate_to_agent` sub-agent tar
 | `dropbox` | Dropbox | File Storage | credentials |
 
 ## Trader Chains
-`trader/chains.py:8-80` — 9 cataloged chains; 7 have a `live` sub-config (real contract addresses + RPC endpoints), 3 are catalog/analytics-only:
+`trader/chains.py:8-80` — 9 cataloged chains; 7 have a `live` sub-config (real contract addresses + RPC endpoints) — i.e. are **capable** of live trading — 3 are catalog/analytics-only. **Corrected 2026-09-12** (GEMZ4US doc review caught this conflated with a separate gate): capability is not the same as *enabled*. `TraderEngine._is_chain_live_enabled()` additionally requires the chain to be in the trading config's `chains` list, and that list's shipped default (`trader/engine.py::DEFAULT_CONFIG["chains"]`) is `["ethereum"]` only — so column 4 below is "could this chain ever execute a live trade," not "will it, out of the box."
 
-| Key | Name | Chain ID | Live trading? |
-|---|---|---|---|
-| `ethereum` | Ethereum | 1 | Yes |
-| `optimism` | Optimism | 10 | Yes |
-| `unichain` | Unichain | 130 | Yes |
-| `polygon` | Polygon | 137 | No (paper/analytics only) |
-| `worldchain` | World Chain | 480 | Yes |
-| `soneium` | Soneium | 1868 | No (paper/analytics only) |
-| `robinhood` | Robinhood Chain | 4663 | Yes |
-| `base` | Base | 8453 | Yes |
-| `arbitrum` | Arbitrum One | 42161 | Yes |
-| `ink` | Ink | 57073 | No (paper/analytics only) |
+| Key | Name | Chain ID | Live-capable? | Enabled by default? |
+|---|---|---|---|---|
+| `ethereum` | Ethereum | 1 | Yes | **Yes** |
+| `optimism` | Optimism | 10 | Yes | No |
+| `unichain` | Unichain | 130 | Yes | No |
+| `polygon` | Polygon | 137 | No (paper/analytics only) | No |
+| `worldchain` | World Chain | 480 | Yes | No |
+| `soneium` | Soneium | 1868 | No (paper/analytics only) | No |
+| `robinhood` | Robinhood Chain | 4663 | Yes | No |
+| `base` | Base | 8453 | Yes | No |
+| `arbitrum` | Arbitrum One | 42161 | Yes | No |
+| `ink` | Ink | 57073 | No (paper/analytics only) | No |
 
-`DEFAULT_CHAIN = "ethereum"`. Live chains route through Uniswap V2/V3 router + quoter contracts per-chain; each carries 1-2 public RPC fallback URLs.
+`DEFAULT_CHAIN = "ethereum"`. Live chains route through Uniswap V2/V3 router + quoter contracts per-chain; each carries 1-2 public RPC fallback URLs. There is currently no UI field to add a chain to the enabled list (`_CONFIG_FIELDS` in `trader_panel.py` has no `chains` entry) — doing so today means hand-editing the trader config file.
 
 ## Dashboard Access-Key Lifecycle
 `dashboard/server.py::new_key(expiry_secs=600)` — default 10-minute expiry window to complete phone pairing; regenerable on demand from the desktop's `RemoteKeyOverlay`.
