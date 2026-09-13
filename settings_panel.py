@@ -216,6 +216,23 @@ class SettingsPanel(QWidget):
         self._live_model.setText(self.settings.get("live_model", ""))
         lay.addWidget(self._make_button("SAVE", self._on_save_live_model))
 
+        from ui import VOICES, load_saved_voice  # deferred — see module docstring
+        default_voice_lbl = QLabel("Default voice (used when no companion is active)")
+        default_voice_lbl.setFont(QFont("Segoe UI", 8))
+        default_voice_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(default_voice_lbl)
+        self._default_voice = QComboBox()
+        self._default_voice.addItems(VOICES)
+        self._default_voice.setFont(QFont("Segoe UI", 9))
+        self._default_voice.setStyleSheet(
+            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
+        )
+        current_voice_idx = self._default_voice.findText(load_saved_voice())
+        if current_voice_idx >= 0:
+            self._default_voice.setCurrentIndex(current_voice_idx)
+        lay.addWidget(self._default_voice)
+        lay.addWidget(self._make_button("SAVE", self._on_save_default_voice))
+
         sep0 = QFrame(); sep0.setFrameShape(QFrame.Shape.HLine)
         sep0.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
         lay.addWidget(sep0)
@@ -395,6 +412,18 @@ class SettingsPanel(QWidget):
     def _on_save_live_model(self):
         self.settings["live_model"] = self._live_model.text().strip()
         self._persist("Default voice model saved — takes effect on next reconnect.")
+
+    def _on_save_default_voice(self):
+        # voice.json (ui.save_voice/load_saved_voice) is a separate file from
+        # settings.json — not part of self.settings — so this bypasses
+        # _persist() and saves directly, then reuses the same reconnect-now
+        # mechanism Section C3 already fixed for companion switching instead
+        # of leaving this as another silent "next reconnect" dead end.
+        from ui import save_voice  # deferred — see module docstring
+        save_voice(self._default_voice.currentText())
+        self._status_sig.emit("Default voice saved — reconnecting now.", False)
+        if self.on_companions_changed:
+            self.on_companions_changed()
 
     def _on_add_companion(self):
         name = self._new_companion_name.text().strip()

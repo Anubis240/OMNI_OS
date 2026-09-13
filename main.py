@@ -101,7 +101,7 @@ _write_merged_ca_bundle()
 
 from google import genai
 from google.genai import types
-from ui import JarvisUI
+from ui import JarvisUI, load_saved_voice
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -1267,7 +1267,12 @@ class JarvisLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=(companion.get("voice") if companion else None) or self.ui.voice
+                        # Fresh read (not self.ui.voice, a stale attribute set
+                        # once at MainWindow construction) so a default-voice
+                        # change made in Settings takes effect on the very
+                        # next reconnect, matching every other setting this
+                        # method already re-reads from disk each time.
+                        voice_name=(companion.get("voice") if companion else None) or load_saved_voice()
                     )
                 )
             ),
