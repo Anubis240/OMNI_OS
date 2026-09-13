@@ -537,6 +537,10 @@ class _AddSubAgentDialog(QDialog):
         self._backend = QComboBox()
         self._backend.addItem("Claude Code", userData="claude_agent")
         self._backend.addItem("Codex", userData="codex_agent")
+        self._backend.addItem("OpenCode", userData="opencode_agent")
+        self._backend.addItem("OpenHands", userData="openhands_agent")
+        self._backend.addItem("Grok Build", userData="grok_agent")
+        self._backend.addItem("Blackbox", userData="blackbox_agent")
         self._backend.setFont(QFont("Segoe UI", 9))
         self._backend.setStyleSheet(
             f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
