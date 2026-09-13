@@ -913,6 +913,26 @@ class SettingsPanel(QWidget):
         self._persist(f"Added key \"{name}\".")
 
     def _on_remove_custom_key(self, key_id: str):
+        # 2026-09-13 report (GEMZ4US, Section B): this fired instantly on a
+        # single click, no confirmation — the same gap already fixed for
+        # wallet removal and companion removal (Section B2 above), just
+        # missed by that pass since it lives in a different section.
+        name = next((k["name"] for k in self.settings.get("custom_api_keys", []) if k["id"] == key_id), "this key")
+        box = QMessageBox(self)
+        box.setWindowTitle("Remove custom key")
+        box.setText(f'Remove "{name}"? This cannot be undone.')
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(
+            f"QMessageBox {{ background: {self._C.PANEL_BG}; }} "
+            f"QLabel {{ color: {self._C.TEXT}; background: transparent; }} "
+            f"QPushButton {{ color: {self._C.TEXT}; background: {self._C.PANEL2_BG}; "
+            f"border: 1px solid {self._C.BORDER_A}; border-radius: 4px; padding: 4px 14px; }}"
+        )
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
         self.settings["custom_api_keys"] = [k for k in self.settings.get("custom_api_keys", []) if k["id"] != key_id]
         self._refresh_custom_keys_list()
         self._persist("Key removed.")
