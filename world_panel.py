@@ -53,6 +53,17 @@ def _forget_session_everywhere(companion_id: str) -> None:
         forget(companion_id)
 
 
+# All six agent-CLI backends eligible as a delegate_to_agent sub-agent target
+# (mirrors main.py's _AGENT_BACKENDS — gemini_live can never be a delegation
+# target, so it's deliberately excluded). Plain string literals rather than
+# reusing _agent_backend_fns().keys() so listing sub-agents in the graph
+# doesn't trigger that function's deferred per-backend imports.
+_SUB_AGENT_BACKENDS = (
+    "claude_agent", "codex_agent", "opencode_agent",
+    "openhands_agent", "grok_agent", "blackbox_agent",
+)
+
+
 class WorldPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,7 +112,15 @@ class WorldPanel(QWidget):
         all_companions = settings["companions"]
         lead = next((c for c in all_companions if c.get("id") == active_id), None)
         lead_name = lead["name"] if lead else "Omni"
-        sub_agents = [c for c in all_companions if c.get("backend") in ("claude_agent", "codex_agent")]
+        # Exclude the active/lead companion from its own sub-agent list — a
+        # Text-backend companion left active (e.g. across a restart) has a
+        # backend matching _SUB_AGENT_BACKENDS just like any other sub-agent,
+        # so without this it rendered twice: once as lead, once again as its
+        # own sub-agent (GEMZ4US, 2026-09-12 report, Section B).
+        sub_agents = [
+            c for c in all_companions
+            if c.get("backend") in _SUB_AGENT_BACKENDS and c.get("id") != active_id
+        ]
         self._canvas.set_data(lead_name, sub_agents, all_companions)
 
     def _open_add_dialog(self):
