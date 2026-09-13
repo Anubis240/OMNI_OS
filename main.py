@@ -1181,7 +1181,14 @@ class JarvisLive:
             )
             sys_prompt += (
                 f"\n\n[SUB-AGENTS AVAILABLE]\nYou can delegate tasks to these specialized "
-                f"sub-agents via delegate_to_agent — pick whichever best fits the task:\n{directory}"
+                f"sub-agents via delegate_to_agent — pick whichever best fits the task:\n{directory}\n\n"
+                "This name/specialty list is the ONLY information you have about these "
+                "sub-agents. You have no access to any sub-agent's actual system prompt, "
+                "live status, conversation history, or past task output beyond what "
+                "delegate_to_agent itself returns after a task finishes. If asked to "
+                "report on a sub-agent's internal configuration or current state, or to "
+                "quote its real prompt, say plainly that you don't have visibility into "
+                "that — never invent a plausible-sounding answer."
             )
         else:
             base_tool_declarations = [t for t in base_tool_declarations if t["name"] != "delegate_to_agent"]
