@@ -14,18 +14,18 @@ from pathlib import Path
 import psutil
 
 from PyQt6.QtCore import (
-    QEasingCurve, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
+    QEasingCurve, QEvent, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
     QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
+    QBrush, QColor, QCursor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QImage, QKeySequence, QLinearGradient, QPainter,
     QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QStackedWidget, QTextEdit, QTextBrowser, QVBoxLayout, QWidget, QProgressBar,
+    QStackedWidget, QTextEdit, QTextBrowser, QToolTip, QVBoxLayout, QWidget, QProgressBar,
 )
 
 from core.app_paths import get_data_dir, get_resource_dir
@@ -1802,6 +1802,27 @@ class MainWindow(QMainWindow):
                 ow, oh,
             )
 
+    def changeEvent(self, event):
+        # 2026-09-14 report (GEMZ4US, Part 8): sidebar icon tooltips didn't
+        # fire on the first hover after this window regained OS-level focus
+        # (e.g. alt-tabbing back) — only after an actual click landed inside
+        # the window first. Root cause: while this window was inactive, Qt
+        # never received the mouse-leave event for whatever widget the
+        # cursor happened to be resting on, so on refocus Qt still considers
+        # that widget "already entered" and never re-arms the hover/dwell
+        # tracking tooltips key off — a click was the only thing that reset
+        # it. Rather than hand-construct synthetic Enter/Leave events (risky
+        # — some widget elsewhere could have its own enterEvent() expecting
+        # a real QEnterEvent with position data), just show the tooltip
+        # directly for whatever's under the cursor via the same public API
+        # Qt's own hover machinery uses internally.
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            global_pos = QCursor.pos()
+            widget = QApplication.widgetAt(global_pos)
+            if widget is not None and self.isAncestorOf(widget) and widget.toolTip():
+                QToolTip.showText(global_pos, widget.toolTip(), widget)
+
     def _update_metrics(self):
         snap = _metrics.snapshot()
 
@@ -2312,7 +2333,13 @@ class MainWindow(QMainWindow):
 
     def _style_speech_mute_btn(self):
         if self._speech_muted:
-            self._speech_mute_btn.setText("🔈")
+            # 2026-09-14 report (GEMZ4US, Part 8): this used 🔈 (LOW VOLUME —
+            # one sound wave, no slash), which reads as "quieter" rather
+            # than "off" — an actual wrong-icon bug, not just an inconsistent
+            # one. Swapped to 🔇 (MUTED SPEAKER), the same slashed glyph the
+            # mic button above already uses for its own muted state, so both
+            # controls now share one convention for the same semantic state.
+            self._speech_mute_btn.setText("🔇")
             self._speech_mute_btn.setStyleSheet(f"""
                 QPushButton {{
                     color: {C.MUTED_C}; background: {C.PANEL2_BG};
