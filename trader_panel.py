@@ -96,9 +96,20 @@ class _SecretRevealDialog(QDialog):
         )
         lay.addWidget(box)
 
-        ack = QCheckBox("I've saved this somewhere safe")
-        ack.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
-        lay.addWidget(ack)
+        self._ack = QCheckBox("I've saved this somewhere safe")
+        # 2026-09-14 report (GEMZ4US finding #30): the indicator box itself
+        # rendered with no visible glyph in either state — the label read as
+        # plain static text, only discoverable by clicking it. Explicit
+        # QCheckBox::indicator styling instead of relying on the platform
+        # style's default drawing, matching every other styled control in
+        # this app that hit the same Fusion+dark-mode invisibility class.
+        self._ack.setStyleSheet(
+            f"QCheckBox {{ color: {C.TEXT}; background: transparent; spacing: 8px; }} "
+            f"QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {C.BORDER_A}; "
+            f"border-radius: 3px; background: {C.PANEL2_BG}; }} "
+            f"QCheckBox::indicator:checked {{ background: {C.GREEN}; border: 1px solid {C.GREEN}; }}"
+        )
+        lay.addWidget(self._ack)
 
         close_btn = QPushButton("Close")
         close_btn.setEnabled(False)
@@ -107,15 +118,21 @@ class _SecretRevealDialog(QDialog):
             f"border: 1px solid {C.BORDER_A}; border-radius: 4px; padding: 6px 16px; }} "
             f"QPushButton:disabled {{ color: {C.TEXT_DIM}; }}"
         )
-        ack.toggled.connect(close_btn.setEnabled)
+        self._ack.toggled.connect(close_btn.setEnabled)
         close_btn.clicked.connect(self.accept)
         lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
     def closeEvent(self, event):
-        # The window's own [X] would otherwise let the phrase vanish without
-        # the "I've saved this" acknowledgment ever being required — force
-        # the same accept() path either way.
-        event.accept()
+        # 2026-09-13 report (GEMZ4US finding G1): this used to call
+        # event.accept() unconditionally — the comment's stated intent
+        # (force the same acknowledgment the Close button requires) was
+        # never actually implemented, so the native [X] bypassed the gate
+        # completely regardless of checkbox state. Now genuinely blocks the
+        # close until the checkbox is checked, matching Close's own gate.
+        if self._ack.isChecked():
+            event.accept()
+        else:
+            event.ignore()
 
 _CONFIG_FIELDS = [
     ("tradeSizeMinUsd", "Trade size min $"),
