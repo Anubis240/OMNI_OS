@@ -61,16 +61,21 @@ async def send(companion: dict, text: str) -> str:
 
 
 async def _send(companion: dict, text: str, ca: dict, api_key: str | None) -> str:
+    # Identity text is fixed for the session's lifetime and never mixes in
+    # per-turn content (current time, etc.) — that stable prefix is what
+    # lets Claude Code's own prompt caching help across turns. The SDK
+    # doesn't expose raw cache_control breakpoints at this layer; keeping
+    # this prefix byte-identical turn to turn is the whole lever. Appending
+    # the user's enabled skills here breaks that byte-identity only on the
+    # rare turn right after a skill gets toggled — an acceptable tradeoff
+    # for skills actually applying to Text companions at all (2026-09-14
+    # report, GEMZ4US Section D2).
+    identity = companion.get("system_prompt") or "You are a helpful assistant."
     options = ClaudeAgentOptions(
         cli_path=ca["cliPath"],
         cwd=ca.get("vaultDir") or None,
         add_dirs=[ca["extraDir"]] if ca.get("extraDir") else [],
-        # Identity text is fixed for the session's lifetime and never mixes
-        # in per-turn content (current time, etc.) — that stable prefix is
-        # what lets Claude Code's own prompt caching help across turns. The
-        # SDK doesn't expose raw cache_control breakpoints at this layer;
-        # keeping this prefix byte-identical turn to turn is the whole lever.
-        system_prompt=companion.get("system_prompt") or "You are a helpful assistant.",
+        system_prompt=identity + settings_store.format_skills_for_prompt(),
         permission_mode="bypassPermissions",
         # No override at all when there's no key (the SDK requires a dict,
         # not None) — an empty dict still gets merged onto this process's

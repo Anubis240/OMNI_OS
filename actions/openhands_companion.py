@@ -73,8 +73,12 @@ def _run_openhands(companion: dict, text: str, ca: dict) -> str:
     cli_path = ca["cliPath"]
     cwd = ca.get("vaultDir") or None
 
+    # Skills ride along with the persona (2026-09-14 report, GEMZ4US Section
+    # D2 — skills previously never reached a Text companion at all).
     identity = (companion.get("system_prompt") or "").strip()
-    task = f"{identity}\n\nUser request:\n{text}" if identity else text
+    skills = settings_store.format_skills_for_prompt().strip()
+    combined = "\n\n".join(p for p in (identity, skills) if p)
+    task = f"{combined}\n\nUser request:\n{text}" if combined else text
 
     argv = [cli_path, "--headless", "--json", "-t", task]
 

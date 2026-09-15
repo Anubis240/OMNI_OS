@@ -86,9 +86,14 @@ def _run_opencode(companion: dict, text: str, ca: dict) -> str:
 
     prompt = text
     if is_first_turn:
+        # Skills ride along with the persona on this same first-turn-only
+        # schedule (2026-09-14 report, GEMZ4US Section D2 — skills
+        # previously never reached a Text companion at all).
         identity = (companion.get("system_prompt") or "").strip()
-        if identity:
-            prompt = f"{identity}\n\nUser request:\n{text}"
+        skills = settings_store.format_skills_for_prompt().strip()
+        combined = "\n\n".join(p for p in (identity, skills) if p)
+        if combined:
+            prompt = f"{combined}\n\nUser request:\n{text}"
 
     argv.append(prompt)
 

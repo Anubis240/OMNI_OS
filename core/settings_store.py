@@ -347,3 +347,23 @@ def resolve_key_placeholders(text: str, settings: dict | None = None) -> str:
         return by_name.get(m.group(1), m.group(0))
 
     return _PLACEHOLDER_RE.sub(_sub, text)
+
+
+def format_skills_for_prompt(settings: dict | None = None) -> str:
+    """Formats the user's enabled custom skills into the same [SKILLS...]
+    block main.py's _build_config() appends to the Gemini Live system
+    prompt — shared here so every actions/*_companion.py Text-backend
+    module can append it to its own identity too (2026-09-14 report,
+    GEMZ4US Section D2: a skill like a custom reply-suffix only ever
+    reached Gemini Live, never a Text companion's own conversation).
+    Returns "" when there are no enabled skills, so callers can
+    unconditionally concatenate the result without an extra branch."""
+    settings = settings or load_settings()
+    enabled_skills = [s for s in settings.get("skills", []) if s.get("enabled")]
+    if not enabled_skills:
+        return ""
+    skills_block = "\n\n".join(
+        f"### {s['name']}\n{resolve_key_placeholders(s['content'], settings)}"
+        for s in enabled_skills
+    )
+    return f"\n\n[SKILLS — additional instructions the user configured]\n{skills_block}"

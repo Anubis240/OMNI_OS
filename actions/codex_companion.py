@@ -115,10 +115,15 @@ def _run_codex(companion: dict, text: str, ca: dict) -> str:
         # Only the first turn of a new thread needs the persona — a resumed
         # thread already has it from that first turn's context, and Codex
         # has no documented per-turn "developer instruction" flag to prefer
-        # over this composition (checked against the same docs above).
+        # over this composition (checked against the same docs above). The
+        # user's enabled skills ride along on that same first-turn-only
+        # schedule (2026-09-14 report, GEMZ4US Section D2 — skills
+        # previously never reached a Text companion at all).
         identity = (companion.get("system_prompt") or "").strip()
-        if identity:
-            prompt = f"{identity}\n\nUser request:\n{text}"
+        skills = settings_store.format_skills_for_prompt().strip()
+        combined = "\n\n".join(p for p in (identity, skills) if p)
+        if combined:
+            prompt = f"{combined}\n\nUser request:\n{text}"
 
     if thread_id:
         argv += ["resume", thread_id, prompt]
