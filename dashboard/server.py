@@ -445,17 +445,25 @@ _APP_HTML = """<!DOCTYPE html>
   }
   connectWs();
 
+  // 2026-09-15 report (GEMZ4US finding #38): while the combined Trader+Chat
+  // view was open, EVERY message routed to the trader parser regardless of
+  // content — a plain question came back "unrecognized command", never
+  // reaching Omni at all, despite the view showing the chat log right next
+  // to the trader state (the "split screen" implied both were usable at
+  // once). Mirrors TraderEngine.command()'s own recognized verbs (trader/
+  // engine.py) — the same vocabulary already shown in this bar's own
+  // placeholder text — so only text actually shaped like a trader command
+  // takes that path; anything else reaches Omni normally, trader view open
+  // or not.
+  var TRADER_COMMAND_RE = /^\/?(help|scan|sync(\s+positions)?|unwrap(\s+\S+)?|(sell|close)\s+all|(sell|close)\s+\S+|hold\s+\S+|unhold\s+\S+|take[\s-]?profit\s+\S+|buy\s+\S+|watch\s+\S+|(unwatch|remove)\s+\S+)$/i;
+
   document.getElementById('f').addEventListener('submit', function(e) {
     e.preventDefault();
     var input = document.getElementById('t');
     var text = input.value.trim();
     if (!text) return;
     addLine('you', 'You: ' + text);
-    // While the TRADER view is open, the command bar talks directly to the
-    // trader's own command parser (buy/sell/watch/take profit/etc — see
-    // TraderEngine.command) instead of Seraph's general chat, which can
-    // never place a trade by design (voice or text).
-    if (traderPanel.classList.contains('show')) {
+    if (traderPanel.classList.contains('show') && TRADER_COMMAND_RE.test(text)) {
       runTraderAction('command', { text: text });
       input.value = '';
       return;
@@ -847,7 +855,7 @@ _APP_HTML = """<!DOCTYPE html>
     traderPanel.classList.toggle('show', show);
     traderBtn.classList.toggle('open', show);
     document.getElementById('t').placeholder = show
-      ? 'Trader command… (buy SYM:0xADDR, sell SYM, help)' : 'Message Omni…';
+      ? 'Trader command (buy SYM:0xADDR, sell SYM, help) or just chat…' : 'Message Omni…';
     if (show) {
       fetchTraderState();
       traderTimer = setInterval(fetchTraderState, 4000);
