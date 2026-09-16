@@ -97,17 +97,24 @@ class _SecretRevealDialog(QDialog):
         lay.addWidget(box)
 
         self._ack = QCheckBox("I've saved this somewhere safe")
-        # 2026-09-14 report (GEMZ4US finding #30): the indicator box itself
-        # rendered with no visible glyph in either state — the label read as
-        # plain static text, only discoverable by clicking it. Explicit
-        # QCheckBox::indicator styling instead of relying on the platform
-        # style's default drawing, matching every other styled control in
-        # this app that hit the same Fusion+dark-mode invisibility class.
+        # 2026-09-14 report (GEMZ4US finding #30) + 2026-09-15 retest (A1):
+        # the first fix's border color (C.BORDER_A, #1c1c1f) was nearly
+        # indistinguishable from the indicator's own background (C.PANEL2_BG,
+        # #111114) — technically drawn, but effectively invisible at rest,
+        # which read as "no border in either state." And a plain solid-color
+        # fill on :checked with no glyph read as a toggle swap, not a
+        # checked checkbox. Fixed both: a clearly visible mid-gray border at
+        # rest (C.TEXT_MED, real contrast against near-black), unchanged on
+        # check, plus an explicit inline-SVG checkmark drawn on top of the
+        # green fill — QSS fully replaces the platform style's own indicator
+        # painting, so the default checkmark glyph never draws unless one is
+        # supplied explicitly.
         self._ack.setStyleSheet(
             f"QCheckBox {{ color: {C.TEXT}; background: transparent; spacing: 8px; }} "
-            f"QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {C.BORDER_A}; "
+            f"QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {C.TEXT_MED}; "
             f"border-radius: 3px; background: {C.PANEL2_BG}; }} "
-            f"QCheckBox::indicator:checked {{ background: {C.GREEN}; border: 1px solid {C.GREEN}; }}"
+            f"QCheckBox::indicator:checked {{ background: {C.GREEN}; border: 1px solid {C.GREEN}; "
+            f"image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZD0iTTMgOC41TDYuNSAxMkwxMyA0IiBzdHJva2U9IiUyMzAwMDAwMCIgc3Ryb2tlLXdpZHRoPSIyLjQiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPg==); }}"
         )
         lay.addWidget(self._ack)
 
