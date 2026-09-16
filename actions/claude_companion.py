@@ -31,6 +31,30 @@ def get_status(companion_id: str) -> str:
     return _status.get(companion_id, "idle")
 
 
+def _format_error(raw: str | None) -> str:
+    """Prefixes a CLI error result with "Error: ", adding a note for the
+    one specific failure confirmed to be a known, currently-unresolved
+    upstream Claude Code bug rather than an Omni-side one (2026-09-15
+    report, GEMZ4US finding #33): headless/-p mode — exactly what query()
+    drives — fails to reuse or refresh an OAuth session that an
+    interactive `claude` run in the same account has no trouble with, and
+    no workaround exists yet on Anthropic's side (verified against
+    anthropics/claude-code issues #81937 and #79685, both reporting the
+    identical symptom with no fix). Every other error passes through with
+    just the prefix, unchanged."""
+    text = raw or ""
+    lowered = text.lower()
+    if "oauth" in lowered and ("expired" in lowered or "could not be refreshed" in lowered):
+        return (
+            f"Error: {text} — this is a known, unresolved upstream Claude Code bug "
+            "(headless sessions can't reuse/refresh an OAuth session interactive "
+            "mode handles fine — see anthropics/claude-code#81937), not something "
+            "wrong with Omni's setup. Try again later, or run `claude` interactively "
+            "once first."
+        )
+    return f"Error: {text}"
+
+
 async def send(companion: dict, text: str) -> str:
     """Sends one turn to a claude_agent-backend companion's own Claude
     session, returning its reply text. Each companion keeps its own
@@ -55,7 +79,7 @@ async def send(companion: dict, text: str) -> str:
     except asyncio.TimeoutError:
         return "Timed out before finishing."
     except Exception as e:
-        return f"Error: {e}"
+        return _format_error(str(e))
     finally:
         _status[companion["id"]] = "idle"
 
@@ -92,7 +116,7 @@ async def _send(companion: dict, text: str, ca: dict, api_key: str | None) -> st
             if isinstance(message, ResultMessage):
                 if message.session_id:
                     _sessions[companion["id"]] = message.session_id
-                final_result = f"Error: {message.result}" if message.is_error else message.result
+                final_result = _format_error(message.result) if message.is_error else message.result
     except Exception:
         # The CLI can report a structured error result (billing, max-turns,
         # rate limits, ...) and then still exit non-zero, which raises here
