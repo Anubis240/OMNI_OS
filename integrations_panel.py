@@ -133,7 +133,8 @@ class IntegrationsPanel(QWidget):
         self._search_input.textChanged.connect(self._on_filter_changed)
         bar.addWidget(self._search_input, stretch=1)
 
-        self._category_combo = QComboBox()
+        from ui import NoScrollComboBox  # deferred — see module docstring
+        self._category_combo = NoScrollComboBox()
         categories = ["All Categories"] + sorted({e["category"] for e in settings_store.INTEGRATION_CATALOG})
         self._category_combo.addItems(categories)
         self._category_combo.setFont(QFont("Segoe UI", 9))

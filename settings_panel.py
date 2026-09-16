@@ -218,12 +218,12 @@ class SettingsPanel(QWidget):
         self._live_model.setText(self.settings.get("live_model", ""))
         lay.addWidget(self._make_button("SAVE", self._on_save_live_model))
 
-        from ui import VOICES, load_saved_voice  # deferred — see module docstring
+        from ui import VOICES, load_saved_voice, NoScrollComboBox  # deferred — see module docstring
         default_voice_lbl = QLabel("Default voice (used when no companion is active)")
         default_voice_lbl.setFont(QFont("Segoe UI", 8))
         default_voice_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         lay.addWidget(default_voice_lbl)
-        self._default_voice = QComboBox()
+        self._default_voice = NoScrollComboBox()
         self._default_voice.addItems(VOICES)
         self._default_voice.setFont(QFont("Segoe UI", 9))
         self._default_voice.setStyleSheet(
@@ -259,7 +259,8 @@ class SettingsPanel(QWidget):
         backend_lbl.setFont(QFont("Segoe UI", 8))
         backend_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         lay.addWidget(backend_lbl)
-        self._new_companion_backend = QComboBox()
+        from ui import NoScrollComboBox  # deferred — see module docstring
+        self._new_companion_backend = NoScrollComboBox()
         # display text -> backend id. Voice uses the live Gemini session (voice
         # field below applies); the two Text options each use their own
         # turn-based CLI conversation (typed input only — see
@@ -282,7 +283,7 @@ class SettingsPanel(QWidget):
         voice_lbl.setFont(QFont("Segoe UI", 8))
         voice_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         lay.addWidget(voice_lbl)
-        self._new_companion_voice = QComboBox()
+        self._new_companion_voice = NoScrollComboBox()
         self._new_companion_voice.addItems(VOICES)
         self._new_companion_voice.setFont(QFont("Segoe UI", 9))
         self._new_companion_voice.setStyleSheet(
