@@ -121,7 +121,7 @@ class WorldPanel(QWidget):
             c for c in all_companions
             if c.get("backend") in _SUB_AGENT_BACKENDS and c.get("id") != active_id
         ]
-        self._canvas.set_data(lead_name, sub_agents, all_companions)
+        self._canvas.set_data(lead_name, sub_agents, all_companions, lead_id=lead["id"] if lead else None)
 
     def _open_add_dialog(self):
         dlg = _AddSubAgentDialog(self._C, None, self)
@@ -135,7 +135,8 @@ class WorldPanel(QWidget):
         companion = next((c for c in settings["companions"] if c["id"] == companion_id), None)
         if companion is None:
             return
-        dlg = _AddSubAgentDialog(self._C, companion, self)
+        is_lead = companion_id == (settings.get("active_companion_id") or "")
+        dlg = _AddSubAgentDialog(self._C, companion, self, is_lead=is_lead)
         if dlg.exec():
             # identity (or backend) changed — start its next turn fresh.
             # Harmless no-op in whichever module it didn't actually use.
@@ -200,6 +201,7 @@ class _GraphCanvas(QWidget):
         self._hues = hues
         self.setStyleSheet("background: transparent;")
         self._lead_card: _NodeCard | None = None
+        self._lead_id: str | None = None
         self._sub_cards: dict[str, _NodeCard] = {}  # companion id -> card
         # Positions a user has dragged a node to — kept for this panel's
         # lifetime (the app's whole run, since panels are created once and
@@ -227,11 +229,26 @@ class _GraphCanvas(QWidget):
         self._anim_tmr = QTimer(self)
         self._anim_tmr.timeout.connect(self._advance_animation)
 
-    def set_data(self, lead_name: str, sub_agents: list[dict], all_companions: list[dict]):
+    def set_data(self, lead_name: str, sub_agents: list[dict], all_companions: list[dict], lead_id: str | None = None):
         C = self._C
         count_txt = f"{len(sub_agents)} sub-agent{'s' if len(sub_agents) != 1 else ''}"
-        if self._lead_card is None:
-            self._lead_card = _NodeCard(lead_name, "lead companion", count_txt, C.PRI, C, None, self)
+        # 2026-09-15 report (GEMZ4US finding #35): the lead card never got
+        # an edit affordance because it was always built with companion_id
+        # forced to None, same as the fixed-position/no-delete behavior it
+        # also needs — those are now independent (draggable/show_delete),
+        # so the lead card can carry its real id. Rebuilt (not just
+        # update_content()) whenever that id changes — e.g. switching which
+        # companion is active — since a card's id/icons are fixed at
+        # construction, same as sub-agent cards being added/removed below.
+        if self._lead_card is None or self._lead_id != lead_id:
+            if self._lead_card is not None:
+                self._lead_card.deleteLater()
+            self._lead_id = lead_id
+            self._lead_card = _NodeCard(
+                lead_name, "lead companion", count_txt, C.PRI, C, lead_id, self,
+                draggable=False, show_delete=False,
+            )
+            self._lead_card.edit_clicked.connect(self.edit_requested)
             self._lead_card.resize(self.LEAD_W, self.LEAD_H)
             self._lead_card.show()
         else:
@@ -365,21 +382,30 @@ class _GraphCanvas(QWidget):
 
 
 class _NodeCard(QFrame):
-    """companion_id is None for the (fixed, non-draggable) lead node; a
-    real id makes the card draggable and emits `dragged` on release so the
-    canvas can remember the manually-chosen position."""
+    """companion_id is None only when there's no real companion record to
+    edit at all (no active companion — the built-in default Omni identity
+    has no record, per WorldPanel.refresh()). A real id shows the pencil
+    (edit) icon; `draggable`/`show_delete` independently control the
+    other two lead-vs-sub-agent differences (2026-09-15 report, GEMZ4US
+    finding #35: the lead node previously got neither icon at all, tying
+    "has a real id" to all three properties at once — it now can have a
+    real id and still stay fixed-position with no delete affordance,
+    since deleting the active/default identity isn't the same kind of
+    operation as deleting a sub-agent)."""
     dragged = pyqtSignal(str, int, int)
     edit_clicked = pyqtSignal(str)
     delete_clicked = pyqtSignal(str)
 
-    def __init__(self, name: str, subtitle: str, extra: str, color: str, C, companion_id: str | None, parent=None):
+    def __init__(self, name: str, subtitle: str, extra: str, color: str, C, companion_id: str | None,
+                 parent=None, *, draggable: bool = True, show_delete: bool = True):
         super().__init__(parent)
         self.color = color
         self.is_running = False
         self.companion_id = companion_id
         self._C = C
+        self._draggable = draggable
         self._drag_offset: QPoint | None = None
-        if companion_id is not None:
+        if draggable:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
         self._apply_border(color)
 
@@ -413,12 +439,11 @@ class _NodeCard(QFrame):
         top.addLayout(name_col, stretch=1)
 
         if companion_id is not None:
-            edit_btn = QPushButton("✎")
-            del_btn = QPushButton("×")
-            for btn, color, cb in (
-                (edit_btn, C.TEXT_MED, lambda: self.edit_clicked.emit(self.companion_id)),
-                (del_btn, C.RED, lambda: self.delete_clicked.emit(self.companion_id)),
-            ):
+            icon_specs = [("✎", C.TEXT_MED, lambda: self.edit_clicked.emit(self.companion_id))]
+            if show_delete:
+                icon_specs.append(("×", C.RED, lambda: self.delete_clicked.emit(self.companion_id)))
+            for glyph, color, cb in icon_specs:
+                btn = QPushButton(glyph)
                 btn.setFixedSize(18, 18)
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
@@ -484,7 +509,7 @@ class _NodeCard(QFrame):
         self._apply_border(glow, width=2)
 
     def mousePressEvent(self, event: QMouseEvent):
-        if self.companion_id is not None and event.button() == Qt.MouseButton.LeftButton:
+        if self._draggable and event.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = event.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self.raise_()
@@ -509,13 +534,19 @@ class _NodeCard(QFrame):
 class _AddSubAgentDialog(QDialog):
     """companion is None when creating a new sub-agent, or an existing
     companion dict when editing one in place (pre-fills the fields and
-    updates that entry on save instead of appending a new one)."""
+    updates that entry on save instead of appending a new one). is_lead is
+    True only when reused to edit the World Panel's lead node (2026-09-15
+    report, GEMZ4US finding #35) — the lead can be gemini_live-backed,
+    which a plain sub-agent never is, so the Backend list and wording
+    adjust for that case; is_lead is always False for actual sub-agents,
+    matching the existing behavior exactly."""
 
-    def __init__(self, C, companion: dict | None, parent=None):
+    def __init__(self, C, companion: dict | None, parent=None, *, is_lead: bool = False):
         super().__init__(parent)
         self._C = C
         self._companion = companion
-        self.setWindowTitle("Edit sub-agent" if companion else "Add a sub-agent")
+        self._is_lead = is_lead
+        self.setWindowTitle("Edit companion" if is_lead else ("Edit sub-agent" if companion else "Add a sub-agent"))
         self.setFixedWidth(360)
         self.setStyleSheet(f"QDialog {{ background: {C.PANEL_BG}; }}")
         self._build_ui()
@@ -538,22 +569,40 @@ class _AddSubAgentDialog(QDialog):
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
 
-        title = QLabel("Edit sub-agent" if self._companion else "New sub-agent")
+        title = QLabel("Edit companion" if self._is_lead else ("Edit sub-agent" if self._companion else "New sub-agent"))
         title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         lay.addWidget(title)
 
-        note_text = "The lead companion can delegate tasks to it by name via delegate_to_agent."
-        if self._companion:
-            note_text += " Saving resets its conversation — it starts fresh under the new identity/backend next time it's given a task."
+        if self._is_lead:
+            note_text = (
+                "This is the active/lead companion driving the session. Saving resets its "
+                "conversation — it starts fresh under the new identity next time it responds."
+            )
+        else:
+            note_text = "The lead companion can delegate tasks to it by name via delegate_to_agent."
+            if self._companion:
+                note_text += " Saving resets its conversation — it starts fresh under the new identity/backend next time it's given a task."
         note = QLabel(note_text)
         note.setFont(QFont("Segoe UI", 8))
         note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
-        self._labeled(lay, "Backend — which CLI this sub-agent runs on")
-        self._backend = QComboBox()
+        backend_label = "Backend" if self._is_lead else "Backend — which CLI this sub-agent runs on"
+        self._labeled(lay, backend_label)
+        from ui import NoScrollComboBox  # deferred — see module docstring
+        self._backend = NoScrollComboBox()
+        if self._is_lead:
+            # A sub-agent can never legitimately be gemini_live-backed
+            # (_AGENT_BACKENDS excludes it — delegate_to_agent has no path
+            # to a live voice session), so this option only appears when
+            # editing the lead. Without it, editing a Voice lead here would
+            # silently convert it to Claude Code on save: the combo box
+            # would find no matching entry for its real backend, default to
+            # index 0, and _on_submit writes whatever's selected back
+            # unconditionally.
+            self._backend.addItem("Voice (real-time)", userData="gemini_live")
         self._backend.addItem("Claude Code", userData="claude_agent")
         self._backend.addItem("Codex", userData="codex_agent")
         self._backend.addItem("OpenCode", userData="opencode_agent")
