@@ -14,16 +14,16 @@ from pathlib import Path
 import psutil
 
 from PyQt6.QtCore import (
-    QEasingCurve, QEvent, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
+    QEasingCurve, QEvent, QMimeData, QObject, QPoint, QPointF, QRectF, QSize, Qt,
     QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QCursor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QImage, QKeySequence, QLinearGradient, QPainter,
+    QFontDatabase, QImage, QKeySequence, QLinearGradient, QMouseEvent, QPainter,
     QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
     QStackedWidget, QTextEdit, QTextBrowser, QToolTip, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -726,6 +726,19 @@ class HudCanvas(QWidget):
 
         self._draw_face_layer(p, cx, cy, fw)
 
+class NoScrollComboBox(QComboBox):
+    """A QComboBox that never reacts to mouse-wheel scrolling. 2026-09-15
+    report (GEMZ4US finding #34): resting the cursor over an unopened,
+    unfocused dropdown while scrolling the page underneath it silently
+    changed the dropdown's selection — no click, no confirmation, no visual
+    warning. A dropdown should only be actionable via a click that opens
+    it; ignoring the wheel event here lets it fall through to whatever
+    scroll area actually contains the dropdown instead."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class MetricBar(QWidget):
 
     def __init__(self, label: str, color: str = C.PRI, parent=None):
@@ -1228,7 +1241,13 @@ class RemoteKeyOverlay(QWidget):
         new_btn.clicked.connect(self._refresh_key)
         btn_row.addWidget(new_btn)
 
-        close_btn = QPushButton("DISMISS")
+        close_btn = QPushButton("CLOSE")
+        # 2026-09-15 report (GEMZ4US finding #37): "DISMISS" next to a live
+        # "CONNECTED" state read as though it might drop the phone
+        # connection rather than just close this status window — it never
+        # did (confirmed: closing leaves the pairing active), but the
+        # wording didn't say so. Tooltip spells out what's actually true.
+        close_btn.setToolTip("Closes this window only — the phone connection stays active.")
         close_btn.setFixedHeight(32)
         close_btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1243,6 +1262,8 @@ class RemoteKeyOverlay(QWidget):
         btn_row.addWidget(close_btn)
         lay.addLayout(btn_row)
 
+        self._drag_offset: QPoint | None = None
+
         self._ctimer = QTimer(self)
         self._ctimer.timeout.connect(self._tick)
         self._ctimer.start(1000)
@@ -1250,6 +1271,26 @@ class RemoteKeyOverlay(QWidget):
 
     def set_new_key_callback(self, fn) -> None:
         self._on_new_key = fn
+
+    def mousePressEvent(self, event: QMouseEvent):
+        # 2026-09-15 report (GEMZ4US finding #37): this overlay is centered
+        # and immovable, fully covering the Trader Panel's Open Positions/
+        # Event Feed while open, with no way to see both at once. Only
+        # fires for clicks on the overlay's own blank background — a click
+        # on the QR code, buttons, or the selectable URL label goes to that
+        # child widget first, same as any other Qt parent/child dispatch.
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._drag_offset is not None and self.parent():
+            self.move(self.mapToParent(event.pos() - self._drag_offset))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
 
     def _update_qr(self, url: str) -> None:
         if not url:
@@ -1587,8 +1628,14 @@ class MainWindow(QMainWindow):
         self._face_path       = face_path
         self.voice              = load_saved_voice()
         self._app_start_t     = time.time()  # see _update_metrics's UP readout
+        # See changeEvent()/eventFilter() below (C2, 2026-09-14/15 reports).
+        self._tooltip_rearm_pending = False
 
         self._build_ui()
+        # Application-wide, not just this window, since Enter events land on
+        # child widgets (sidebar buttons) — a filter installed on self alone
+        # never sees them; only QApplication's own notify() loop does.
+        QApplication.instance().installEventFilter(self)
 
         self._clock_tmr = QTimer(self)
         self._clock_tmr.timeout.connect(self._tick_clock)
@@ -1803,25 +1850,32 @@ class MainWindow(QMainWindow):
             )
 
     def changeEvent(self, event):
-        # 2026-09-14 report (GEMZ4US, Part 8): sidebar icon tooltips didn't
-        # fire on the first hover after this window regained OS-level focus
-        # (e.g. alt-tabbing back) — only after an actual click landed inside
-        # the window first. Root cause: while this window was inactive, Qt
-        # never received the mouse-leave event for whatever widget the
-        # cursor happened to be resting on, so on refocus Qt still considers
-        # that widget "already entered" and never re-arms the hover/dwell
-        # tracking tooltips key off — a click was the only thing that reset
-        # it. Rather than hand-construct synthetic Enter/Leave events (risky
-        # — some widget elsewhere could have its own enterEvent() expecting
-        # a real QEnterEvent with position data), just show the tooltip
-        # directly for whatever's under the cursor via the same public API
-        # Qt's own hover machinery uses internally.
+        # 2026-09-14 report (GEMZ4US, Part 8) + 2026-09-15 retest (C2): the
+        # first fix fired a tooltip immediately at the instant of
+        # reactivation, for whatever happened to be under the cursor right
+        # then — which is almost never the actual target, since the real
+        # repro is reactivate (e.g. alt-tab or a taskbar click, cursor
+        # nowhere near the sidebar), THEN move the mouse onto an icon a
+        # moment later. Firing once at the wrong moment fixed nothing on
+        # retest. This just arms a flag on reactivation; eventFilter()
+        # below fires the tooltip on the next real Enter event afterward,
+        # whenever that actually happens, on whichever widget it lands on.
         super().changeEvent(event)
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
-            global_pos = QCursor.pos()
-            widget = QApplication.widgetAt(global_pos)
-            if widget is not None and self.isAncestorOf(widget) and widget.toolTip():
-                QToolTip.showText(global_pos, widget.toolTip(), widget)
+            self._tooltip_rearm_pending = True
+
+    def eventFilter(self, obj, event):
+        # Installed application-wide in __init__ — Enter events land on
+        # child widgets (sidebar buttons), which a filter on this window
+        # alone would never see. Only consumes the pending flag once a
+        # tooltip actually shows; an Enter on some tooltip-less widget
+        # along the way (e.g. crossing blank canvas) is ignored rather than
+        # wasting the one pending re-arm.
+        if self._tooltip_rearm_pending and event.type() == QEvent.Type.Enter:
+            if isinstance(obj, QWidget) and self.isAncestorOf(obj) and obj.toolTip():
+                QToolTip.showText(QCursor.pos(), obj.toolTip(), obj)
+                self._tooltip_rearm_pending = False
+        return super().eventFilter(obj, event)
 
     def _update_metrics(self):
         snap = _metrics.snapshot()
