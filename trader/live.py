@@ -10,9 +10,16 @@ multicall-wrapped calls.
 
 Uses web3.py (the Python equivalent of ethers.js used here) for all
 RPC/contract interaction. Gas pricing uses plain legacy gasPrice
-(w3.eth.gas_price) rather than replicating ethers' EIP-1559 fee
-estimation — a minor simplification, not a safety-relevant one; legacy
-gasPrice transactions are valid on every chain this app trades on.
+(w3.eth.gas_price, buffered — see trader/wallet/local_wallet.py's
+send_transaction) rather than replicating ethers' EIP-1559 fee
+estimation; legacy gasPrice transactions are valid on every chain this
+app trades on. This used to be described here as "not a safety-relevant"
+simplification — a real FORCE BUY proved that wrong: it confirmed at an
+unusually low 0.236 Gwei but slowly enough to blow past
+_wait_for_receipt's timeout below and get reported as a failed/fabricated
+transaction, when it had actually succeeded on-chain. BuyPendingError
+below is the other half of that fix — a timeout no longer means the
+trade is silently dropped from the ledger.
 """
 
 from __future__ import annotations
@@ -44,6 +51,16 @@ ERC20_ABI = [
      "name": "approve", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
     {"constant": True, "inputs": [{"name": "account", "type": "address"}],
      "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+]
+# Used only to decode how much of a token a confirmed-but-late buy actually
+# delivered (check_buy_receipt below) — reading the Transfer log addressed
+# to our own wallet is exact, unlike re-deriving a quote after the fact.
+ERC20_TRANSFER_EVENT_ABI = [
+    {"anonymous": False, "inputs": [
+        {"indexed": True, "name": "from", "type": "address"},
+        {"indexed": True, "name": "to", "type": "address"},
+        {"indexed": False, "name": "value", "type": "uint256"},
+    ], "name": "Transfer", "type": "event"},
 ]
 # WETH9's own withdraw() — burns WETH, sends native ETH to msg.sender.
 # Not a swap and not a multicall, so it's outside the Seraph-decoding
@@ -285,19 +302,72 @@ def require_allow(chain: str | None, tx: dict, from_address: str) -> dict:
     return gate
 
 
+class BuyPendingError(RuntimeError):
+    """Raised by live_buy when the swap transaction was broadcast
+    successfully but _wait_for_receipt's timeout elapsed before a receipt
+    showed up. The tx is still live and may confirm (or revert) later —
+    this is exactly what happened to a real FORCE BUY, reported as failed
+    but confirmed on-chain hours afterward, unrecorded in the ledger.
+    Carries what engine.py needs to track it as pending and reconcile it
+    automatically via check_buy_receipt, instead of the trade silently
+    vanishing."""
+
+    def __init__(self, *, tx_hash: str, token_address: str, trade_size_usd: float, eth_price_usd: float):
+        super().__init__(f"buy submitted but not yet confirmed (still pending): {tx_hash}")
+        self.tx_hash = tx_hash
+        self.token_address = token_address
+        self.trade_size_usd = trade_size_usd
+        self.eth_price_usd = eth_price_usd
+
+
+def _get_receipt_or_none(chain: str | None, tx_hash: str) -> dict | None:
+    try:
+        return _with_rpc(chain, lambda w3: w3.eth.get_transaction_receipt(tx_hash))
+    except Exception:
+        return None
+
+
 def _wait_for_receipt(chain: str | None, tx_hash: str, timeout_s: float = 180) -> dict:
     start = time.monotonic()
     while time.monotonic() - start < timeout_s:
-        try:
-            receipt = _with_rpc(chain, lambda w3: w3.eth.get_transaction_receipt(tx_hash))
-        except Exception:
-            receipt = None
+        receipt = _get_receipt_or_none(chain, tx_hash)
         if receipt:
             if receipt.get("status") == 0:
                 raise RuntimeError(f"transaction reverted on-chain: {tx_hash}")
             return receipt
         time.sleep(5)
     raise RuntimeError(f"timed out waiting for confirmation (still pending): {tx_hash}")
+
+
+def check_buy_receipt(chain: str | None, tx_hash: str, token_address: str, owner_address: str,
+                       trade_size_usd: float, eth_price_usd: float) -> dict:
+    """Non-blocking check for a BuyPendingError'd buy — call this from a
+    periodic reconciliation pass (engine.py's _cycle()/sync_positions()),
+    never in a wait loop. Returns {"status": "pending"} while unconfirmed,
+    {"status": "reverted"} if the tx failed on-chain (or nothing landed in
+    this wallet), or {"status": "confirmed", qty, priceUsd, costUsd, txHash}
+    once resolved — qty comes from the token's own Transfer log to our
+    wallet, not a re-derived quote, so it matches what actually arrived."""
+    receipt = _get_receipt_or_none(chain, tx_hash)
+    if not receipt:
+        return {"status": "pending"}
+    if receipt.get("status") == 0:
+        return {"status": "reverted"}
+    contract = Web3().eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_TRANSFER_EVENT_ABI)
+    transfers = contract.events.Transfer().process_receipt(receipt)
+    owner_checksum = Web3.to_checksum_address(owner_address)
+    qty_wei = sum(t["args"]["value"] for t in transfers if t["args"]["to"] == owner_checksum)
+    if qty_wei <= 0:
+        return {"status": "reverted"}
+    decimals = _with_rpc(chain, lambda w3: w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
+                          .functions.decimals().call())
+    qty = qty_wei / (10 ** decimals)
+    try:
+        gas_usd = _gas_cost_usd(receipt, eth_price_usd)
+    except Exception:
+        gas_usd = 0
+    cost_usd = trade_size_usd + gas_usd
+    return {"status": "confirmed", "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "txHash": tx_hash}
 
 
 def _gas_cost_usd(receipt: dict, eth_price_usd: float) -> float:
@@ -355,7 +425,13 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
             )
 
     tx_hash = wallet.send_transaction(tx["to"], tx["data"], hex(amount_in_wei), chain)
-    receipt = _wait_for_receipt(chain, tx_hash)
+    try:
+        receipt = _wait_for_receipt(chain, tx_hash)
+    except RuntimeError as err:
+        if "timed out waiting for confirmation" not in str(err):
+            raise
+        raise BuyPendingError(tx_hash=tx_hash, token_address=token["address"],
+                               trade_size_usd=trade_size_usd, eth_price_usd=eth_price_usd) from err
     try:
         gas_usd = _gas_cost_usd(receipt, eth_price_usd)
     except Exception:

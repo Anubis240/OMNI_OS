@@ -192,6 +192,7 @@ class TraderEngine:
             "realizedPnlUsd": 0,
             "positions": [],
             "livePositions": [],
+            "pendingLiveBuys": [],
             "liveRealizedPnlUsd": 0,
             "liveStartingEquityUsd": None,
             "lastLiveEquityUsd": None,
@@ -261,6 +262,54 @@ class TraderEngine:
             self._emit({"type": "state", **self.public_state()})
         else:
             self._persist()
+
+    def _reconcile_pending_live_buys(self):
+        """A LIVE buy whose confirmation wait timed out (live.BuyPendingError,
+        see _execute_buy) is tracked here instead of being silently dropped —
+        the swap tx may still confirm, or revert, after Omni gave up waiting
+        on it (a real FORCE BUY did exactly this: reported as failed, then
+        confirmed on-chain hours later with real funds spent, unrecorded in
+        the ledger). Resolve each pending entry against its actual on-chain
+        outcome so a late-confirming trade isn't left as a permanent,
+        unaccounted-for holding."""
+        if not self.state["pendingLiveBuys"]:
+            return
+        ws = (self.wallet_status() if self.wallet_status else None) or {"connected": False}
+        if not ws.get("connected"):
+            return
+        changed = False
+        still_pending = []
+        for pend in self.state["pendingLiveBuys"]:
+            try:
+                outcome = live_mod.check_buy_receipt(
+                    pend.get("chain"), pend["txHash"], pend["address"], ws["address"],
+                    pend["tradeSizeUsd"], pend["ethPriceUsd"],
+                )
+            except Exception as err:
+                self._emit({"type": "log", "text": f"pending buy {pend['symbol']} check failed: {err}"})
+                still_pending.append(pend)
+                continue
+            if outcome["status"] == "pending":
+                still_pending.append(pend)
+                continue
+            changed = True
+            if outcome["status"] == "reverted":
+                self._emit({"type": "log", "text": f"pending buy {pend['symbol']} (tx {pend['txHash']}) reverted on-chain — no position opened"})
+                continue
+            self._merge_position(self.state["livePositions"], {
+                "symbol": pend["symbol"], "address": pend["address"], "chain": pend.get("chain", chains_mod.DEFAULT_CHAIN),
+                "qty": outcome["qty"], "entryPriceUsd": outcome["priceUsd"], "costUsd": outcome["costUsd"],
+                "openedAt": pend["submittedAt"], "txHash": pend["txHash"],
+            })
+            self.state["tradesToday"]["count"] += 1
+            self._emit({"type": "buy", "symbol": pend["symbol"], "address": pend["address"], "priceUsd": outcome["priceUsd"],
+                         "qty": outcome["qty"], "costUsd": outcome["costUsd"], "txHash": pend["txHash"], "live": True,
+                         "reconciledLate": True, **(pend.get("context") or {})})
+        self.state["pendingLiveBuys"] = still_pending
+        if changed:
+            self.state["lastLiveEquityUsd"] = self._equity([])
+            self._persist()
+            self._emit({"type": "state", **self.public_state()})
 
     # ---------- Seraph MCP risk gate (fail-closed) ----------
 
@@ -405,8 +454,20 @@ class TraderEngine:
                     f"{token['symbol']} was skipped (chain must be both live-capable and checked on in chain config)"
                 )
             self._emit({"type": "log", "text": f"LIVE: submitting buy for {token['symbol']} on {chains_mod.resolve(token.get('chain'))['name']}…"})
-            result = live_mod.live_buy(token=token, trade_size_usd=trade_size_usd,
-                                        max_price_impact_bps=self.config["maxPriceImpactBps"], bypass_gate=True)
+            try:
+                result = live_mod.live_buy(token=token, trade_size_usd=trade_size_usd,
+                                            max_price_impact_bps=self.config["maxPriceImpactBps"], bypass_gate=True)
+            except live_mod.BuyPendingError as err:
+                self.state["pendingLiveBuys"].append({
+                    "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
+                    "txHash": err.tx_hash, "tradeSizeUsd": err.trade_size_usd, "ethPriceUsd": err.eth_price_usd,
+                    "submittedAt": _now_iso(), "context": context,
+                })
+                self._persist()
+                raise RuntimeError(
+                    f"buy {token['symbol']} submitted but not yet confirmed (tx {err.tx_hash}) — "
+                    f"tracking as pending, will finish automatically once it confirms or reverts"
+                ) from err
             self._merge_position(self.state["livePositions"], {
                 "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
                 "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "costUsd": result["costUsd"],
@@ -595,6 +656,7 @@ class TraderEngine:
             self.state["tradesToday"] = {"date": _today(), "count": 0}
 
         self._reconcile_live_positions()
+        self._reconcile_pending_live_buys()
 
         if not self.config["watchlist"]:
             if not self.state["emptyWatchlistPrompted"]:
@@ -1013,17 +1075,22 @@ class TraderEngine:
         if not self.armed_live:
             return {"ok": False, "message": "sync only applies in live mode — paper positions can't drift from an on-chain wallet"}
         before = {p["symbol"]: p["qty"] for p in self.state["livePositions"]}
+        pending_before = len(self.state["pendingLiveBuys"])
         self._reconcile_live_positions()  # emits its own state update if anything changed
+        self._reconcile_pending_live_buys()  # same — resolves any buy still awaiting confirmation
         after = {p["symbol"]: p["qty"] for p in self.state["livePositions"]}
         closed = [sym for sym in before if sym not in after]
         changed = [sym for sym in after if sym in before and after[sym] != before[sym]]
-        if not closed and not changed:
+        resolved_pending = pending_before - len(self.state["pendingLiveBuys"])
+        if not closed and not changed and not resolved_pending:
             return {"ok": True, "message": "positions already match on-chain balances"}
         parts = []
         if closed:
             parts.append(f"closed: {', '.join(closed)}")
         if changed:
             parts.append(f"adjusted: {', '.join(changed)}")
+        if resolved_pending:
+            parts.append(f"resolved {resolved_pending} pending buy(s)")
         return {"ok": True, "message": "synced — " + "; ".join(parts)}
 
     def sell_all(self) -> dict:

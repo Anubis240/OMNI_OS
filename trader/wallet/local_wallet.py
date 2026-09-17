@@ -157,6 +157,17 @@ def _with_rpc(chain: str | None, fn):
     raise RuntimeError(f"all RPC endpoints failed for {c['name']}: {last_err}")
 
 
+# A real LIVE FORCE BUY submitted at the RPC's bare eth_gasPrice quote
+# (0.236 Gwei) confirmed on-chain, but slowly enough to blow past
+# live.py's _wait_for_receipt timeout and get reported to the user as a
+# failed/fabricated transaction when it had actually gone through — see
+# that module's BuyPendingError for the other half of this fix. A flat
+# buffer on top of the node's own quote meaningfully lowers the odds of
+# landing under-priced if the network gets busier between quoting and
+# inclusion.
+GAS_PRICE_BUFFER_PCT = 30
+
+
 def send_transaction(to: str, data: str | None, value, chain: str | None) -> str:
     if not _wallet:
         raise RuntimeError("app-managed wallet is locked")
@@ -170,7 +181,7 @@ def send_transaction(to: str, data: str | None, value, chain: str | None) -> str
             "data": data or "0x",
             "nonce": w3.eth.get_transaction_count(_wallet.address),
             "chainId": chain_id,
-            "gasPrice": w3.eth.gas_price,
+            "gasPrice": w3.eth.gas_price * (100 + GAS_PRICE_BUFFER_PCT) // 100,
         }
         tx["gas"] = w3.eth.estimate_gas({**tx, "from": _wallet.address})
         signed = Account.sign_transaction(tx, _wallet.key)
