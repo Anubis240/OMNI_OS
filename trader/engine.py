@@ -78,6 +78,19 @@ _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 
+def _gas_quote_log_line(result: dict) -> str | None:
+    """GEMZ4US, Section F (2026-09-17): after locally verifying the gas
+    margin fix, the exact 30% figure wasn't independently checkable from
+    anything the app exposed. Surfaces both the RPC's bare quote and the
+    buffered price actually signed at, in his suggested format."""
+    quote_wei, signed_wei = result.get("gasQuoteWei"), result.get("gasSignedWei")
+    if quote_wei is None or signed_wei is None:
+        return None
+    quote_gwei, signed_gwei = quote_wei / 1e9, signed_wei / 1e9
+    pct = live_mod.wallet.GAS_PRICE_BUFFER_PCT
+    return f"Gas quote (RPC): {quote_gwei:.6f} Gwei → margin {pct}% applied → signing at {signed_gwei:.6f} Gwei"
+
+
 def _base_dir() -> Path:
     return get_data_dir()
 
@@ -470,6 +483,9 @@ class TraderEngine:
                     f"buy {token['symbol']} submitted but not yet confirmed (tx {err.tx_hash}) — "
                     f"tracking as pending, will finish automatically once it confirms or reverts"
                 ) from err
+            gas_quote_text = _gas_quote_log_line(result)
+            if gas_quote_text:
+                self._emit({"type": "log", "text": gas_quote_text})
             self._merge_position(self.state["livePositions"], {
                 "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
                 "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "costUsd": result["costUsd"],
@@ -486,14 +502,27 @@ class TraderEngine:
         if self.state["balanceUsd"] < total_cost:
             raise RuntimeError("insufficient paper balance")
         qty = received / price_usd
+        # entryPriceUsd is the effective, gas-inclusive per-unit price
+        # (total_cost / qty), matching how LIVE already derives its own
+        # priceUsd (live.live_buy: cost_usd / qty) — NOT the raw market
+        # price_usd. Storing the raw price here made qty * entryPriceUsd
+        # diverge from costUsd by exactly the flat gasUsd fee (plus the
+        # swap-fee/slippage cut), a real, reported display bug (GEMZ4US,
+        # Finding #25, 2026-09-17): a FORCE BUY showed qty=0.8070
+        # entry=$4.781742 cost=$6.89, where qty*entry ($3.86) didn't match
+        # cost ($6.89) at all. Deriving entryPriceUsd from cost also makes
+        # PAPER's take-profit/stop-loss % (computed against entryPriceUsd
+        # a few lines below in cycle()) correctly account for gas drag on
+        # breakeven, same as LIVE already does — not just a display fix.
+        entry_price_usd = total_cost / qty
         self.state["balanceUsd"] -= total_cost
         self._merge_position(self.state["positions"], {
             "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
-            "qty": qty, "entryPriceUsd": price_usd, "costUsd": total_cost, "openedAt": _now_iso(),
+            "qty": qty, "entryPriceUsd": entry_price_usd, "costUsd": total_cost, "openedAt": _now_iso(),
         })
         self.state["tradesToday"]["count"] += 1
         self._emit({"type": "buy", "symbol": token["symbol"], "address": token["address"],
-                     "chain": token.get("chain", chains_mod.DEFAULT_CHAIN), "priceUsd": price_usd, "qty": qty,
+                     "chain": token.get("chain", chains_mod.DEFAULT_CHAIN), "priceUsd": entry_price_usd, "qty": qty,
                      "costUsd": total_cost, **context})
 
     def _execute_sell(self, position: dict, price_usd: float, reason: str, fraction: float = 1, bypass_gate: bool = False):
@@ -503,6 +532,9 @@ class TraderEngine:
             self._emit({"type": "log", "text": f"LIVE: submitting {'' if fraction >= 1 else f'{round(fraction * 100)}% '}sell for {position['symbol']}…"})
             result = live_mod.live_sell(position=position, min_net_profit_usd=self.config["minNetProfitUsd"],
                                          qty=sell_qty, cost_basis_usd=cost_basis_usd, bypass_gate=bypass_gate)
+            gas_quote_text = _gas_quote_log_line(result)
+            if gas_quote_text:
+                self._emit({"type": "log", "text": gas_quote_text})
             pnl = result["proceedsUsd"] - cost_basis_usd
             self.state["liveRealizedPnlUsd"] += pnl
             if fraction >= 1:

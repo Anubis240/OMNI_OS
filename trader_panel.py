@@ -1171,12 +1171,37 @@ class TraderPanel(QWidget):
                 item.widget().deleteLater()
 
         positions = self.engine._positions()
-        if not positions:
+        # GEMZ4US, Finding #24 (2026-09-17): a real, currently-open LIVE
+        # position vanished from this panel entirely once switched back to
+        # PAPER mode — _positions() only ever returns one list or the
+        # other, keyed on armed_live. The position stayed fully open
+        # on-chain the whole time (funds safe, verified on Etherscan); the
+        # app just stopped showing it, with no indicator anywhere. Listed
+        # here too, badged and read-only, so a real position is never
+        # invisible just because the mode toggle is elsewhere.
+        live_elsewhere = [] if self.engine.armed_live else (self.engine.state.get("livePositions") or [])
+        if not positions and not live_elsewhere:
             empty_lbl = QLabel("no open positions")
             empty_lbl.setFont(QFont("Segoe UI", 9))
             empty_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             self._positions_layout.insertWidget(0, empty_lbl)
             return
+
+        for p in live_elsewhere:
+            held = " [HELD]" if p.get("held") else ""
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(f"[LIVE] {p['symbol']:<8} qty={p['qty']:.4f}  entry=${p['entryPriceUsd']:.6f}  cost=${p['costUsd']:.2f}{held}")
+            lbl.setFont(QFont("Segoe UI", 9))
+            lbl.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+            lay.addWidget(lbl, stretch=1)
+            note = QLabel("switch to LIVE mode to manage")
+            note.setFont(QFont("Segoe UI", 7))
+            note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(note)
+            self._positions_layout.insertWidget(self._positions_layout.count() - 1, row)
 
         for i, p in enumerate(positions):
             held = " [HELD]" if p.get("held") else ""
@@ -1412,8 +1437,26 @@ class TraderPanel(QWidget):
         C = self._C
         box = QMessageBox(self)
         box.setWindowTitle("Reset ledger?")
-        box.setText("This permanently wipes the trade history, P&L, and watchlist, and stops "
-                    "the trader if it's running — there's no undo.\n\nReset the ledger?")
+        text = ("This permanently wipes the trade history, P&L, and watchlist, and stops "
+                "the trader if it's running — there's no undo.")
+        # GEMZ4US, Finding #29 (2026-09-17): this dialog used to say nothing
+        # about LIVE — reset() (see engine.py) wipes livePositions along
+        # with the paper ledger unconditionally, so a real, currently-open
+        # on-chain position silently stopped being tracked with no warning
+        # specific to it. Funds are never at risk (nothing is sold or
+        # moved), but the app's own display goes wrong until the position
+        # is brought back with the "adopt" command.
+        live_positions = self.engine.state.get("livePositions") or []
+        if live_positions:
+            symbols = ", ".join(p["symbol"] for p in live_positions)
+            text += (
+                f"\n\n⚠ You have {len(live_positions)} open LIVE position(s) ({symbols}). "
+                "Resetting stops tracking them here — your funds stay exactly where they are "
+                "on-chain, nothing is sold or moved, but this app will no longer show them. "
+                "Use the \"adopt\" command afterward to bring each one back into the ledger."
+            )
+        text += "\n\nReset the ledger?"
+        box.setText(text)
         box.setIcon(QMessageBox.Icon.Question)
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         box.setDefaultButton(QMessageBox.StandardButton.No)
@@ -1426,9 +1469,13 @@ class TraderPanel(QWidget):
         reply = box.exec()
         if reply != QMessageBox.StandardButton.Yes:
             return
+        # engine.reset() already emits its own detailed "ledger reset..."
+        # log line through the normal event bridge (_on_engine_event ->
+        # _handle_event -> _append_feed_text) — a second, bare "SYS: ledger
+        # reset" appended manually here used to duplicate it (GEMZ4US,
+        # Finding #26, 2026-09-17: two "ledger reset" lines in the feed).
         self.engine.reset()
         self._refresh_stats()
         self._refresh_positions()
         self._refresh_watchlist()
         self._load_config_into_ui()
-        self._append_feed_text("SYS: ledger reset")

@@ -236,5 +236,55 @@ class AdoptOneTests(unittest.TestCase):
         self.assertIn("adopt STOCKER failed", result["message"])
 
 
+class PaperBuyCostBasisTests(unittest.TestCase):
+    """GEMZ4US, Finding #25 (2026-09-17): a PAPER FORCE BUY showed
+    qty=0.8070 entry=$4.781742 cost=$6.89, where qty*entry ($3.86) didn't
+    match cost ($6.89) at all — entryPriceUsd was the raw market price
+    while qty and costUsd came from two other, unrelated formulas.
+    entryPriceUsd must now be cost-inclusive (total_cost / qty), matching
+    how LIVE already derives its own priceUsd."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_qty_times_entry_price_equals_cost_reproducing_the_real_report(self):
+        # Exact numbers from the report: trade_size_usd=3.89 (DEFAULT_CONFIG's
+        # gasUsd=3, swapFeePct=0.3, slippagePct=0.5), price_usd=4.781742,
+        # which reproduced his qty=0.8070/cost=6.89 exactly when solved
+        # backwards from the reported figures.
+        self.engine.config["tradeSizeMinUsd"] = 3.89
+        self.engine.config["tradeSizeMaxUsd"] = 3.89
+        token = {"symbol": "LIT", "address": TOKEN_ADDRESS, "chain": "ethereum"}
+        self.engine._execute_buy(token, 4.781742, {"source": "manual"})
+
+        pos = self.engine.state["positions"][0]
+        self.assertAlmostEqual(pos["qty"], 0.8070, places=4)
+        self.assertAlmostEqual(pos["costUsd"], 6.89, places=2)
+        self.assertAlmostEqual(pos["qty"] * pos["entryPriceUsd"], pos["costUsd"], places=9)
+
+
+class GasQuoteLogLineTests(unittest.TestCase):
+    """GEMZ4US, Section F (2026-09-17): after locally verifying the gas
+    margin fix, the exact 30% figure wasn't independently checkable from
+    anything the app exposed."""
+
+    def test_formats_quote_and_signed_price_in_gwei(self):
+        text = engine_mod._gas_quote_log_line({"gasQuoteWei": 236_112_178, "gasSignedWei": 306_945_831})
+        self.assertIn("Gas quote (RPC): 0.236112 Gwei", text)
+        self.assertIn("margin 30% applied", text)
+        self.assertIn("signing at 0.306946 Gwei", text)
+
+    def test_missing_data_returns_none(self):
+        self.assertIsNone(engine_mod._gas_quote_log_line({"gasQuoteWei": None, "gasSignedWei": None}))
+        self.assertIsNone(engine_mod._gas_quote_log_line({}))
+
+
 if __name__ == "__main__":
     unittest.main()

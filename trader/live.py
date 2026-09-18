@@ -463,7 +463,9 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
                 f"(max allowed {max_price_impact_bps / 100:.2f}%) — thin liquidity, skipping"
             )
 
-    tx_hash = wallet.send_transaction(tx["to"], tx["data"], hex(amount_in_wei), chain)
+    gas_quote = {}
+    tx_hash = wallet.send_transaction(tx["to"], tx["data"], hex(amount_in_wei), chain,
+                                       on_gas_quote=lambda q, b: gas_quote.update(quotedWei=q, bufferedWei=b))
     try:
         receipt = _wait_for_receipt(chain, tx_hash)
     except RuntimeError as err:
@@ -483,7 +485,8 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
     qty = amount_out / (10 ** decimals)
     cost_usd = trade_size_usd + gas_usd
 
-    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd}
+    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd,
+            "gasQuoteWei": gas_quote.get("quotedWei"), "gasSignedWei": gas_quote.get("bufferedWei")}
 
 
 def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None = None, cost_basis_usd: float | None = None, bypass_gate: bool = False) -> dict:
@@ -553,7 +556,9 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
 
     _ensure_allowance(chain, position["address"], status["address"], spender, amount_in_wei)
 
-    tx_hash = wallet.send_transaction(tx["to"], tx["data"], "0x0", chain)
+    gas_quote = {}
+    tx_hash = wallet.send_transaction(tx["to"], tx["data"], "0x0", chain,
+                                       on_gas_quote=lambda q, b: gas_quote.update(quotedWei=q, bufferedWei=b))
     receipt = _wait_for_receipt(chain, tx_hash)
     try:
         gas_usd = _gas_cost_usd(receipt, eth_price_usd)
@@ -561,7 +566,8 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
         gas_usd = 0
 
     proceeds_usd = float(Web3.from_wei(amount_out, "ether")) * eth_price_usd - gas_usd
-    return {"txHash": tx_hash, "proceedsUsd": proceeds_usd, "ethPriceUsd": eth_price_usd}
+    return {"txHash": tx_hash, "proceedsUsd": proceeds_usd, "ethPriceUsd": eth_price_usd,
+            "gasQuoteWei": gas_quote.get("quotedWei"), "gasSignedWei": gas_quote.get("bufferedWei")}
 
 
 # Conservative gas estimate for WETH9's withdraw() — a single storage

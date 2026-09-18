@@ -168,20 +168,31 @@ def _with_rpc(chain: str | None, fn):
 GAS_PRICE_BUFFER_PCT = 30
 
 
-def send_transaction(to: str, data: str | None, value, chain: str | None) -> str:
+def send_transaction(to: str, data: str | None, value, chain: str | None, *, on_gas_quote=None) -> str:
     if not _wallet:
         raise RuntimeError("app-managed wallet is locked")
     chain_id = chains_mod.resolve(chain)["chainId"]
     value_wei = int(value, 16) if isinstance(value, str) and value.startswith("0x") else int(value or 0)
 
     def _send(w3: Web3) -> str:
+        quoted_gas_price = w3.eth.gas_price
+        buffered_gas_price = quoted_gas_price * (100 + GAS_PRICE_BUFFER_PCT) // 100
+        # GEMZ4US, Section F (2026-09-17): after locally verifying the gas
+        # margin fix, the exact 30% figure wasn't independently checkable
+        # from anything the app exposed — the Event Feed only ever showed
+        # the token price, never the RPC's own quote. on_gas_quote lets a
+        # caller (live.py's live_buy/live_sell) surface both numbers for
+        # engine.py to log, without changing this function's return type
+        # for callers that don't care (approve/unwrap).
+        if on_gas_quote:
+            on_gas_quote(quoted_gas_price, buffered_gas_price)
         tx = {
             "to": Web3.to_checksum_address(to),
             "value": value_wei,
             "data": data or "0x",
             "nonce": w3.eth.get_transaction_count(_wallet.address),
             "chainId": chain_id,
-            "gasPrice": w3.eth.gas_price * (100 + GAS_PRICE_BUFFER_PCT) // 100,
+            "gasPrice": buffered_gas_price,
         }
         tx["gas"] = w3.eth.estimate_gas({**tx, "from": _wallet.address})
         signed = Account.sign_transaction(tx, _wallet.key)
