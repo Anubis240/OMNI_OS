@@ -75,6 +75,7 @@ DEFAULT_CONFIG = {
 }
 
 _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 
 def _base_dir() -> Path:
@@ -103,6 +104,7 @@ HELP_TEXT = (
     "remove &lt;TICKER&gt; / unwatch &lt;TICKER&gt; &mdash; drop a token from the watchlist<br>"
     "unwrap [CHAIN] &mdash; live mode only: converts wallet WETH back to native ETH (sell proceeds land as WETH, see help on why). Runs automatically after every live sell whenever the WETH is worth clearly more than its own gas cost &mdash; this is only needed for WETH left over from before, or if an auto-unwrap got skipped as not worth it yet<br>"
     "sync / sync positions &mdash; live mode only: re-check on-chain balances now and close/adjust any position sold or moved outside the app (also runs automatically every scan cycle)<br>"
+    "adopt &lt;TICKER&gt;:0xADDR[:0xTXHASH] &mdash; live mode only: record a real on-chain holding the ledger never tracked (a fill that fell through a timeout/RPC hiccup, or a trade made outside the app). With a tx hash, cost basis is exact &mdash; read from that transaction's own ETH spent + gas. Without one, cost basis is approximate &mdash; today's market price, not the real entry price<br>"
     "scan / /scan &mdash; scan right now instead of waiting for the rest of the interval<br>"
     "help / /help &mdash; show this list<br>"
     "anything else &mdash; asks Seraph directly (read-only, cannot trade)<br>"
@@ -975,6 +977,37 @@ class TraderEngine:
             return None
         return {"symbol": symbol, "chain": chain_key, "address": address}
 
+    @staticmethod
+    def _parse_adopt_entry(entry: str) -> dict | None:
+        """Same shape as _parse_entry, plus an optional trailing tx hash:
+        SYMBOL:0xADDR[:0xTXHASH] or SYMBOL:CHAIN:0xADDR[:0xTXHASH]. A 3-part
+        entry is ambiguous between "...:CHAIN:ADDR" and "...:ADDR:TXHASH" —
+        disambiguated by which parts actually match a chain key vs a tx hash."""
+        parts = [s.strip() for s in entry.split(":")]
+        tx_hash = None
+        if len(parts) == 2:
+            symbol, address = parts
+            chain_key = chains_mod.DEFAULT_CHAIN
+        elif len(parts) == 3:
+            symbol, second, third = parts
+            if chains_mod.is_supported(second.lower()) and _ADDR_RE.match(third or ""):
+                chain_key, address = second.lower(), third
+            elif _ADDR_RE.match(second or "") and _TX_HASH_RE.match(third or ""):
+                chain_key, address, tx_hash = chains_mod.DEFAULT_CHAIN, second, third
+            else:
+                return None
+        elif len(parts) == 4:
+            symbol, chain_key, address, tx_hash = parts
+            chain_key = chain_key.lower()
+        else:
+            return None
+        symbol = (symbol or "").upper()
+        if not symbol or not _ADDR_RE.match(address or "") or not chains_mod.is_supported(chain_key):
+            return None
+        if tx_hash and not _TX_HASH_RE.match(tx_hash):
+            return None
+        return {"symbol": symbol, "chain": chain_key, "address": address, "txHash": tx_hash}
+
     def sell_one(self, symbol: str, bypass_gate: bool = False) -> dict:
         pos = next((p for p in self._positions() if p["symbol"].upper() == symbol), None)
         if not pos:
@@ -1070,6 +1103,59 @@ class TraderEngine:
             return {"ok": True, "message": f"{verb} {symbol} @ ${price_usd}" + (" — Seraph gate bypassed" if bypass_gate else "")}
         except Exception as err:
             return {"ok": False, "message": f"buy {symbol} failed: {err}"}
+
+    def adopt_one(self, text: str) -> dict:
+        if not self.armed_live:
+            return {"ok": False, "message": "adopt only applies in live mode — paper positions can't drift from an on-chain wallet"}
+        parsed = self._parse_adopt_entry(text)
+        if not parsed:
+            return {"ok": False, "message": f'use SYMBOL:0xADDRESS[:0xTXHASH] or SYMBOL:CHAIN:0xADDRESS[:0xTXHASH], got: "{text}"'}
+        symbol, chain, address, tx_hash = parsed["symbol"], parsed["chain"], parsed["address"], parsed["txHash"]
+        ws = (self.wallet_status() if self.wallet_status else None) or {"connected": False}
+        if not ws.get("connected"):
+            return {"ok": False, "message": "connect a wallet before adopting a position"}
+
+        if tx_hash:
+            existing = next((p for p in self.state["livePositions"] if p["symbol"] == symbol), None)
+            if existing and existing.get("txHash") == tx_hash:
+                return {"ok": False, "message": f"adopt {symbol} failed: tx {tx_hash} is already recorded on this position"}
+            try:
+                eth_price_usd = live_mod.eth_usd_price()
+            except Exception as err:
+                return {"ok": False, "message": f"adopt {symbol} failed: could not fetch ETH price: {err}"}
+            try:
+                info = live_mod.adopt_from_tx(chain, tx_hash, address, ws["address"], eth_price_usd)
+            except Exception as err:
+                return {"ok": False, "message": f"adopt {symbol} failed: could not read tx {tx_hash}: {err}"}
+            if info is None:
+                return {"ok": False, "message": f"adopt {symbol} failed: tx {tx_hash} not found, not confirmed, reverted, or delivered nothing to this wallet"}
+            new_qty, entry_price_usd, cost_usd = info["qty"], info["priceUsd"], info["costUsd"]
+            basis_note = "exact — from the tx's own ETH spent + gas"
+        else:
+            try:
+                real_qty = live_mod.token_balance(chain, address, ws["address"])
+            except Exception as err:
+                return {"ok": False, "message": f"adopt {symbol} failed: could not read on-chain balance: {err}"}
+            already_qty = next((p["qty"] for p in self.state["livePositions"] if p["symbol"] == symbol), 0)
+            new_qty = real_qty - already_qty
+            if new_qty <= 0:
+                return {"ok": False, "message": f"adopt {symbol} failed: on-chain balance ({real_qty:g}) is already fully accounted for in the ledger"}
+            try:
+                entry_price_usd = market.current_price(address, chain)
+            except Exception as err:
+                return {"ok": False, "message": f"adopt {symbol} failed: could not fetch a market price for cost basis: {err}"}
+            cost_usd = new_qty * entry_price_usd
+            basis_note = "approximate — no tx hash given, priced at today's market rate, not the real entry price"
+
+        self._merge_position(self.state["livePositions"], {
+            "symbol": symbol, "address": address, "chain": chain,
+            "qty": new_qty, "entryPriceUsd": entry_price_usd, "costUsd": cost_usd,
+            "openedAt": _now_iso(), "txHash": tx_hash or "",
+        })
+        self.state["lastLiveEquityUsd"] = self._equity([])
+        self._persist()
+        self._emit({"type": "state", **self.public_state()})
+        return {"ok": True, "message": f"adopted {new_qty:g} {symbol} into the ledger — cost basis {basis_note}"}
 
     def sync_positions(self) -> dict:
         if not self.armed_live:
@@ -1209,6 +1295,10 @@ class TraderEngine:
         m = re.match(r"^buy\s+(.+)$", raw, re.I)
         if m:
             return self.buy_one(m.group(1))
+
+        m = re.match(r"^adopt\s+(.+)$", raw, re.I)
+        if m:
+            return self.adopt_one(m.group(1))
 
         m = re.match(r"^watch\s+(.+)$", raw, re.I)
         if m:

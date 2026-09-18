@@ -339,6 +339,22 @@ def _wait_for_receipt(chain: str | None, tx_hash: str, timeout_s: float = 180) -
     raise RuntimeError(f"timed out waiting for confirmation (still pending): {tx_hash}")
 
 
+def _qty_received(chain: str | None, receipt: dict, token_address: str, owner_address: str) -> float | None:
+    """Exact quantity of token_address that landed in owner_address in this
+    receipt, decoded from the token's own Transfer log — not a re-derived
+    quote, so it matches what actually arrived. None if nothing did (a
+    revert already ruled out by the caller, or the output went elsewhere)."""
+    contract = Web3().eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_TRANSFER_EVENT_ABI)
+    transfers = contract.events.Transfer().process_receipt(receipt)
+    owner_checksum = Web3.to_checksum_address(owner_address)
+    qty_wei = sum(t["args"]["value"] for t in transfers if t["args"]["to"] == owner_checksum)
+    if qty_wei <= 0:
+        return None
+    decimals = _with_rpc(chain, lambda w3: w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
+                          .functions.decimals().call())
+    return qty_wei / (10 ** decimals)
+
+
 def check_buy_receipt(chain: str | None, tx_hash: str, token_address: str, owner_address: str,
                        trade_size_usd: float, eth_price_usd: float) -> dict:
     """Non-blocking check for a BuyPendingError'd buy — call this from a
@@ -353,21 +369,44 @@ def check_buy_receipt(chain: str | None, tx_hash: str, token_address: str, owner
         return {"status": "pending"}
     if receipt.get("status") == 0:
         return {"status": "reverted"}
-    contract = Web3().eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_TRANSFER_EVENT_ABI)
-    transfers = contract.events.Transfer().process_receipt(receipt)
-    owner_checksum = Web3.to_checksum_address(owner_address)
-    qty_wei = sum(t["args"]["value"] for t in transfers if t["args"]["to"] == owner_checksum)
-    if qty_wei <= 0:
+    qty = _qty_received(chain, receipt, token_address, owner_address)
+    if qty is None:
         return {"status": "reverted"}
-    decimals = _with_rpc(chain, lambda w3: w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
-                          .functions.decimals().call())
-    qty = qty_wei / (10 ** decimals)
     try:
         gas_usd = _gas_cost_usd(receipt, eth_price_usd)
     except Exception:
         gas_usd = 0
     cost_usd = trade_size_usd + gas_usd
     return {"status": "confirmed", "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "txHash": tx_hash}
+
+
+def adopt_from_tx(chain: str | None, tx_hash: str, token_address: str, owner_address: str,
+                   eth_price_usd: float) -> dict | None:
+    """Cost basis + quantity for the engine's `adopt` command — recording a
+    position Omni never tracked at all (a fill from before BuyPendingError
+    existed, an RPC hiccup, or a manual trade made outside the app). Unlike
+    check_buy_receipt, there's no stored trade_size_usd to trust here since
+    Omni never initiated or recorded this attempt, so cost comes straight
+    from the tx's own ETH value plus the gas it actually paid — not a
+    re-derived quote. Returns None if the tx isn't found/confirmed, reverted,
+    or delivered nothing to this wallet."""
+    receipt = _get_receipt_or_none(chain, tx_hash)
+    if not receipt or receipt.get("status") == 0:
+        return None
+    qty = _qty_received(chain, receipt, token_address, owner_address)
+    if qty is None:
+        return None
+    try:
+        tx = _with_rpc(chain, lambda w3: w3.eth.get_transaction(tx_hash))
+    except Exception:
+        return None
+    eth_spent_usd = float(Web3.from_wei(tx["value"], "ether")) * eth_price_usd
+    try:
+        gas_usd = _gas_cost_usd(receipt, eth_price_usd)
+    except Exception:
+        gas_usd = 0
+    cost_usd = eth_spent_usd + gas_usd
+    return {"qty": qty, "costUsd": cost_usd, "priceUsd": cost_usd / qty, "txHash": tx_hash}
 
 
 def _gas_cost_usd(receipt: dict, eth_price_usd: float) -> float:

@@ -6,7 +6,7 @@ never recorded in the ledger — see trader/engine.py's
 _reconcile_pending_live_buys for the other half. No real RPC/network calls."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from hexbytes import HexBytes
 from web3 import Web3
 
@@ -112,6 +112,72 @@ class LiveBuyPendingTranslationTests(unittest.TestCase):
                 live_mod.live_buy(token=token, trade_size_usd=7.87, bypass_gate=True)
         self.assertNotIsInstance(ctx.exception, live_mod.BuyPendingError)
         self.assertIn("reverted on-chain", str(ctx.exception))
+
+
+class AdoptFromTxTests(unittest.TestCase):
+    """live.adopt_from_tx — cost basis for engine.py's `adopt` command,
+    covering GEMZ4US's real 16 sept. STOCKER fill that predated
+    BuyPendingError and was never recorded anywhere. Unlike
+    check_buy_receipt, there's no stored trade_size_usd to trust, so cost
+    comes from the tx's own ETH value + gas, not a re-derived quote."""
+
+    def _fake_w3(self, decimals=18, tx_value_wei=0):
+        w3 = MagicMock()
+        w3.eth.contract.return_value.functions.decimals.return_value.call.return_value = decimals
+        w3.eth.get_transaction.return_value = {"value": tx_value_wei}
+        return w3
+
+    def test_no_receipt_returns_none(self):
+        with patch.object(live_mod, "_get_receipt_or_none", return_value=None):
+            self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
+
+    def test_reverted_returns_none(self):
+        receipt = {"status": 0, "gasUsed": 21000, "gasPrice": 1_000_000_000, "logs": []}
+        with patch.object(live_mod, "_get_receipt_or_none", return_value=receipt):
+            self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
+
+    def test_nothing_delivered_to_wallet_returns_none(self):
+        receipt = {
+            "status": 1, "gasUsed": 21000, "gasPrice": 1_000_000_000,
+            "logs": [_transfer_log(TOKEN_ADDRESS, OTHER_ADDRESS, OTHER_ADDRESS, 500 * 10**18)],
+        }
+        with patch.object(live_mod, "_get_receipt_or_none", return_value=receipt):
+            self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
+
+    def test_confirmed_cost_basis_from_tx_value_plus_gas(self):
+        # Mirrors the real STOCKER fill: 0.003203657 ETH for 23,362.65
+        # tokens, 118000 gas at 0.236112178 Gwei.
+        qty_wei = 23362 * 10**18
+        tx_value_wei = 3_203_657_000_000_000  # 0.003203657 ETH
+        receipt = {
+            "status": 1, "gasUsed": 118000, "effectiveGasPrice": 236_112_178,
+            "logs": [_transfer_log(TOKEN_ADDRESS, OTHER_ADDRESS, OWNER_ADDRESS, qty_wei)],
+        }
+        fake_w3 = self._fake_w3(decimals=18, tx_value_wei=tx_value_wei)
+        with patch.object(live_mod, "_get_receipt_or_none", return_value=receipt), \
+             patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(fake_w3)):
+            result = live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["qty"], 23362.0, places=6)
+        expected_eth_usd = 0.003203657 * 3000.0
+        self.assertAlmostEqual(result["costUsd"], expected_eth_usd + (118000 * 236_112_178 / 1e18) * 3000.0, places=6)
+        self.assertEqual(result["txHash"], TX_HASH)
+        self.assertAlmostEqual(result["priceUsd"], result["costUsd"] / result["qty"], places=9)
+
+    def test_get_transaction_failure_returns_none(self):
+        # Qty decoding (decimals lookup) succeeds; the later, separate
+        # get_transaction call (for cost basis) fails — must still return
+        # None cleanly, not raise.
+        receipt = {
+            "status": 1, "gasUsed": 21000, "gasPrice": 1_000_000_000,
+            "logs": [_transfer_log(TOKEN_ADDRESS, OTHER_ADDRESS, OWNER_ADDRESS, 100 * 10**18)],
+        }
+        fake_w3 = MagicMock()
+        fake_w3.eth.contract.return_value.functions.decimals.return_value.call.return_value = 18
+        fake_w3.eth.get_transaction.side_effect = RuntimeError("all RPC endpoints failed")
+        with patch.object(live_mod, "_get_receipt_or_none", return_value=receipt), \
+             patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(fake_w3)):
+            self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
 
 
 if __name__ == "__main__":
