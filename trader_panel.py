@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import threading
 import webbrowser
+from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
@@ -406,6 +407,24 @@ class TraderPanel(QWidget):
 
     @staticmethod
     def _format_event(event: dict) -> str:
+        # GEMZ4US, Finding #27 (2026-09-17): no Event Feed line carried its
+        # own timestamp — reconstructing exact timing (e.g. the Max
+        # Drawdown cadence question) meant reading the app's separate
+        # global clock at screenshot time, imprecise once reviewing history
+        # after the fact. engine._emit already stamps every event with
+        # "at" (UTC ISO); just wasn't being shown.
+        body = TraderPanel._format_event_body(event)
+        at = event.get("at")
+        if not at:
+            return body
+        try:
+            ts = datetime.fromisoformat(at).astimezone().strftime("%H:%M:%S")
+        except Exception:
+            return body
+        return f"[{ts}] {body}"
+
+    @staticmethod
+    def _format_event_body(event: dict) -> str:
         etype = event.get("type")
         if etype == "log":
             return f"SYS: {event.get('text', '')}"
@@ -564,6 +583,18 @@ class TraderPanel(QWidget):
         self._feed_layout.setSpacing(3)
         self._feed_layout.addStretch()
         self._feed_scroll.setWidget(feed_inner)
+        # GEMZ4US, Finding #27 (2026-09-17): the previous approach (a
+        # QTimer.singleShot(0, ...) fired once per append, still kept
+        # below as a fallback) intermittently missed — confirmed
+        # independent of any screenshot artifact, e.g. 4 lines added by one
+        # click not scrolling into view until a manual scroll. Reacting to
+        # the scrollbar's own rangeChanged is the reliable Qt idiom: it
+        # fires exactly when Qt recomputes the scrollable area after new
+        # content is laid out, rather than hoping a fixed-delay timer lands
+        # at the right moment relative to that layout pass.
+        self._feed_scroll.verticalScrollBar().rangeChanged.connect(
+            lambda _lo, hi: self._feed_scroll.verticalScrollBar().setValue(hi)
+        )
         root.addWidget(self._feed_scroll, stretch=1)
 
         # Command bar

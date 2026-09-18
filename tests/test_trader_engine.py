@@ -286,5 +286,69 @@ class GasQuoteLogLineTests(unittest.TestCase):
         self.assertIsNone(engine_mod._gas_quote_log_line({}))
 
 
+class ClearHaltTests(unittest.TestCase):
+    """GEMZ4US, Finding #26 (2026-09-17): the only documented way out of a
+    Max Drawdown HALT was RESET LEDGER, which also wipes trade history,
+    P&L, and the watchlist. clear_halt() ("resume" command) clears just
+    the halt gate and rebases the drawdown baseline, leaving everything
+    else untouched."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_not_halted_is_a_no_op(self):
+        result = self.engine.clear_halt()
+        self.assertFalse(result["ok"])
+        self.assertIn("not halted", result["message"])
+
+    def test_clears_halt_and_rebases_paper_baseline_without_wiping_state(self):
+        self.engine.state["halted"] = {"reason": "MAX DRAWDOWN HIT: $-7.66", "at": "2026-09-17T22:00:00+00:00"}
+        self.engine.state["balanceUsd"] = 88.48
+        self.engine.config["watchlist"] = [{"symbol": "LIT", "chain": "ethereum", "address": TOKEN_ADDRESS}]
+        self.engine.state["positions"] = [{
+            "symbol": "LIT", "address": TOKEN_ADDRESS, "chain": "ethereum",
+            "qty": 0.8070, "entryPriceUsd": 4.78, "costUsd": 6.89, "openedAt": "2026-09-17T21:00:00+00:00",
+        }]
+
+        result = self.engine.clear_halt()
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(self.engine.state["halted"])
+        # Trade history, watchlist, and open positions are untouched.
+        self.assertEqual(len(self.engine.config["watchlist"]), 1)
+        self.assertEqual(len(self.engine.state["positions"]), 1)
+        # Baseline rebased to current equity (balance + open position value).
+        self.assertAlmostEqual(self.engine.state["startingBalanceUsd"], self.engine._equity([]))
+
+    def test_start_succeeds_after_clearing_the_halt(self):
+        # start() spawns a real background thread whose first _cycle() can
+        # make real network calls (trending_suggestions on an empty
+        # watchlist) — mock threading.Thread so this stays a unit test of
+        # the halted-gate check, not an integration test of the scan loop.
+        self.engine.state["halted"] = {"reason": "MAX DRAWDOWN HIT: $-7.66", "at": "2026-09-17T22:00:00+00:00"}
+        blocked = self.engine.start()
+        self.assertFalse(blocked["ok"])
+        self.engine.running = False
+        self.engine.clear_halt()
+        with patch.object(engine_mod.threading, "Thread") as mock_thread:
+            resumed = self.engine.start()
+        self.assertTrue(resumed["ok"])
+        mock_thread.assert_called_once()
+        self.engine.running = False
+
+    def test_resume_command_routes_to_clear_halt(self):
+        self.engine.state["halted"] = {"reason": "MAX DRAWDOWN HIT: $-7.66", "at": "2026-09-17T22:00:00+00:00"}
+        result = self.engine.command("resume")
+        self.assertTrue(result["ok"])
+        self.assertIsNone(self.engine.state["halted"])
+
+
 if __name__ == "__main__":
     unittest.main()

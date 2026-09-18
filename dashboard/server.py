@@ -455,7 +455,7 @@ _APP_HTML = """<!DOCTYPE html>
   // placeholder text — so only text actually shaped like a trader command
   // takes that path; anything else reaches Omni normally, trader view open
   // or not.
-  var TRADER_COMMAND_RE = /^\/?(help|scan|sync(\s+positions)?|unwrap(\s+\S+)?|(sell|close)\s+all|(sell|close)\s+\S+|hold\s+\S+|unhold\s+\S+|take[\s-]?profit\s+\S+|buy\s+\S+|adopt\s+\S+|watch\s+\S+|(unwatch|remove)\s+\S+)$/i;
+  var TRADER_COMMAND_RE = /^\/?(help|scan|sync(\s+positions)?|resume|clear halt|unhalt|unwrap(\s+\S+)?|(sell|close)\s+all|(sell|close)\s+\S+|hold\s+\S+|unhold\s+\S+|take[\s-]?profit\s+\S+|buy\s+\S+|adopt\s+\S+|watch\s+\S+|(unwatch|remove)\s+\S+)$/i;
 
   document.getElementById('f').addEventListener('submit', function(e) {
     e.preventDefault();

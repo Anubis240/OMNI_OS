@@ -117,6 +117,7 @@ HELP_TEXT = (
     "remove &lt;TICKER&gt; / unwatch &lt;TICKER&gt; &mdash; drop a token from the watchlist<br>"
     "unwrap [CHAIN] &mdash; live mode only: converts wallet WETH back to native ETH (sell proceeds land as WETH, see help on why). Runs automatically after every live sell whenever the WETH is worth clearly more than its own gas cost &mdash; this is only needed for WETH left over from before, or if an auto-unwrap got skipped as not worth it yet<br>"
     "sync / sync positions &mdash; live mode only: re-check on-chain balances now and close/adjust any position sold or moved outside the app (also runs automatically every scan cycle)<br>"
+    "resume &mdash; clear a HALT (e.g. Max Drawdown hit) and rebase the drawdown baseline to current equity, without wiping trade history/P&amp;L/watchlist. RESET LEDGER remains the way to fully wipe everything and start over<br>"
     "adopt &lt;TICKER&gt;:0xADDR[:0xTXHASH] &mdash; live mode only: record a real on-chain holding the ledger never tracked (a fill that fell through a timeout/RPC hiccup, or a trade made outside the app). With a tx hash, cost basis is exact &mdash; read from that transaction's own ETH spent + gas. Without one, cost basis is approximate &mdash; today's market price, not the real entry price<br>"
     "scan / /scan &mdash; scan right now instead of waiting for the rest of the interval<br>"
     "help / /help &mdash; show this list<br>"
@@ -911,7 +912,7 @@ class TraderEngine:
             if self.running:
                 return self.status()
             if self.state["halted"]:
-                return {"ok": False, "error": "halted: " + self.state["halted"]["reason"] + " — reset to start over"}
+                return {"ok": False, "error": "halted: " + self.state["halted"]["reason"] + ' — "resume" to clear it and keep history, or reset to wipe everything and start over'}
             self.running = True
             self._emit({"type": "log", "text": f"trader started ({'LIVE' if self.armed_live else 'paper'} mode)"})
             self._wake_event.clear()
@@ -965,6 +966,28 @@ class TraderEngine:
         self.config["minLiquidityUsd"] = max(self.config.get("minLiquidityUsd") or 0, MIN_LIQUIDITY_FLOOR_USD)
         self._save_config()
         return self.status()
+
+    def clear_halt(self) -> dict:
+        """Lighter-weight recovery from a HALT (e.g. MAX DRAWDOWN HIT) than
+        RESET LEDGER — GEMZ4US, Finding #26 (2026-09-17): the only
+        documented way out was a full reset that also wipes trade history
+        and the watchlist. This only clears the halt gate and rebases the
+        drawdown baseline to current equity (mirroring what arm_live()
+        already does for LIVE on every arm) so the same cumulative loss
+        doesn't immediately re-trigger it — trade history, P&L, watchlist,
+        and open positions are all left untouched."""
+        if not self.state["halted"]:
+            return {"ok": False, "message": "not halted"}
+        reason = self.state["halted"]["reason"]
+        current_equity = self._equity([])
+        if self.armed_live:
+            self.state["liveStartingEquityUsd"] = current_equity
+        else:
+            self.state["startingBalanceUsd"] = current_equity
+        self.state["halted"] = None
+        self._persist()
+        self._emit({"type": "log", "text": f"halt cleared ({reason}) — drawdown baseline rebased to ${current_equity:.2f}; trade history, P&L, and watchlist kept"})
+        return {"ok": True, "message": f"halt cleared — trader can be started again (baseline rebased to ${current_equity:.2f})"}
 
     def reset(self) -> dict:
         self.stop()
@@ -1295,6 +1318,8 @@ class TraderEngine:
             return self.sell_all()
         if re.match(r"^/?sync(?:\s+positions)?$", lower):
             return self.sync_positions()
+        if re.match(r"^(resume|clear halt|unhalt)$", lower):
+            return self.clear_halt()
 
         m = re.match(r"^unwrap(?:\s+([a-z0-9]+))?$", lower)
         if m:
