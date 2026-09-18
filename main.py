@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import re
 import threading
 import json
@@ -169,6 +170,34 @@ SEND_RESPONSE_TIMEOUT = 30  # see _receive_audio()'s send_tool_response wrap —
                             # than TOOL_CALL_TIMEOUT since this is just a network send on an
                             # already-open session, not arbitrary tool work; a hang here means
                             # the connection is bad, so recovery is a reconnect, not a retry
+CONNECT_TIMEOUT = 30  # see run()'s connection handshake wrap — GEMZ4US 2026-09-17 (Finding
+                      # #48): no timeout existed on the initial client.aio.live.connect()
+                      # handshake at all, so a stalled one left the app stuck in "THINKING"
+                      # forever, with no exception ever raised to trigger the reconnect
+                      # loop's own retry — only a full OS reboot cleared it. Same
+                      # asyncio.wait_for pattern as TOOL_CALL_TIMEOUT/SEND_RESPONSE_TIMEOUT.
+
+
+@contextlib.asynccontextmanager
+async def _connect_with_timeout(connect_cm, timeout: float):
+    """Enters `connect_cm` (an async context manager, e.g.
+    client.aio.live.connect(...)) with a bounded timeout on __aenter__
+    only, yields its result, and forwards the real exception info to
+    connect_cm's own __aexit__ on the way out — exactly what a plain
+    `async with connect_cm:` does, just with entry bounded so an
+    already-connected session can still run indefinitely. If entering
+    times out, __aexit__ is never called (matching normal context-manager
+    semantics: if __aenter__ never completes, there's nothing to exit) —
+    the caller sees a plain asyncio.TimeoutError."""
+    value = await asyncio.wait_for(connect_cm.__aenter__(), timeout=timeout)
+    try:
+        yield value
+    except BaseException:
+        if not await connect_cm.__aexit__(*sys.exc_info()):
+            raise
+    else:
+        await connect_cm.__aexit__(None, None, None)
+
 
 def _load_vault_memory_index() -> str:
     """Reads the index of Claude's memory (the user's 'second brain') from
@@ -1748,39 +1777,53 @@ class JarvisLive:
                 self.ui.set_state("THINKING")
                 config = await self._build_config()
 
-                async with (
-                    client.aio.live.connect(model=self._live_model, config=config) as session,
-                    asyncio.TaskGroup() as tg,
-                ):
-                    self.session        = session
-                    self._loop          = asyncio.get_event_loop()
-                    self.audio_in_queue = asyncio.Queue()
-                    self.out_queue      = asyncio.Queue(maxsize=10)
-                    self._turn_done_event = asyncio.Event()
+                # GEMZ4US 2026-09-17 (Finding #48): this handshake had no
+                # timeout at all — a stalled one left the app stuck in
+                # "THINKING" forever, no exception ever raised to trigger
+                # the reconnect loop's own retry below, so only a full OS
+                # reboot cleared it (survived an app restart, a companion
+                # switch, and a reinstall). _connect_with_timeout bounds
+                # only the handshake itself — an already-connected session
+                # can still run indefinitely.
+                try:
+                    async with (
+                        _connect_with_timeout(
+                            client.aio.live.connect(model=self._live_model, config=config), CONNECT_TIMEOUT
+                        ) as session,
+                        asyncio.TaskGroup() as tg,
+                    ):
+                        self.session        = session
+                        self._loop          = asyncio.get_event_loop()
+                        self.audio_in_queue = asyncio.Queue()
+                        self.out_queue      = asyncio.Queue(maxsize=10)
+                        self._turn_done_event = asyncio.Event()
 
-                    print("[JARVIS] ✅ Connected.")
-                    self.ui.set_state("LISTENING")
-                    # GEMZ4US 2026-09-10: this line fires on every reconnect
-                    # (voice/companion change, a dropped connection, the
-                    # v1.11.1 stuck-send recovery, or any other transient
-                    # error the loop below silently retries after) — not
-                    # just a genuine app restart — but it always read "OMNI-
-                    # OS online.", identical either way. A tester had to
-                    # invent their own workaround (cross-checking this line
-                    # against whether the chat log also got cleared) to tell
-                    # a real restart apart from an in-place reconnect. Now
-                    # says so directly instead of requiring that inference.
-                    self._connection_count += 1
-                    if self._connection_count == 1:
-                        self.ui.write_log("SYS: OMNI-OS online.")
-                    else:
-                        self.ui.write_log(f"SYS: Reconnected (session #{self._connection_count}).")
+                        print("[JARVIS] ✅ Connected.")
+                        self.ui.set_state("LISTENING")
+                        # GEMZ4US 2026-09-10: this line fires on every reconnect
+                        # (voice/companion change, a dropped connection, the
+                        # v1.11.1 stuck-send recovery, or any other transient
+                        # error the loop below silently retries after) — not
+                        # just a genuine app restart — but it always read "OMNI-
+                        # OS online.", identical either way. A tester had to
+                        # invent their own workaround (cross-checking this line
+                        # against whether the chat log also got cleared) to tell
+                        # a real restart apart from an in-place reconnect. Now
+                        # says so directly instead of requiring that inference.
+                        self._connection_count += 1
+                        if self._connection_count == 1:
+                            self.ui.write_log("SYS: OMNI-OS online.")
+                        else:
+                            self.ui.write_log(f"SYS: Reconnected (session #{self._connection_count}).")
 
-                    tg.create_task(self._send_realtime())
-                    tg.create_task(self._listen_audio())
-                    tg.create_task(self._receive_audio())
-                    tg.create_task(self._play_audio())
-                    tg.create_task(self._watch_reconnect())
+                        tg.create_task(self._send_realtime())
+                        tg.create_task(self._listen_audio())
+                        tg.create_task(self._receive_audio())
+                        tg.create_task(self._play_audio())
+                        tg.create_task(self._watch_reconnect())
+                except asyncio.TimeoutError:
+                    self.ui.write_log(f"SYS: connection handshake timed out after {CONNECT_TIMEOUT}s — retrying.")
+                    raise
 
             except Exception as e:
                 # TaskGroup wraps a child task's exception in an
