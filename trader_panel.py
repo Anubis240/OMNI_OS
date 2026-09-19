@@ -406,25 +406,23 @@ class TraderPanel(QWidget):
         threading.Thread(target=_worker, daemon=True).start()
 
     @staticmethod
-    def _format_event(event: dict) -> str:
-        # GEMZ4US, Finding #27 (2026-09-17): no Event Feed line carried its
-        # own timestamp — reconstructing exact timing (e.g. the Max
-        # Drawdown cadence question) meant reading the app's separate
-        # global clock at screenshot time, imprecise once reviewing history
-        # after the fact. engine._emit already stamps every event with
-        # "at" (UTC ISO); just wasn't being shown.
-        body = TraderPanel._format_event_body(event)
-        at = event.get("at")
-        if not at:
-            return body
-        try:
-            ts = datetime.fromisoformat(at).astimezone().strftime("%H:%M:%S")
-        except Exception:
-            return body
-        return f"[{ts}] {body}"
+    def _feed_timestamp() -> str:
+        # GEMZ4US, Finding #27 (2026-09-17), confirmed still partial on
+        # 2026-09-18: an earlier fix added a timestamp inside
+        # _format_event, but that only covers lines built from an engine
+        # event — echoed commands ("> buy ..."), local status text
+        # ("SYS: checking with Seraph…", "SYS: config saved"), and command
+        # results ("OK: bought...") are appended directly as plain text
+        # from UI code and never touched _format_event, so they stayed
+        # unstamped. Moved to a single stamp-at-append-time helper used by
+        # every feed-line entry point below, so it's genuinely "every
+        # line" this time — using wall-clock time at append rather than
+        # each event's own "at" field, since that's the one thing every
+        # entry point actually has in common.
+        return datetime.now().astimezone().strftime("[%H:%M:%S] ")
 
     @staticmethod
-    def _format_event_body(event: dict) -> str:
+    def _format_event(event: dict) -> str:
         etype = event.get("type")
         if etype == "log":
             return f"SYS: {event.get('text', '')}"
@@ -967,7 +965,7 @@ class TraderPanel(QWidget):
 
     def _append_feed_text(self, text: str):
         C = self._C
-        lbl = QLabel(text)
+        lbl = QLabel(self._feed_timestamp() + text)
         lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
@@ -996,7 +994,7 @@ class TraderPanel(QWidget):
         row.setStyleSheet("background: transparent;")
         lay = QHBoxLayout(row)
         lay.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel(text)
+        lbl = QLabel(self._feed_timestamp() + text)
         lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
@@ -1032,7 +1030,7 @@ class TraderPanel(QWidget):
         row.setStyleSheet("background: transparent;")
         lay = QHBoxLayout(row)
         lay.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel(text)
+        lbl = QLabel(self._feed_timestamp() + text)
         lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
