@@ -636,8 +636,14 @@ class TraderPanel(QWidget):
 
         for key, label in _CONFIG_FIELDS:
             lbl = QLabel(label)
-            lbl.setFont(QFont("Segoe UI", 7))
-            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            # GEMZ4US, 2026-09-18 (Part 4/C): field labels here (and the
+            # equivalent Settings submenu labels, same fix applied there)
+            # were TEXT_DIM at 7pt — "difficult to read at a glance even
+            # at close viewing distance." Bumped to TEXT_MED (the
+            # already-established, more-legible mid-gray used elsewhere
+            # for this exact purpose) at 8pt.
+            lbl.setFont(QFont("Segoe UI", 8))
+            lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
             col.addWidget(lbl)
             inp = QLineEdit()
             inp.setFont(QFont("Segoe UI", 8))
@@ -646,8 +652,8 @@ class TraderPanel(QWidget):
             col.addWidget(inp)
 
         chains_lbl = QLabel("Chains (paper scan)")
-        chains_lbl.setFont(QFont("Segoe UI", 7))
-        chains_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; margin-top: 4px;")
+        chains_lbl.setFont(QFont("Segoe UI", 8))
+        chains_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; margin-top: 4px;")
         col.addWidget(chains_lbl)
         for key, info in chains_mod.CHAINS.items():
             cb = QCheckBox(info["name"])

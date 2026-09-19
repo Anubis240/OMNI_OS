@@ -115,7 +115,10 @@ class SettingsPanel(QWidget):
         C = self._C
         lbl = QLabel(label)
         lbl.setFont(QFont("Segoe UI", 8))
-        lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        # GEMZ4US, 2026-09-18 (Part 4/C): "difficult to read at a glance
+        # even at close viewing distance" — same fix applied to the
+        # Trader Config panel's own field labels.
+        lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         lay.addWidget(lbl)
         inp = QLineEdit()
         inp.setPlaceholderText(placeholder)
@@ -221,7 +224,7 @@ class SettingsPanel(QWidget):
         from ui import VOICES, load_saved_voice, NoScrollComboBox  # deferred — see module docstring
         default_voice_lbl = QLabel("Default voice (used when no companion is active)")
         default_voice_lbl.setFont(QFont("Segoe UI", 8))
-        default_voice_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        default_voice_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         lay.addWidget(default_voice_lbl)
         self._default_voice = NoScrollComboBox()
         self._default_voice.addItems(VOICES)
@@ -257,7 +260,7 @@ class SettingsPanel(QWidget):
 
         backend_lbl = QLabel("Interaction mode")
         backend_lbl.setFont(QFont("Segoe UI", 8))
-        backend_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        backend_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         lay.addWidget(backend_lbl)
         from ui import NoScrollComboBox  # deferred — see module docstring
         self._new_companion_backend = NoScrollComboBox()
@@ -281,7 +284,7 @@ class SettingsPanel(QWidget):
         from ui import VOICES  # deferred — see module docstring
         voice_lbl = QLabel("Voice (used only for the Voice interaction mode)")
         voice_lbl.setFont(QFont("Segoe UI", 8))
-        voice_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        voice_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         lay.addWidget(voice_lbl)
         self._new_companion_voice = NoScrollComboBox()
         self._new_companion_voice.addItems(VOICES)
@@ -293,7 +296,7 @@ class SettingsPanel(QWidget):
 
         prompt_lbl = QLabel("System prompt — defines this companion's identity and behavior")
         prompt_lbl.setFont(QFont("Segoe UI", 8))
-        prompt_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        prompt_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         lay.addWidget(prompt_lbl)
         self._new_companion_prompt = QTextEdit()
         self._new_companion_prompt.setFont(QFont("Segoe UI", 9))
@@ -311,7 +314,7 @@ class SettingsPanel(QWidget):
         if servers:
             mcp_lbl = QLabel("MCP tools this companion can use")
             mcp_lbl.setFont(QFont("Segoe UI", 8))
-            mcp_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            mcp_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
             lay.addWidget(mcp_lbl)
             for server in servers:
                 cb = QCheckBox(server["name"])
@@ -864,7 +867,7 @@ class SettingsPanel(QWidget):
             "server's API Key field as {{NAME}} and it's substituted in automatically."
         )
         custom_lbl.setFont(QFont("Segoe UI", 8))
-        custom_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        custom_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         custom_lbl.setWordWrap(True)
         lay.addWidget(custom_lbl)
 
@@ -1058,7 +1061,7 @@ class SettingsPanel(QWidget):
         self._new_skill_name = self._labeled_input(lay, "Name", "e.g. house-style")
         content_lbl = QLabel("Instructions")
         content_lbl.setFont(QFont("Segoe UI", 8))
-        content_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        content_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         lay.addWidget(content_lbl)
         self._new_skill_content = QTextEdit()
         self._new_skill_content.setFont(QFont("Segoe UI", 9))
