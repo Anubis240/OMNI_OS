@@ -805,7 +805,13 @@ class TraderEngine:
             elif move_pct <= -self.config["stopLossPct"]:
                 reason = f"stop-loss {move_pct:.2f}%"
             elif held_hours >= self.config["maxHoldHours"]:
-                reason = f"max hold {held_hours:.1f}h"
+                # GEMZ4US, 2026-09-18 (Finding G): "(max hold 0.3h)" could
+                # be misread as the configured threshold — it's actually
+                # the elapsed hold time at closure, which only lines up
+                # with the next scan cycle after the threshold (evaluated
+                # at scan cadence, same as TP/SL), not the instant it's
+                # crossed. Shows both explicitly now.
+                reason = f"max hold: closed after {held_hours:.1f}h, configured {self.config['maxHoldHours']:g}h"
             if reason:
                 try:
                     self._execute_sell(pos, snap["priceUsd"], reason)
