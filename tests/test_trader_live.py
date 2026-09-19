@@ -128,12 +128,14 @@ class AdoptFromTxTests(unittest.TestCase):
         return w3
 
     def test_no_receipt_returns_none(self):
-        with patch.object(live_mod, "_get_receipt_or_none", return_value=None):
+        with patch.object(live_mod, "_require_contract"), \
+             patch.object(live_mod, "_get_receipt_or_none", return_value=None):
             self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
 
     def test_reverted_returns_none(self):
         receipt = {"status": 0, "gasUsed": 21000, "gasPrice": 1_000_000_000, "logs": []}
-        with patch.object(live_mod, "_get_receipt_or_none", return_value=receipt):
+        with patch.object(live_mod, "_require_contract"), \
+             patch.object(live_mod, "_get_receipt_or_none", return_value=receipt):
             self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
 
     def test_nothing_delivered_to_wallet_returns_none(self):
@@ -141,7 +143,8 @@ class AdoptFromTxTests(unittest.TestCase):
             "status": 1, "gasUsed": 21000, "gasPrice": 1_000_000_000,
             "logs": [_transfer_log(TOKEN_ADDRESS, OTHER_ADDRESS, OTHER_ADDRESS, 500 * 10**18)],
         }
-        with patch.object(live_mod, "_get_receipt_or_none", return_value=receipt):
+        with patch.object(live_mod, "_require_contract"), \
+             patch.object(live_mod, "_get_receipt_or_none", return_value=receipt):
             self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
 
     def test_confirmed_cost_basis_from_tx_value_plus_gas(self):
@@ -178,6 +181,47 @@ class AdoptFromTxTests(unittest.TestCase):
         with patch.object(live_mod, "_get_receipt_or_none", return_value=receipt), \
              patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(fake_w3)):
             self.assertIsNone(live_mod.adopt_from_tx("ethereum", TX_HASH, TOKEN_ADDRESS, OWNER_ADDRESS, 3000.0))
+
+
+class RequireContractTests(unittest.TestCase):
+    """live._require_contract — GEMZ4US, 2026-09-18 (Section A): adopt
+    failed 3/3 times with web3's generic 'is contract deployed correctly
+    and chain synced?' error. Confirmed against web3.py's own source
+    (contract/utils.py) that this fires specifically when a call returns
+    empty data AND the target has no contract bytecode — almost certainly
+    a wallet address used where the token's contract address belongs."""
+
+    def test_passes_silently_when_address_has_code(self):
+        fake_w3 = MagicMock()
+        fake_w3.eth.get_code.return_value = b"\x60\x80\x60\x40"  # some non-empty bytecode
+        with patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(fake_w3)):
+            live_mod._require_contract("ethereum", TOKEN_ADDRESS, OWNER_ADDRESS)  # must not raise
+
+    def test_no_code_matching_owner_gives_wallet_specific_message(self):
+        fake_w3 = MagicMock()
+        fake_w3.eth.get_code.return_value = b""
+        with patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(fake_w3)):
+            with self.assertRaises(RuntimeError) as ctx:
+                live_mod._require_contract("ethereum", OWNER_ADDRESS, OWNER_ADDRESS)
+        self.assertIn("your wallet address, not a contract", str(ctx.exception))
+
+    def test_no_code_not_matching_owner_gives_generic_message(self):
+        fake_w3 = MagicMock()
+        fake_w3.eth.get_code.return_value = b""
+        with patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(fake_w3)):
+            with self.assertRaises(RuntimeError) as ctx:
+                live_mod._require_contract("ethereum", TOKEN_ADDRESS, OWNER_ADDRESS)
+        msg = str(ctx.exception)
+        self.assertIn("has no contract code", msg)
+        self.assertNotIn("your wallet address", msg)
+
+    def test_no_code_without_owner_arg_gives_generic_message(self):
+        fake_w3 = MagicMock()
+        fake_w3.eth.get_code.return_value = b""
+        with patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(fake_w3)):
+            with self.assertRaises(RuntimeError) as ctx:
+                live_mod._require_contract("ethereum", TOKEN_ADDRESS)
+        self.assertIn("has no contract code", str(ctx.exception))
 
 
 if __name__ == "__main__":

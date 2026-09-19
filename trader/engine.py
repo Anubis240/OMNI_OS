@@ -118,7 +118,7 @@ HELP_TEXT = (
     "unwrap [CHAIN] &mdash; live mode only: converts wallet WETH back to native ETH (sell proceeds land as WETH, see help on why). Runs automatically after every live sell whenever the WETH is worth clearly more than its own gas cost &mdash; this is only needed for WETH left over from before, or if an auto-unwrap got skipped as not worth it yet<br>"
     "sync / sync positions &mdash; live mode only: re-check on-chain balances now and close/adjust any position sold or moved outside the app (also runs automatically every scan cycle)<br>"
     "resume &mdash; clear a HALT (e.g. Max Drawdown hit) and rebase the drawdown baseline to current equity, without wiping trade history/P&amp;L/watchlist. RESET LEDGER remains the way to fully wipe everything and start over<br>"
-    "adopt &lt;TICKER&gt;:0xADDR[:0xTXHASH] &mdash; live mode only: record a real on-chain holding the ledger never tracked (a fill that fell through a timeout/RPC hiccup, or a trade made outside the app). With a tx hash, cost basis is exact &mdash; read from that transaction's own ETH spent + gas. Without one, cost basis is approximate &mdash; today's market price, not the real entry price<br>"
+    "adopt &lt;TICKER&gt;:0xTOKEN_ADDR[:0xTXHASH] &mdash; live mode only: record a real on-chain holding the ledger never tracked (a fill that fell through a timeout/RPC hiccup, or a trade made outside the app). 0xTOKEN_ADDR is the TOKEN's own contract address (same as in buy/watch) &mdash; NOT your wallet address, even though the point of this command is recognizing your wallet's holding. With a tx hash, cost basis is exact &mdash; read from that transaction's own ETH spent + gas. Without one, cost basis is approximate &mdash; today's market price, not the real entry price<br>"
     "scan / /scan &mdash; scan right now instead of waiting for the rest of the interval<br>"
     "help / /help &mdash; show this list<br>"
     "anything else &mdash; asks Seraph directly (read-only, cannot trade)<br>"
@@ -1169,6 +1169,18 @@ class TraderEngine:
         ws = (self.wallet_status() if self.wallet_status else None) or {"connected": False}
         if not ws.get("connected"):
             return {"ok": False, "message": "connect a wallet before adopting a position"}
+        # GEMZ4US, 2026-09-18 (Section A): 3/3 real attempts failed with a
+        # generic web3 "is contract deployed correctly" error, confirmed
+        # (against web3.py's own source) to mean the given address has no
+        # contract code at all — almost certainly the wallet address used
+        # where the token's own contract address belongs, an easy mix-up
+        # since the whole point of `adopt` is recognizing a wallet's
+        # holding. Caught here with zero RPC round-trips, ahead of
+        # live.py's own _require_contract (which still guards the
+        # no-tx-hash path and any other wrong address, not just this one).
+        if address.lower() == ws["address"].lower():
+            return {"ok": False, "message": f"adopt {symbol} failed: {address} is your wallet address, not a contract — "
+                                             f'use the TOKEN\'s own contract address (the same kind you\'d use in "buy {symbol}:0xADDR")'}
 
         if tx_hash:
             existing = next((p for p in self.state["livePositions"] if p["symbol"] == symbol), None)

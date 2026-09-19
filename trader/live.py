@@ -153,6 +153,28 @@ def _with_rpc(chain, fn):
     raise RuntimeError(f"all RPC endpoints failed for {chains_mod.resolve(chain)['name']}: {clean_rpc_error(last_err)}")
 
 
+def _require_contract(chain: str | None, address: str, owner_address: str | None = None):
+    """GEMZ4US, 2026-09-18 (Section A): `adopt` failed 3/3 times with web3's
+    generic 'Could not transact with/call contract function, is contract
+    deployed correctly and chain synced?' — confirmed against web3.py's own
+    source (contract/utils.py) that this fires specifically when a call
+    returns empty data AND the target address has no contract bytecode at
+    all (an EOA, most likely). Checking get_code() upfront turns that
+    confusing, generic error into a specific, actionable one — and
+    specifically calls out the single most likely mistake: passing a
+    wallet address (the whole point of `adopt` is recognizing a wallet's
+    holding) where the token's own contract address belongs."""
+    code = _with_rpc(chain, lambda w3: w3.eth.get_code(Web3.to_checksum_address(address)))
+    if code:
+        return
+    if owner_address and address.lower() == owner_address.lower():
+        raise RuntimeError(
+            f"{address} is your wallet address, not a contract — adopt needs the TOKEN's own "
+            f"contract address (the same kind you'd use in \"buy SYMBOL:0xADDR\"), not your wallet's"
+        )
+    raise RuntimeError(f"{address} has no contract code on {chains_mod.resolve(chain)['name']} — check the address is the token's contract, not a wallet")
+
+
 def _eth_usd_price_from_coingecko() -> float:
     res = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd", timeout=10)
     res.raise_for_status()
@@ -186,7 +208,9 @@ def wallet_eth_balance_usd(chain: str | None, address: str, eth_price_usd: float
 
 def token_balance(chain: str | None, token_address: str, owner_address: str) -> float:
     """Real on-chain ERC20 balance in human units — used to reconcile the
-    local position ledger against tokens actually sold/moved outside the app."""
+    local position ledger against tokens actually sold/moved outside the app,
+    and by engine.py's adopt command's no-tx-hash path."""
+    _require_contract(chain, token_address, owner_address)
     contract_fn = lambda w3: w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
     decimals = _with_rpc(chain, lambda w3: contract_fn(w3).functions.decimals().call())
     balance_wei = _with_rpc(chain, lambda w3: contract_fn(w3).functions.balanceOf(Web3.to_checksum_address(owner_address)).call())
@@ -389,7 +413,10 @@ def adopt_from_tx(chain: str | None, tx_hash: str, token_address: str, owner_add
     Omni never initiated or recorded this attempt, so cost comes straight
     from the tx's own ETH value plus the gas it actually paid — not a
     re-derived quote. Returns None if the tx isn't found/confirmed, reverted,
-    or delivered nothing to this wallet."""
+    or delivered nothing to this wallet. Raises if token_address has no
+    contract code at all (see _require_contract) — that's a usage error
+    worth surfacing clearly, not silently treating as "not found"."""
+    _require_contract(chain, token_address, owner_address)
     receipt = _get_receipt_or_none(chain, tx_hash)
     if not receipt or receipt.get("status") == 0:
         return None

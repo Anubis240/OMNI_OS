@@ -162,6 +162,20 @@ class AdoptOneTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("use SYMBOL", result["message"])
 
+    def test_wallet_address_used_as_token_address_is_rejected_with_zero_rpc_calls(self):
+        # GEMZ4US, 2026-09-18 (Section A): 3/3 real attempts failed with a
+        # generic web3 error, confirmed to mean the given address had no
+        # contract code — almost certainly his wallet address used where
+        # the token's contract address belongs. Caught here before any
+        # network call at all.
+        with patch.object(live_mod, "adopt_from_tx") as mock_adopt, \
+             patch.object(live_mod, "token_balance") as mock_balance:
+            result = self.engine.adopt_one(f"STOCKER:{OWNER_ADDRESS}:{TX_HASH}")
+        mock_adopt.assert_not_called()
+        mock_balance.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertIn("your wallet address, not a contract", result["message"])
+
     def test_with_tx_hash_merges_exact_qty_and_cost(self):
         info = {"qty": 23362.0, "priceUsd": 8.0 / 23362.0, "costUsd": 8.0, "txHash": TX_HASH}
         with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
