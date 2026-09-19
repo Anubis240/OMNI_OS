@@ -29,8 +29,26 @@ def ranked_pools(address: str, network: str | None = None) -> list[dict]:
     pools = []
     for p in data.get("data", []):
         at = p.get("attributes", {})
-        base_id = ((p.get("relationships") or {}).get("base_token") or {}).get("data", {}).get("id")
-        side = "base" if base_id == wanted else "quote"
+        rel = p.get("relationships") or {}
+        base_id = ((rel.get("base_token") or {}).get("data") or {}).get("id")
+        quote_id = ((rel.get("quote_token") or {}).get("data") or {}).get("id")
+        # GEMZ4US, 2026-09-18 (Part 3/B): a PAPER FORCE BUY entered at
+        # roughly double the real market price, exactly the failure mode
+        # this module's own header comment already warns about — using
+        # the wrong token's price from a pool. The old logic assumed
+        # "quote" whenever base_id didn't match `wanted`, with no check
+        # that quote_id matched anything either — any mismatch (a
+        # different address-casing convention, a relationship field
+        # GeckoTerminal omits for a given pool, an unrelated listing)
+        # silently returned a confidently-wrong price instead of an
+        # error. Now requires an actual match on one side or the other,
+        # skipping the pool rather than guessing when neither matches.
+        if base_id == wanted:
+            side = "base"
+        elif quote_id == wanted:
+            side = "quote"
+        else:
+            continue
         price = at.get("base_token_price_usd") if side == "base" else at.get("quote_token_price_usd")
         pools.append({
             "poolAddress": at.get("address"),
