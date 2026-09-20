@@ -1228,7 +1228,40 @@ class TraderEngine:
         self.state["lastLiveEquityUsd"] = self._equity([])
         self._persist()
         self._emit({"type": "state", **self.public_state()})
-        return {"ok": True, "message": f"adopted {new_qty:g} {symbol} into the ledger — cost basis {basis_note}"}
+
+        # GEMZ4US, 2026-09-19 (Item A): an adopted position's entry price
+        # is cost-inclusive (same design as Finding #25) and can reflect a
+        # purchase from days earlier — real market movement in that gap
+        # can put it past the configured stop-loss/take-profit the moment
+        # it's adopted, so starting the trader would sell it for real on
+        # the very next scan with no chance to review. Not changing what
+        # TP/SL/adopt actually do (that's a real design question, not
+        # something to unilaterally redefine) — just making sure the user
+        # sees this BEFORE starting the trader, since GEMZ4US's own
+        # workaround (discovering this the hard way, then manually
+        # widening thresholds and keeping the trader stopped) is exactly
+        # what this warning is meant to make unnecessary.
+        warning = ""
+        try:
+            final_pos = next(p for p in self.state["livePositions"] if p["symbol"] == symbol)
+            current_price_usd = market.current_price(address, chain)
+            move_pct = (current_price_usd - final_pos["entryPriceUsd"]) / final_pos["entryPriceUsd"] * 100
+            if move_pct <= -self.config["stopLossPct"]:
+                warning = (f" ⚠ already {move_pct:.2f}% below entry — past your configured stop-loss "
+                           f"(-{self.config['stopLossPct']}%). Starting the trader will sell this on the next "
+                           f"scan for real unless you raise Stop loss % or handle it manually first.")
+                self._emit({"type": "log", "text": f"⚠ adopted {symbol} is already past its stop-loss threshold "
+                                                    f"({move_pct:.2f}% vs -{self.config['stopLossPct']}%) — starting the trader will sell it on the next scan"})
+            elif move_pct >= self.config["takeProfitPct"] and not final_pos.get("held"):
+                warning = (f" Note: already +{move_pct:.2f}% above entry — past your configured take-profit "
+                           f"(+{self.config['takeProfitPct']}%). Starting the trader will sell this on the next "
+                           f"scan unless you \"hold {symbol}\" first.")
+                self._emit({"type": "log", "text": f"adopted {symbol} is already past its take-profit threshold "
+                                                    f"(+{move_pct:.2f}% vs +{self.config['takeProfitPct']}%) — starting the trader will sell it on the next scan unless held"})
+        except Exception:
+            pass  # best-effort warning only — the adopt itself already succeeded
+
+        return {"ok": True, "message": f"adopted {new_qty:g} {symbol} into the ledger — cost basis {basis_note}.{warning}"}
 
     def sync_positions(self) -> dict:
         if not self.armed_live:

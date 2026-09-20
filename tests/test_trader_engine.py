@@ -193,6 +193,62 @@ class AdoptOneTests(unittest.TestCase):
         # not count against the daily trade cap.
         self.assertEqual(self.engine.state["tradesToday"]["count"], 0)
 
+    def test_stop_loss_warning_when_adopted_position_already_underwater(self):
+        # GEMZ4US, 2026-09-19 (Item A): UNI/LIT adopted at a gas-inclusive
+        # entry that already sat ~11%/~5.5% below current market — past
+        # the default 2% stop-loss the moment they were adopted, meaning
+        # starting the trader would have sold them for real immediately.
+        entry_price = 9.554533
+        info = {"qty": 0.217686, "priceUsd": entry_price, "costUsd": 2.08, "txHash": TX_HASH}
+        current_market_price = 8.50  # ~-11% vs entry, well past the 2% default stop-loss
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "adopt_from_tx", return_value=info), \
+             patch.object(engine_mod.market, "current_price", return_value=current_market_price):
+            result = self.engine.adopt_one(f"UNI:{TOKEN_ADDRESS}:{TX_HASH}")
+
+        self.assertTrue(result["ok"])
+        self.assertIn("past your configured stop-loss", result["message"])
+        self.assertIn("11.", result["message"])  # ~-11.03%
+        entries = self.engine.journal_tail(10)
+        self.assertTrue(any("past its stop-loss threshold" in e.get("text", "") for e in entries))
+
+    def test_take_profit_warning_when_adopted_position_already_up_and_not_held(self):
+        entry_price = 1.0
+        info = {"qty": 100.0, "priceUsd": entry_price, "costUsd": 100.0, "txHash": TX_HASH}
+        current_market_price = 1.10  # +10%, past the default 4% take-profit
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "adopt_from_tx", return_value=info), \
+             patch.object(engine_mod.market, "current_price", return_value=current_market_price):
+            result = self.engine.adopt_one(f"UNI:{TOKEN_ADDRESS}:{TX_HASH}")
+
+        self.assertTrue(result["ok"])
+        self.assertIn("past your configured take-profit", result["message"])
+        entries = self.engine.journal_tail(10)
+        self.assertTrue(any("past its take-profit threshold" in e.get("text", "") for e in entries))
+
+    def test_no_warning_when_price_is_within_thresholds(self):
+        entry_price = 1.0
+        info = {"qty": 100.0, "priceUsd": entry_price, "costUsd": 100.0, "txHash": TX_HASH}
+        current_market_price = 1.005  # +0.5% — inside both default 4%/2% thresholds
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "adopt_from_tx", return_value=info), \
+             patch.object(engine_mod.market, "current_price", return_value=current_market_price):
+            result = self.engine.adopt_one(f"UNI:{TOKEN_ADDRESS}:{TX_HASH}")
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("past your configured", result["message"])
+
+    def test_warning_is_best_effort_and_does_not_break_adopt_if_price_lookup_fails(self):
+        info = {"qty": 100.0, "priceUsd": 1.0, "costUsd": 100.0, "txHash": TX_HASH}
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "adopt_from_tx", return_value=info), \
+             patch.object(engine_mod.market, "current_price", side_effect=RuntimeError("no pools")):
+            result = self.engine.adopt_one(f"UNI:{TOKEN_ADDRESS}:{TX_HASH}")
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("past your configured", result["message"])
+        self.assertEqual(len(self.engine.state["livePositions"]), 1)
+
     def test_same_tx_hash_twice_is_rejected(self):
         self.engine.state["livePositions"] = [{
             "symbol": "STOCKER", "address": TOKEN_ADDRESS, "chain": "ethereum",
