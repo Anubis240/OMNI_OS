@@ -483,6 +483,21 @@ _APP_HTML = """<!DOCTYPE html>
   // Seraph's speech frames arrive continuously and get queued for gapless
   // playback regardless of mic state.
   var audioWs = null, audioReady = false;
+  // GEMZ4US, Finding #44 (2026-09-16): "Phone audio" channel slow/unreliable
+  // to establish — needed ~10 manual attempts in a long-running session,
+  // versus near-instant right after a restart. Root cause: unlike the main
+  // /ws channel just above (which retries with backoff on its own), this
+  // socket had NO reconnect logic at all — the original design (see Bug 12
+  // comment below) assumed re-opening it fresh on every mic tap was
+  // sufficient "self-healing", i.e. the user manually retrying via another
+  // tap was the only recovery path. That assumption doesn't hold in
+  // practice on a flaky/waking mobile radio: manual re-taps are far slower
+  // and more irregular than an automatic backoff loop, and each failed
+  // attempt is itself a start/stop recording cycle that can leave a partial
+  // buffer (see MAX_PENDING_MIC_FRAMES below) — plausibly contributing to
+  // Finding #45's merged/garbled flushes too. Give it the same
+  // stability-aware retry-with-backoff the main channel already has.
+  var audioRetryMs = 1000, audioConnectedAt = 0;
   var playCtx = null, nextPlayTime = 0;
   var micCtx = null, micStream = null, micNode = null, micGain = null;
   var recording = false;
@@ -502,8 +517,16 @@ _APP_HTML = """<!DOCTYPE html>
   // phone. Buffering here (bounded, and only while actively recording —
   // stopMic() clears it) instead of dropping preserves exactly that window.
   var pendingMicFrames = [];
-  var MAX_PENDING_MIC_FRAMES = 150;  // ~1-3s of audio depending on device sample rate — generous
-                                      // headroom over a real WSS handshake, not "buffer forever"
+  // GEMZ4US, Finding #45 (2026-09-16): fixed — this cap's own comment always
+  // intended "~1-3s of audio... generous headroom over a real WSS handshake,
+  // not 'buffer forever'", but 150 frames at 2048 samples/16kHz is
+  // 150*2048/16000 = 19.2s, roughly 6-8x that. A silent-accumulation window
+  // that long — across however many manual retries happened while the
+  // channel was down (see Finding #44 above) — is a plausible contributor
+  // to messages arriving merged/garbled rather than as separate utterances.
+  // 24 frames = 24*2048/16000 = 3.072s, matching the top of the originally
+  // stated range.
+  var MAX_PENDING_MIC_FRAMES = 24;
 
   function ensureAudioWs() {
     if (audioWs && (audioWs.readyState === WebSocket.OPEN || audioWs.readyState === WebSocket.CONNECTING)) return;
@@ -511,11 +534,22 @@ _APP_HTML = """<!DOCTYPE html>
     audioWs.binaryType = 'arraybuffer';
     audioWs.onopen  = function() {
       audioReady = true;
+      audioConnectedAt = Date.now();
       voiceStatusEl.textContent = 'voice ready — tap mic to talk';
       for (var i = 0; i < pendingMicFrames.length; i++) audioWs.send(pendingMicFrames[i]);
       pendingMicFrames = [];
     };
-    audioWs.onclose = function() { audioReady = false; voiceStatusEl.textContent = 'voice disconnected'; };
+    audioWs.onclose = function() {
+      audioReady = false;
+      voiceStatusEl.textContent = 'voice disconnected — reconnecting…';
+      // Same stability-aware backoff as the main /ws channel: only reset to
+      // the 1s floor if the connection actually held a while, so a flapping
+      // network doesn't retry forever at the fastest rate.
+      var wasStable = audioConnectedAt && (Date.now() - audioConnectedAt) >= 5000;
+      audioRetryMs = wasStable ? 1000 : Math.min(audioRetryMs * 2, 15000);
+      setTimeout(ensureAudioWs, audioRetryMs);
+    };
+    audioWs.onerror = function() { audioWs.close(); };
     audioWs.onmessage = function(ev) { playChunk(ev.data); };
   }
 
