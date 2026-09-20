@@ -420,5 +420,71 @@ class ClearHaltTests(unittest.TestCase):
         self.assertIsNone(self.engine.state["halted"])
 
 
+class LiveBalanceTests(unittest.TestCase):
+    """GEMZ4US, Finding #41: BALANCE showed "-" in LIVE mode (public_state
+    hardcoded balanceUsd to None whenever armed_live) while EQUITY worked
+    fine. There is a real LIVE analog of PAPER's balanceUsd — the wallet's
+    own uninvested ETH, in USD — mirroring PAPER's equity = balanceUsd +
+    open positions. It's cached on self.state (not fetched fresh in
+    public_state(), which must stay network-call-free for UI polling)."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_arm_live_caches_wallet_balance(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            result = self.engine.arm_live()
+
+        self.assertTrue(result["ok"])
+        self.assertAlmostEqual(self.engine.state["lastLiveBalanceUsd"], 42.5)
+
+    def test_public_state_reports_live_balance_instead_of_none(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+
+        state = self.engine.public_state()
+        self.assertEqual(state["mode"], "live")
+        self.assertAlmostEqual(state["balanceUsd"], 42.5)
+
+    def test_equity_refreshes_cached_balance_on_every_call(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+
+        with patch.object(live_mod, "eth_usd_price", return_value=3200.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=55.0):
+            self.engine._equity([])
+
+        self.assertAlmostEqual(self.engine.state["lastLiveBalanceUsd"], 55.0)
+        self.assertAlmostEqual(self.engine.public_state()["balanceUsd"], 55.0)
+
+    def test_falls_back_to_last_cached_value_when_wallet_disconnected(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+
+        self.engine.wallet_status = lambda: {"connected": False}
+        self.engine._equity([])
+
+        # Wallet unreachable mid-session: keep showing the last known
+        # balance rather than reverting to "-", same fallback lastLiveEquityUsd already gets.
+        self.assertAlmostEqual(self.engine.public_state()["balanceUsd"], 42.5)
+
+    def test_paper_mode_balance_is_unaffected(self):
+        self.engine.state["balanceUsd"] = 94.0
+        state = self.engine.public_state()
+        self.assertEqual(state["mode"], "paper")
+        self.assertAlmostEqual(state["balanceUsd"], 94.0)
+
+
 if __name__ == "__main__":
     unittest.main()

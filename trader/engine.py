@@ -212,6 +212,7 @@ class TraderEngine:
             "liveRealizedPnlUsd": 0,
             "liveStartingEquityUsd": None,
             "lastLiveEquityUsd": None,
+            "lastLiveBalanceUsd": None,
             "tradesToday": {"date": _today(), "count": 0},
             "halted": None,
             "lastEquityUsd": self.config["startingBalanceUsd"],
@@ -662,6 +663,16 @@ class TraderEngine:
             try:
                 eth_price_usd = live_mod.eth_usd_price()
                 eth_bal_usd = live_mod.wallet_equity_usd_across_chains(self._enabled_live_chains(), ws["address"], eth_price_usd)
+                # Finding #41 (GEMZ4US): BALANCE showed "-" in LIVE mode
+                # while EQUITY worked fine. There is a real, meaningful
+                # LIVE analog of PAPER's balanceUsd (cash not tied up in
+                # open positions): the wallet's own uninvested ETH, in
+                # USD, exactly mirroring how PAPER's equity = balanceUsd +
+                # open positions' mark-to-market value below. Cached here
+                # (not looked up fresh in public_state(), which must stay
+                # network-call-free for UI polling) so it refreshes at the
+                # same cadence lastLiveEquityUsd already does.
+                self.state["lastLiveBalanceUsd"] = eth_bal_usd
                 open_usd = 0
                 for pos in self.state["livePositions"]:
                     snap = next((s for s in snaps if s["symbol"] == pos["symbol"]), None)
@@ -901,7 +912,7 @@ class TraderEngine:
         return {
             "running": self.running,
             "mode": "live" if live else "paper",
-            "balanceUsd": None if live else self.state["balanceUsd"],
+            "balanceUsd": self.state["lastLiveBalanceUsd"] if live else self.state["balanceUsd"],
             "startingBalanceUsd": self.state["liveStartingEquityUsd"] if live else self.state["startingBalanceUsd"],
             "equityUsd": self.state["lastLiveEquityUsd"] if live else self.state["lastEquityUsd"],
             "realizedPnlUsd": self.state["liveRealizedPnlUsd"] if live else self.state["realizedPnlUsd"],
@@ -949,6 +960,7 @@ class TraderEngine:
             return {"ok": False, "error": f"could not read wallet balance: {err}"}
         self.state["liveStartingEquityUsd"] = start_equity
         self.state["lastLiveEquityUsd"] = start_equity
+        self.state["lastLiveBalanceUsd"] = eth_bal_usd
         self.armed_live = True
         self._persist()
         live_chain_names = ", ".join(chains_mod.resolve(c)["name"] for c in self._enabled_live_chains()) or "none"
