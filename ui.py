@@ -1867,11 +1867,27 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         # Installed application-wide in __init__ — Enter events land on
         # child widgets (sidebar buttons), which a filter on this window
-        # alone would never see. Only consumes the pending flag once a
-        # tooltip actually shows; an Enter on some tooltip-less widget
-        # along the way (e.g. crossing blank canvas) is ignored rather than
-        # wasting the one pending re-arm.
-        if self._tooltip_rearm_pending and event.type() == QEvent.Type.Enter:
+        # alone would never see.
+        #
+        # GEMZ4US, 2026-09-16 retest (C2, still failing): the arm-on-
+        # ActivationChange mechanism above only covers reactivation that
+        # actually fires a QEvent::ActivationChange — e.g. alt-tab, or a
+        # taskbar click. The reported repro was explicitly "dragging the
+        # cursor across screens, not alt-tabbing": moving the mouse from
+        # another application's window onto this one without ever clicking
+        # it. Windows uses click-to-focus by default (no focus-follows-
+        # mouse), so that motion never activates this window at all — no
+        # ActivationChange ever fires, _tooltip_rearm_pending is never set,
+        # and the fallback below never engages, even though the icon's own
+        # hover-highlight still lights up (that's driven by separate
+        # mouse-tracking, not tooltip display, so it proves the Enter event
+        # itself does reach the widget in this state). So: fall back to
+        # showing the tooltip directly whenever an Enter lands on a
+        # tooltip-bearing widget while this window simply isn't the active
+        # window yet — not just when it just became active a moment ago.
+        # Not one-shot: every such hover gets its tooltip, matching how
+        # hovering behaves once the window is focused.
+        if event.type() == QEvent.Type.Enter and (self._tooltip_rearm_pending or not self.isActiveWindow()):
             if isinstance(obj, QWidget) and self.isAncestorOf(obj) and obj.toolTip():
                 QToolTip.showText(QCursor.pos(), obj.toolTip(), obj)
                 self._tooltip_rearm_pending = False
