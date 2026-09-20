@@ -478,7 +478,20 @@ class _ConnectDialog(QDialog):
         settings = settings_store.load_settings()
         settings.get("integrations", {}).pop(conn_id, None)
         settings_store.save_settings(settings)
-        self.saved.emit(f"{self._entry['name']} disconnected — takes effect on next reconnect.", False)
+        # Finding #42 (GEMZ4US, 2026-09-16): unlike _on_save's banner
+        # above, "takes effect on next reconnect" is genuinely wrong here
+        # — confirmed both by code and by a live functional test. Every
+        # integration's dispatch() (e.g. actions/integrations/github.py)
+        # checks its credential fresh at call time, so removing it here
+        # takes effect on the tool's very next call, mid-session, with no
+        # reconnect involved. GEMZ4US proved this directly: asked Omni to
+        # list GitHub repos ~2 minutes after clicking Disconnect, no
+        # restart, and got "not connected" immediately. (The save/connect
+        # side is different and keeps its own wording — a freshly added
+        # tool's *declaration* genuinely isn't visible to Gemini until the
+        # next reconnect, since _build_config() only runs once per
+        # connection; that's the original bug this phrase exists for.)
+        self.saved.emit(f"{self._entry['name']} disconnected.", False)
         self.accept()
 
     def _open_family_dialog(self, family_entry: dict):
