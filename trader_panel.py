@@ -1269,14 +1269,14 @@ class TraderPanel(QWidget):
     def _on_position_sell_click(self, symbol: str):
         if not any(p["symbol"] == symbol for p in self.engine._positions()):
             return
-        self._append_feed_text(f"&gt; sell {symbol}")
+        self._append_feed_text(f"> sell {symbol}")
         self._add_percent_picker(f"pick how much of {symbol} to sell:", symbol, [25, 50, 75, 100],
                                   lambda sym, pct: self._pick_and_run(lambda: self.engine.sell_one(sym) if pct == 100 else self.engine.partial_sell(sym, pct)))
 
     def _on_position_take_profit_click(self, symbol: str):
         if not any(p["symbol"] == symbol for p in self.engine._positions()):
             return
-        self._append_feed_text(f"&gt; take profit {symbol}")
+        self._append_feed_text(f"> take profit {symbol}")
         self._add_percent_picker(f"pick a percentage of {symbol} to take profit on:", symbol, [10, 20, 25, 50],
                                   lambda sym, pct: self._pick_and_run(lambda: self.engine.partial_sell(sym, pct)))
 
@@ -1337,7 +1337,7 @@ class TraderPanel(QWidget):
     def _on_watchlist_buy_click(self, entry: str):
         # Same gated path a typed "buy SYM:0xADDR" command uses — real
         # Seraph screen, no bypass — just a shortcut for typing it.
-        self._append_feed_text(f"&gt; buy {entry}")
+        self._append_feed_text(f"> buy {entry}")
         self._run_command(f"buy {entry}")
 
     def _on_watchlist_remove_click(self, symbol: str):
@@ -1361,7 +1361,7 @@ class TraderPanel(QWidget):
         if not text:
             return
         self._cmd_input.clear()
-        self._append_feed_text(f"&gt; {text}")
+        self._append_feed_text(f"> {text}")
         self._run_command(text)
 
     def _run_command(self, text: str):
@@ -1441,6 +1441,18 @@ class TraderPanel(QWidget):
                 pass
         partial["chains"] = [k for k, cb in self._chain_checks.items() if cb.isChecked()] or ["ethereum"]
         self.engine.set_config(partial)
+        # GEMZ4US, 2026-09-19 (Item C): the $100,000 Min liquidity $ floor
+        # clamps silently at save — confirmed correct (nothing is lost;
+        # any value under the floor snaps to it), but the Event Feed only
+        # ever showed "config saved" with no indication a value had been
+        # raised, and the panel displays what was typed until save, not
+        # what will actually be applied.
+        requested_liq = partial.get("minLiquidityUsd")
+        if requested_liq is not None and self.engine.config["minLiquidityUsd"] != requested_liq:
+            self._append_feed_text(
+                f"SYS: Min liquidity $ raised to the ${self.engine.config['minLiquidityUsd']:,.0f} minimum "
+                f"(entered {requested_liq:,.0f})"
+            )
         self._load_config_into_ui()
         self._append_feed_text("SYS: config saved")
 
