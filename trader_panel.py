@@ -975,6 +975,12 @@ class TraderPanel(QWidget):
         lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
+        # Finding #40 (GEMZ4US): Event Feed log text couldn't be selected
+        # or copied — a plain QLabel isn't mouse-selectable by default.
+        # Not TextSelectableByKeyboard too: that would pull every one of
+        # these labels into the tab-focus chain, which for a scrolling log
+        # of arbitrarily many lines is worse than the bug it'd fix.
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._feed_layout.insertWidget(self._feed_layout.count() - 1, lbl)
         self._trim_feed()
         self._scroll_feed_to_bottom()
@@ -1004,6 +1010,12 @@ class TraderPanel(QWidget):
         lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
+        # Finding #40 (GEMZ4US): Event Feed log text couldn't be selected
+        # or copied — a plain QLabel isn't mouse-selectable by default.
+        # Not TextSelectableByKeyboard too: that would pull every one of
+        # these labels into the tab-focus chain, which for a scrolling log
+        # of arbitrarily many lines is worse than the bug it'd fix.
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(lbl, stretch=1)
 
         def _tx_button(label: str, cb):
@@ -1040,6 +1052,12 @@ class TraderPanel(QWidget):
         lbl.setFont(QFont("Segoe UI", 8))
         lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         lbl.setWordWrap(True)
+        # Finding #40 (GEMZ4US): Event Feed log text couldn't be selected
+        # or copied — a plain QLabel isn't mouse-selectable by default.
+        # Not TextSelectableByKeyboard too: that would pull every one of
+        # these labels into the tab-focus chain, which for a scrolling log
+        # of arbitrarily many lines is worse than the bug it'd fix.
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(lbl, stretch=1)
 
         url = chains_mod.dexscreener_url(event.get("chain") or chains_mod.DEFAULT_CHAIN, event.get("address") or "")
