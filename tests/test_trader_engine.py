@@ -486,5 +486,57 @@ class LiveBalanceTests(unittest.TestCase):
         self.assertAlmostEqual(state["balanceUsd"], 94.0)
 
 
+class ScanCadenceTests(unittest.TestCase):
+    """GEMZ4US, Item C (2026-09-20): confirmed by exact timestamps across
+    three consecutive scans that the real period between scan starts was
+    cycle_duration + intervalMinutes, not just intervalMinutes -- _loop()
+    only started its wait after _cycle() had already finished. Subtracting
+    the cycle's own elapsed time makes scans start at the configured
+    cadence instead."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_wait_is_reduced_by_the_cycles_own_duration(self):
+        self.engine.config["intervalMinutes"] = 5  # 300s
+        self.engine.running = True
+        captured = {}
+
+        def fake_wait(seconds):
+            captured["seconds"] = seconds
+            self.engine.running = False  # stop after this one iteration
+
+        with patch.object(engine_mod.time, "monotonic", side_effect=[100.0, 145.0]), \
+             patch.object(self.engine, "_cycle", return_value=None), \
+             patch.object(self.engine._wake_event, "wait", side_effect=fake_wait):
+            self.engine._loop()
+
+        self.assertAlmostEqual(captured["seconds"], 300 - 45)
+
+    def test_wait_never_goes_negative_when_the_cycle_outruns_the_interval(self):
+        self.engine.config["intervalMinutes"] = 5  # 300s
+        self.engine.running = True
+        captured = {}
+
+        def fake_wait(seconds):
+            captured["seconds"] = seconds
+            self.engine.running = False
+
+        # Cycle took 400s -- longer than the configured 300s interval.
+        with patch.object(engine_mod.time, "monotonic", side_effect=[100.0, 500.0]), \
+             patch.object(self.engine, "_cycle", return_value=None), \
+             patch.object(self.engine._wake_event, "wait", side_effect=fake_wait):
+            self.engine._loop()
+
+        self.assertEqual(captured["seconds"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

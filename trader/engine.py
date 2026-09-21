@@ -889,6 +889,7 @@ class TraderEngine:
     def _loop(self):
         while self.running:
             self._cycle_busy = True
+            cycle_start = time.monotonic()
             try:
                 self._cycle()
             except Exception as err:
@@ -897,8 +898,19 @@ class TraderEngine:
                 self._cycle_busy = False
             if not self.running:
                 break
+            # GEMZ4US, Item C (2026-09-20): confirmed by exact timestamps
+            # across three consecutive scans — the wait below used to start
+            # fresh after _cycle() already finished, so the real period
+            # between scan starts was cycle_duration + intervalMinutes, not
+            # just intervalMinutes (a ~2min cycle made a "5 min" interval
+            # actually land ~7 min apart) — which also delays when TP/SL/
+            # Max hold get evaluated. Subtracting the cycle's own duration
+            # makes scans start at the configured cadence, clamped to 0 so
+            # a cycle that runs longer than the interval itself just means
+            # back-to-back scans with no wait, not a negative sleep.
             wait_seconds = max(5, self.config["intervalMinutes"]) * 60
-            self._wake_event.wait(wait_seconds)
+            elapsed = time.monotonic() - cycle_start
+            self._wake_event.wait(max(0, wait_seconds - elapsed))
             self._wake_event.clear()
 
     def scan_now(self) -> dict:
