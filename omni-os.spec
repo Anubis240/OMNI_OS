@@ -26,7 +26,13 @@ from PyInstaller.utils.hooks import collect_data_files, collect_all, copy_metada
 
 block_cipher = None
 PROJECT_DIR = Path(SPECPATH)
-APP_VERSION = os.environ.get("APP_VERSION", "1.11.13")
+# GEMZ4US, 2026-09-20: added the VERSION file so the running app can show
+# its own version (core/app_paths.py::get_app_version()) — the default
+# here now reads that same file instead of a separately-bumped literal,
+# so this, the running app's display, and the VERSION file itself can't
+# drift out of sync with each other. installer.iss's AppVersion is still
+# bumped by hand at release time, same as before.
+APP_VERSION = os.environ.get("APP_VERSION") or (PROJECT_DIR / "VERSION").read_text(encoding="utf-8").strip()
 if os.environ.get("CI") and "APP_VERSION" not in os.environ:
     raise RuntimeError("CI must supply validated APP_VERSION")
 if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", APP_VERSION):
@@ -48,6 +54,7 @@ if not (Path(nudenet.__file__).parent / "320n.onnx").is_file():
 binaries = []
 
 datas = [
+    (str(PROJECT_DIR / "VERSION"), "."),
     (str(PROJECT_DIR / "core" / "prompt.txt"), "core"),
     (str(PROJECT_DIR / "core" / "shared_rules.txt"), "core"),
     (str(PROJECT_DIR / "leda_idle_timeline1.mp4"), "."),

@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QTextEdit, QTextBrowser, QToolTip, QVBoxLayout, QWidget, QProgressBar,
 )
 
-from core.app_paths import get_data_dir, get_resource_dir
+from core.app_paths import get_app_version, get_data_dir, get_resource_dir
 
 BASE_DIR   = get_data_dir()
 RESOURCE_DIR = get_resource_dir()
@@ -2133,6 +2133,17 @@ class MainWindow(QMainWindow):
         os_lbl.setFont(QFont("Segoe UI", 8))
         os_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
         ms_lay.addWidget(os_lbl)
+
+        # GEMZ4US, 2026-09-20: no version number shown anywhere in the app —
+        # with a new installer arriving daily, the build had to be
+        # identified from the installer's file name and by behavior.
+        # Static, like os_lbl above — the version can't change mid-session.
+        version = get_app_version()
+        if version:
+            version_lbl = QLabel(f"v{version}")
+            version_lbl.setFont(QFont("Segoe UI", 8))
+            version_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            ms_lay.addWidget(version_lbl)
 
         lay.addWidget(self._status_metrics_section)
 

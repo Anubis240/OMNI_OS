@@ -70,5 +70,24 @@ class AppPathsTests(unittest.TestCase):
                 self.assertEqual(app_paths.get_os_name(), expected)
 
 
+class AppVersionTests(unittest.TestCase):
+    """GEMZ4US, 2026-09-20: no version number shown anywhere in the app —
+    with a new installer arriving daily, the build had to be identified
+    from the installer's file name and by behavior. get_app_version()
+    reads VERSION from get_resource_dir(), the same source
+    omni-os.spec's APP_VERSION default now reads too, so the file, the
+    build, and the running app's own display can't drift apart."""
+
+    def test_reads_and_strips_the_version_file(self):
+        with patch.object(app_paths, "get_resource_dir", return_value=Path("fake-resources")), \
+             patch.object(Path, "read_text", return_value="1.11.13\n"):
+            self.assertEqual(app_paths.get_app_version(), "1.11.13")
+
+    def test_missing_file_returns_empty_string_not_an_exception(self):
+        with patch.object(app_paths, "get_resource_dir", return_value=Path("fake-resources")), \
+             patch.object(Path, "read_text", side_effect=FileNotFoundError()):
+            self.assertEqual(app_paths.get_app_version(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
