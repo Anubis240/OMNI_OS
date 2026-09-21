@@ -141,6 +141,18 @@ Ocorrências de `local_wallet|sign_transaction|from_key|eth_account` **em códig
 
 Bate **exatamente** com §3.1/D27 do plano. Nenhuma ocorrência inesperada.
 
+### W1.P1 pre-flight — DPoP **não bloqueante** ✔
+
+`packages\auth-api\src\index.ts:531-533`:
+```ts
+function isDpopRequired(env: AuthApiEnv): boolean {
+  return env.OAUTH_DPOP_REQUIRED?.trim().toLowerCase() === "true";
+}
+```
+`OAUTH_DPOP_REQUIRED` **não** está definido em `wrangler.toml` (nem em `[vars]` nem em `[env.staging]`). Logo DPoP é **opcional em produção** → **a stop condition (a.2)/Q20 NÃO é acionada**. O `/token` continua intocado.
+
+Outros anchors confirmados: `SUPPORTED_SCOPES` `:86` · `isAllowedRedirectUri` `:282-302` · `scopes_supported` **literal hardcoded** em `:1065` (não derivava de `SUPPORTED_SCOPES` — T5 passou a derivar) · `/authorize/privy` usava `client.redirect_uris.includes(redirectUri)` em `:1325` · router tail `:1660-1697` (plain `export default { fetch }`, **não** Hono) · helpers `generateOpaque(bytesLength=32)` `:146`, `clientIp(request)` `:723` (CF-Connecting-IP), `checkRateLimit(env, scope, limit, windowSeconds)` `:739` (fail-**open**), `rateLimitedResponse(cors, retryAfterSeconds)` `:760`.
+
 ### W0.P1.T9–T12 — [HUMANO] Privy — **PENDENTE / BLOQUEIO B2**
 
 Bloqueiam **W1b** e **W2** (não bloqueiam W1 nem W3). Ver §4 deste log.
@@ -197,7 +209,14 @@ Nenhuma delas altera decisões de arquitetura; o plano permanece válido.
 
 | # | Repo | Hash | Mensagem |
 |---|---|---|---|
-| 1 | `D:\git\OMNI_OS` | _(a preencher)_ | Add Seraph login, API key and Seraph wallet plan with handover and execution log |
+| 1 | `D:\git\OMNI_OS` | `341f6bd` | Add Seraph login, API key and Seraph wallet plan with handover and execution log |
+| 2 | `D:\git\agent-guardian` | `7264e83` | feat(auth-api): enable loopback redirects and /api resource in config |
+| 3 | `D:\git\agent-guardian` | `bb6d848` | test(auth-api): cover loopback redirect helpers and redirectUriMatches |
+| 4 | `D:\git\agent-guardian` | `1ed26f3` | test(auth-api): cover /api resource, new scopes and /client-info |
+
+**Desvio de formato de commit (decisão E3).** `D:\git\agent-guardian` impõe **conventional commits** via husky + commitlint (`subject may not be empty` / `type may not be empty`), além de gitleaks e lint-staged (eslint --fix + prettier --write) no pre-commit. As mensagens imperativas simples do plano são **rejeitadas pelo hook**. Todas as mensagens do plano para esse repo foram convertidas para `type(scope): subject` preservando a semântica. `D:\git\OMNI_OS` não tem esse hook e mantém o formato do plano.
+
+**Desvio de granularidade.** O commit `7264e83` acabou carregando também `src/index.ts` (o `git add` do commit rejeitado anteriormente deixou o arquivo staged). Consequência: as mudanças de config e de código de W1.P1 estão no mesmo commit. Mantido de propósito — a flag `OAUTH_ALLOW_LOOPBACK_REDIRECTS` sem o helper (e vice-versa) é um estado sem sentido, então revertê-las juntas é mais seguro para o rollback de §7, não menos.
 
 ---
 
@@ -215,7 +234,37 @@ _(vazio)_
 
 ## 8. QA findings e correções
 
-_(vazio)_
+### W1.P1 — QA adversarial (feito pelo orquestrador; modelo já é Opus, regra self-as-Opus)
+
+Alvo: `git --no-pager diff f3ebad9..HEAD -- packages/auth-api/src/index.ts src/types.ts wrangler.toml`.
+
+**Corrigido durante a execução**
+
+| # | Achado | Correção |
+|---|---|---|
+| F1 | `POST /client-info` devolvia 405 com `Allow: GET` mas **sem `Cache-Control: no-store`** — o 405 vive no router, fora de `handleClientInfo`, e escapou da regra "toda resposta deste handler é no-store". Detectado por um teste que foi deliberadamente mantido falhando em vez de enfraquecido. | `no-store` adicionado ao 405. Teste verde. |
+
+**Ataques executados e resultado (todos negativos)**
+
+- `http://127.0.0.1.evil.com/cb` → `hostname` ≠ `127.0.0.1` → rejeitado.
+- `http://[::ffff:127.0.0.1]/cb` → `hostname` normaliza para `[::ffff:7f00:1]` ≠ `[::1]` → rejeitado.
+- `http://127.0.0.1@evil.com/cb` → `hostname` = `evil.com` → rejeitado.
+- `http://user@127.0.0.1/cb` → atalho loopback barrado por `username`; cai na lógica legada e falha no allowlist de origens → rejeitado.
+- `http://127.0.0.1:51234/cb#evil` → atalho barrado pelo `hash`; lógica legada rejeita pela origem → rejeitado.
+- `redirectUriMatches("https://claude.ai/cb", "https://claude.ai:8443/cb")` → `false` (a exceção de porta **nunca** vale para https).
+- `redirectUriMatches` com `search`/`pathname` divergentes → `false` (comparação por string exata, sem normalizar ordem de query — conservador de propósito).
+- Troca de `resource` no refresh (`/api` → `/mcp`) → `invalid_target`, `aud` permanece `/api`.
+- Token `/api` continua com `aud` **string**, nunca array.
+- Enumeração de `client_id` via `/client-info`: `client_id` vem de `generateOpaque(32)` (256 bits) + rate limit 60/min/IP → inviável.
+- `/client-info` não entra em `SIWE_LEGACY_ROUTES`, logo não é bloqueado em produção; e está antes do 404 final do router.
+
+**Riscos aceitos / a verificar (não bloqueiam)**
+
+| # | Item | Ação |
+|---|---|---|
+| QA-1 | `scopes_supported` agora anuncia `api-keys:write` e `wallet:execute` para **todos** os clientes DCR (inclusive claude.ai), não só para o Omni-OS. Qualquer cliente pode pedi-los para o resource `/api`. Mitigação: o usuário precisa aprovar no consent screen (W2.P2) e a API key resultante é revogável no console. | Conferir contra §4.7 (threat model) ao chegar em W2.P2; se §4.7 não cobrir, registrar como dívida explícita em §7. |
+| QA-2 | `client_name` devolvido por `/client-info` é texto controlado por quem registrou o cliente (≤256 chars) e será renderizado no consent screen (W2.P2) e no desktop. | Garantir escaping na renderização (React escapa por padrão; validar que não há `dangerouslySetInnerHTML` no caminho). |
+| QA-3 | Em `isLoopbackHttpUrl`, o ramo `host === "::1"` é inalcançável: `new URL` sempre devolve `hostname` com colchetes (`"[::1]"`). Código morto inofensivo, mantido como defesa em profundidade. | Nenhuma. |
 
 ---
 
@@ -225,3 +274,24 @@ _(vazio)_
 |---|---|---|
 | E1 | Interpretador Python = `C:\Users\Marquinho\miniconda3\python.exe` (3.13.11) em vez de `.venv312` | `.venv312` não existe; miniconda tem todas as dependências e a suite baseline passa (201 OK) |
 | E2 | Testes do console via `npx --no-install vitest run` em vez de `pnpm test` | `pnpm test` falha no pré-check de instalação (`ERR_PNPM_IGNORED_BUILDS`), problema de ambiente pré-existente; não alterar o repo por isso |
+| E3 | Conventional commits em `D:\git\agent-guardian` | commitlint no `commit-msg` rejeita as mensagens do plano; formato adaptado preservando a semântica |
+
+---
+
+## 10. Progresso por phase
+
+| Wave.Phase | Estado | Testes | Commits |
+|---|---|---|---|
+| W0.P1 pre-flight global | ✔ concluída (T9–T12 pendentes de humano) | baselines verdes | — |
+| W0.P2 fundação | ✔ concluída | — | `341f6bd` |
+| **W1.P1 auth-api** | ✔ **concluída + QA** | auth-api **44 → 80** (todos verdes; +17 `redirect-uri.test.ts`, +19 em `oauth-privy.test.ts`) | `7264e83`, `bb6d848`, `1ed26f3` |
+| W1.P2 control-plane auto-provision | pendente | — | — |
+| W1.P2b mint + DELETE | pendente | — | — |
+| W1.P3 guardian-proxy metadata | pendente | — | — |
+| W1b (toda) | **bloqueada por B2** | — | — |
+| W1c | **bloqueada por B1** (deploy) | — | — |
+| W2 (console) | **bloqueada por B2** | — | — |
+| W3 (Omni-OS) | pendente (não bloqueada) | — | — |
+| W4, W5 | pendentes | — | — |
+
+**Aceitação de W1.P1** ✔ — `tsc --noEmit` exit 0; `wrangler deploy --dry-run` OK (mostra `OAUTH_ALLOW_LOOPBACK_REDIRECTS ("true")` e `OAUTH_ALLOWED_RESOURCES ("https://seraph.kondux.io/mcp,https://...")`); nenhum teste antigo alterado; **nenhuma mudança em `/token`**; emissão para `/mcp` inalterada.
