@@ -273,8 +273,9 @@ class TraderEngine:
             # cycle() can return early (e.g. empty watchlist) before its own
             # final state emit/equity recompute, so this must self-announce
             # with a fresh equity figure or the UI panel and balance/equity
-            # numbers are left showing the stale ledger.
-            self.state["lastLiveEquityUsd"] = self._equity([])
+            # numbers are left showing the stale ledger. fetch_missing_prices:
+            # runs once per scan cycle, not a hot polling path.
+            self.state["lastLiveEquityUsd"] = self._equity([], fetch_missing_prices=True)
             self._persist()
             self._emit({"type": "state", **self.public_state()})
         else:
@@ -324,7 +325,9 @@ class TraderEngine:
                          "reconciledLate": True, **(pend.get("context") or {})})
         self.state["pendingLiveBuys"] = still_pending
         if changed:
-            self.state["lastLiveEquityUsd"] = self._equity([])
+            # fetch_missing_prices: runs once per scan cycle (or on the
+            # "sync" command), not a hot polling path.
+            self.state["lastLiveEquityUsd"] = self._equity([], fetch_missing_prices=True)
             self._persist()
             self._emit({"type": "state", **self.public_state()})
 
@@ -596,6 +599,12 @@ class TraderEngine:
         if not self.armed_live:
             return
         try:
+            # fetch_missing_prices deliberately left False (the default):
+            # this is polled every few seconds by the phone dashboard, so a
+            # live per-position price fetch here would hammer the price API
+            # on every poll. An off-watchlist position's contribution to
+            # this figure stays at cost until the next scan cycle/adopt/
+            # sync recomputes it with fetch_missing_prices=True instead.
             self.state["lastLiveEquityUsd"] = self._equity([])
         except Exception:
             pass
@@ -655,7 +664,31 @@ class TraderEngine:
 
     # ---------- the cycle ----------
 
-    def _equity(self, snaps: list[dict]) -> float:
+    def _position_mark_price(self, pos: dict, snaps: list[dict], fetch_missing_prices: bool) -> float:
+        """Best-effort mark-to-market price for one open position.
+        Investigating Item J (GEMZ4US, 2026-09-20): EQUITY valued every
+        adopted position at cost, never market — traced to this exact
+        fallback, which always used entryPriceUsd whenever the position
+        had no snap. That's correct behavior for _equity([])'s callers
+        that run on a tight, frequent polling loop (refresh_live_equity(),
+        called on every phone dashboard poll — a real per-position network
+        fetch there would hammer the price API every few seconds) but
+        wrong for the low-frequency, deliberate call sites (end of a scan
+        cycle, adopt, clear_halt, sync), which can afford a live lookup
+        and shouldn't silently under/over-state a position's value.
+        fetch_missing_prices opts a given call into that live lookup,
+        still falling back to cost if the fetch itself fails."""
+        snap = next((s for s in snaps if s["symbol"] == pos["symbol"]), None)
+        if snap:
+            return snap["priceUsd"]
+        if fetch_missing_prices:
+            try:
+                return market.current_price(pos["address"], pos.get("chain"))
+            except Exception:
+                pass
+        return pos["entryPriceUsd"]
+
+    def _equity(self, snaps: list[dict], fetch_missing_prices: bool = False) -> float:
         if self.armed_live:
             ws = (self.wallet_status() if self.wallet_status else None) or {"connected": False}
             if not ws.get("connected"):
@@ -673,21 +706,23 @@ class TraderEngine:
                 # network-call-free for UI polling) so it refreshes at the
                 # same cadence lastLiveEquityUsd already does.
                 self.state["lastLiveBalanceUsd"] = eth_bal_usd
-                open_usd = 0
-                for pos in self.state["livePositions"]:
-                    snap = next((s for s in snaps if s["symbol"] == pos["symbol"]), None)
-                    open_usd += pos["qty"] * (snap["priceUsd"] if snap else pos["entryPriceUsd"])
+                open_usd = sum(
+                    pos["qty"] * self._position_mark_price(pos, snaps, fetch_missing_prices)
+                    for pos in self.state["livePositions"]
+                )
                 return eth_bal_usd + open_usd
             except Exception:
                 return self.state.get("lastLiveEquityUsd") or 0
-        open_usd = 0
-        for pos in self.state["positions"]:
-            snap = next((s for s in snaps if s["symbol"] == pos["symbol"]), None)
-            open_usd += pos["qty"] * (snap["priceUsd"] if snap else pos["entryPriceUsd"])
+        open_usd = sum(
+            pos["qty"] * self._position_mark_price(pos, snaps, fetch_missing_prices)
+            for pos in self.state["positions"]
+        )
         return self.state["balanceUsd"] + open_usd
 
     def _check_stops(self, snaps: list[dict]) -> str | None:
-        eq = self._equity(snaps)
+        # fetch_missing_prices=True: only called from _cycle() (once per
+        # scan, not a hot polling path) — see _position_mark_price.
+        eq = self._equity(snaps, fetch_missing_prices=True)
         start_ref = (self.state.get("liveStartingEquityUsd") if self.state.get("liveStartingEquityUsd") is not None else eq) \
             if self.armed_live else self.state["startingBalanceUsd"]
         pnl = eq - start_ref
@@ -884,7 +919,8 @@ class TraderEngine:
                     self._emit({"type": "log", "text": f"buy {cand['symbol']} failed: {err}"})
             stop = self._check_stops(snaps)
 
-        final_equity = self._equity(snaps)
+        # fetch_missing_prices: end of a scan cycle, not a hot polling path.
+        final_equity = self._equity(snaps, fetch_missing_prices=True)
         if self.armed_live:
             self.state["lastLiveEquityUsd"] = final_equity
         else:
@@ -1030,7 +1066,9 @@ class TraderEngine:
         if not self.state["halted"]:
             return {"ok": False, "message": "not halted"}
         reason = self.state["halted"]["reason"]
-        current_equity = self._equity([])
+        # fetch_missing_prices: a deliberate, low-frequency user action
+        # ("resume"), not a hot polling path.
+        current_equity = self._equity([], fetch_missing_prices=True)
         if self.armed_live:
             self.state["liveStartingEquityUsd"] = current_equity
         else:
@@ -1270,7 +1308,12 @@ class TraderEngine:
             "qty": new_qty, "entryPriceUsd": entry_price_usd, "costUsd": cost_usd,
             "openedAt": _now_iso(), "txHash": tx_hash or "",
         })
-        self.state["lastLiveEquityUsd"] = self._equity([])
+        # Item J (GEMZ4US, 2026-09-20): EQUITY was valuing this and every
+        # other adopted position at cost, never market, since this call
+        # always passed no snaps and previously always fell back to cost.
+        # fetch_missing_prices: a deliberate, one-off user action, not a
+        # hot polling path.
+        self.state["lastLiveEquityUsd"] = self._equity([], fetch_missing_prices=True)
         self._persist()
         self._emit({"type": "state", **self.public_state()})
 

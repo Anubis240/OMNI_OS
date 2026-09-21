@@ -486,6 +486,69 @@ class LiveBalanceTests(unittest.TestCase):
         self.assertAlmostEqual(state["balanceUsd"], 94.0)
 
 
+class PositionMarkPriceTests(unittest.TestCase):
+    """Item J (GEMZ4US, 2026-09-20): EQUITY valued every adopted position
+    at cost, never market, because _equity()'s per-position fallback
+    always used entryPriceUsd whenever no scan snapshot existed for that
+    symbol -- true for every call except the scan loop itself. Fixed via
+    an opt-in fetch_missing_prices flag: on for the low-frequency,
+    deliberate call sites (end of a scan cycle, adopt, clear_halt, sync),
+    off for refresh_live_equity() (polled every few seconds by the phone
+    dashboard -- a live per-position fetch there would hammer the price
+    API on every poll)."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.pos = {"symbol": "LINK", "address": TOKEN_ADDRESS, "chain": "ethereum", "entryPriceUsd": 10.0}
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_uses_the_snap_price_when_available_regardless_of_the_flag(self):
+        snaps = [{"symbol": "LINK", "priceUsd": 12.0}]
+        with patch.object(engine_mod.market, "current_price") as mock_price:
+            price = self.engine._position_mark_price(self.pos, snaps, fetch_missing_prices=True)
+        self.assertAlmostEqual(price, 12.0)
+        mock_price.assert_not_called()  # a snap already answers it — no network call needed
+
+    def test_falls_back_to_cost_when_flag_is_off(self):
+        with patch.object(engine_mod.market, "current_price") as mock_price:
+            price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=False)
+        self.assertAlmostEqual(price, 10.0)
+        mock_price.assert_not_called()
+
+    def test_fetches_live_price_when_flag_is_on_and_no_snap(self):
+        with patch.object(engine_mod.market, "current_price", return_value=8.5) as mock_price:
+            price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        self.assertAlmostEqual(price, 8.5)
+        mock_price.assert_called_once_with(TOKEN_ADDRESS, "ethereum")
+
+    def test_falls_back_to_cost_if_the_live_fetch_itself_fails(self):
+        with patch.object(engine_mod.market, "current_price", side_effect=RuntimeError("boom")):
+            price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        self.assertAlmostEqual(price, 10.0)
+
+    def test_adopt_one_equity_reflects_market_not_cost(self):
+        # Same scenario GEMZ4US reported: LINK adopted at market ($12.55),
+        # itself now worth less ($10) -- EQUITY must move with the market
+        # price, not silently freeze at the adopted cost basis.
+        self.engine.armed_live = True
+        info = {"qty": 0.259318, "priceUsd": 12.550213, "costUsd": 3.26, "txHash": TX_HASH}
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=2.19), \
+             patch.object(live_mod, "adopt_from_tx", return_value=info), \
+             patch.object(engine_mod.market, "current_price", return_value=10.0):
+            result = self.engine.adopt_one(f"LINK:{TOKEN_ADDRESS}:{TX_HASH}")
+
+        self.assertTrue(result["ok"])
+        expected_equity = 2.19 + 0.259318 * 10.0  # balance + market value, not cost ($3.26)
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected_equity, places=4)
+
+
 class ScanCadenceTests(unittest.TestCase):
     """GEMZ4US, Item C (2026-09-20): confirmed by exact timestamps across
     three consecutive scans that the real period between scan starts was
