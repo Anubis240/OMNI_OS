@@ -1406,8 +1406,13 @@ class TraderPanel(QWidget):
 
     def _handle_command_result(self, result: dict):
         if result.get("unrecognized"):
+            # GEMZ4US, Item F (2026-09-20): "ask Seraph directly" sent the
+            # user looking for a way to talk to Seraph, which has no chat
+            # interface at all — it's the backend risk/pricing service
+            # Omni itself consults, not a conversational partner. Omni, in
+            # the main chat, is who can actually answer a general question.
             self._append_feed_text(
-                "SYS: not a trade command — ask Seraph directly for general questions (this command bar can never place a trade)."
+                "SYS: not a trade command — ask Omni directly in the main chat for general questions (this command bar can never place a trade)."
             )
             return
         if result.get("sellPrompt"):

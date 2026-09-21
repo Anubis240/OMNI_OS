@@ -121,7 +121,14 @@ HELP_TEXT = (
     "adopt &lt;TICKER&gt;:0xTOKEN_ADDR[:0xTXHASH] &mdash; live mode only: record a real on-chain holding the ledger never tracked (a fill that fell through a timeout/RPC hiccup, or a trade made outside the app). 0xTOKEN_ADDR is the TOKEN's own contract address (same as in buy/watch) &mdash; NOT your wallet address, even though the point of this command is recognizing your wallet's holding. With a tx hash, cost basis is exact &mdash; read from that transaction's own ETH spent + gas. Without one, cost basis is approximate &mdash; today's market price, not the real entry price<br>"
     "scan / /scan &mdash; scan right now instead of waiting for the rest of the interval<br>"
     "help / /help &mdash; show this list<br>"
-    "anything else &mdash; asks Seraph directly (read-only, cannot trade)<br>"
+    # GEMZ4US, Item F (2026-09-20): "asks Seraph directly" reads as if
+    # typing a general question here gets it answered — Seraph is the
+    # backend risk/pricing service Omni itself consults (see "checking
+    # with Seraph…" during a buy gate check), not something the user can
+    # ever talk to directly. A free-text question here just gets
+    # rejected; the actual conversational partner is Omni, in the main
+    # chat, who may consult Seraph as part of answering.
+    "anything else &mdash; not recognized here; ask Omni directly in the main chat instead (this bar only understands the trade commands above)<br>"
     "add \":CHAIN:\" before the address to buy/watch on another chain, e.g. buy PEPE:base:0x... &mdash; "
     f"supported: {', '.join(chains_mod.CHAINS.keys())} (Ethereum if omitted; paper mode only off-Ethereum, live trading stays Ethereum-only)"
 )
