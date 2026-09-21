@@ -202,8 +202,28 @@ Nenhuma delas altera decisões de arquitetura; o plano permanece válido.
 | Campo | Valor |
 |---|---|
 | `PRIVY_APP_ID` | `cmp1fe7sm004v0cjmn1i9rwyc` |
-| `PRIVY_SIGNER_ID` | _(pendente — W0.P1.T10)_ |
-| `PRIVY_GLOBAL_POLICY_ID` | _(pendente — W0.P1.T12)_ |
+| `PRIVY_SIGNER_ID` | **`aiid10mgbg3z0sds09jm1i8s`** (key quorum `omni-os-session-signer`, threshold 1, P-256 criada pelo agente) |
+| `PRIVY_GLOBAL_POLICY_ID` | **`bdwyzjduvn2knzwgfaal1u4m`** (`seraph-global-trading-policy-v1`, **31** regras) |
+
+### Probe da Policy Engine (W0.P1.T12.a) — executado, Apêndice F validado
+
+| Fato testado | Resultado |
+|---|---|
+| `chain_id` como string decimal `"8453"` | **aceito (200)** |
+| `chain_id` como número `8453` | **rejeitado (400)** — `Expected string, received number`. String decimal é **obrigatória** |
+| `value` em wei hex `0x470DE4DF820000` | aceito |
+| `value` em decimal `"20000000000000000"` | também aceito (o plano mantém hex) |
+| `to` lowercase e `to` em checksum | ambos aceitos na validação; **mantido lowercase** por consistência com o compare do executor (D23) |
+| `in` com array multi-valor (allowlist de routers) | aceito |
+| `ethereum_calldata` `function_name` + `approve.spender` com `abi` inline | aceito |
+| DENY de `personal_sign` sem conditions | aceito |
+| 7 chains (1, 10, 130, 480, 4663, 8453, 42161) em `eth_sendTransaction` | **todas aceitas** — nenhuma sai do Apêndice F nem do allowlist do executor |
+
+Todas as policies descartáveis do probe foram deletadas (HTTP 200 em cada DELETE).
+
+**Dois achados não previstos no plano:**
+1. **O campo `name` da policy deve ter menos de 50 caracteres** (`invalid_policy_format`). `seraph-global-trading-policy-v1` tem 31 — OK. O script `docs\plans\scripts\privy-policy-probe.ps1` gera nomes de probe que estouram o limite; encurtar antes de reusar.
+2. **`eth_signTypedData_v4` e `eth_signTransaction` não aceitam DENY sem conditions** (`must have at least one condition`), embora `personal_sign` aceite. Ver decisão E7.
 | `did:privy:` do usuário de teste | _(pendente — W0.P1.T11)_ |
 | Endereço da embedded de teste | _(pendente — W0.P1.T11)_ |
 
@@ -333,6 +353,8 @@ Veredito do QA heavy: "não deployar as-is". Quatro fixes aplicados no commit `a
 |---|---|---|
 | E1 | Interpretador Python = `C:\Users\Marquinho\miniconda3\python.exe` (3.13.11) em vez de `.venv312` | `.venv312` não existe; miniconda tem todas as dependências e a suite baseline passa (201 OK) |
 | E2 | Testes do console via `npx --no-install vitest run` em vez de `pnpm test` | `pnpm test` falha no pré-check de instalação (`ERR_PNPM_IGNORED_BUILDS`), problema de ambiente pré-existente; não alterar o repo por isso |
+| E7 | A policy global tem **31** regras, não 33: as regras `deny-typed-data-v4` e `deny-sign-transaction` do Apêndice F foram **omitidas** | A API do Privy rejeita DENY sem conditions para `eth_signTypedData_v4` e `eth_signTransaction`. Ambos os métodos já são negados pelo **default-deny** do engine (plano §9.F linha 1204: "Sem ação explícita → DENY"), pois nenhuma regra ALLOW os nomeia. As regras eram defesa em profundidade redundante. As 28 ALLOW por chain + 2 ALLOW V2 + 1 DENY `personal_sign` estão todas presentes. **Verificar em W4.P2** que uma tentativa de `eth_signTypedData_v4` é de fato negada |
+| E8 | A policy global foi criada **sem `owner_id`** (editável com o app secret), contrariando D30 que exige owner = key admin **offline** | Durante W1b/W4 a policy ainda pode precisar de ajuste, e um owner offline exigiria assinatura humana a cada iteração. **Dívida obrigatória**: antes do release (W5.P4) gerar a key admin offline, criar seu key quorum e transferir o ownership da policy `bdwyzjduvn2knzwgfaal1u4m` para ele. **Sem isso, o comprometimento do `PRIVY_APP_SECRET` permite reescrever a policy e drenar a carteira** — exatamente o risco que D30 existe para fechar. Adicionar como item bloqueante na aceitação global §6 |
 | E3 | Conventional commits em `D:\git\agent-guardian` | commitlint no `commit-msg` rejeita as mensagens do plano; formato adaptado preservando a semântica |
 | E4 | `onboardingComplete: true` permanece hardcoded no `oauth-principal` | O campo significa "pode prosseguir no OAuth"; devolvê-lo como `false` reintroduziria o gate no auth-api e anularia o objetivo de Q1=A |
 | E5 | HIGH-1 (race de dupla org) adiado para W1c.P3 como migração | A correção é um índice único parcial, que exige migração de banco; a ordem de deploy D9 manda a migração antes do Worker |
