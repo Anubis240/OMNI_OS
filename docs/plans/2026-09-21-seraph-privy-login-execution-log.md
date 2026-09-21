@@ -345,6 +345,85 @@ Veredito do QA heavy: "não deployar as-is". Quatro fixes aplicados no commit `a
 
 - **Achado investigado, não era bug.** Um token com `aud` terminando em barra (`https://seraph.kondux.io/mcp/`) é **aceito**: `normalizeAudience` em `src/auth/oauth.ts:189-193` canonicaliza os dois lados removendo barras finais, e o auth-api aplica `resource.replace(/\/+$/, "")` antes de emitir — os dois lados concordam por construção. O teste foi reescrito para asserir o comportamento real, com um teste adicional provando que a canonicalização colapsa **barras** e nunca **segmentos de path** (`/api/` continua rejeitado).
 
+### W1.P2b (control-plane, mint/DELETE da API key do desktop)
+
+Arquivos: `lib/oauth-token.ts` (middleware OAuth Ed25519), `lib/api-key-mint.ts` (extração de `mintPgApiKey`), `src/routes/desktop-api-keys.ts` (`POST /`, `DELETE /:id`). **Não montados em `src/index.ts`** — o mount é W1c.P1.
+
+Fixes do QA aplicados:
+
+- **TTL do JWKS 1h → 10 min** e **cooldown de 30 s no refetch por kid-miss.** O refetch rodava *antes* da verificação de assinatura, o que transformava a rota num amplificador não autenticado contra o auth-api: um atacante mandando JWTs com `kid` aleatório forçava um fetch de JWKS por requisição.
+- **`kid` obrigatório** no header do JWT.
+- **Pin opcional de `DESKTOP_CLIENT_ID`** — 403 antes de qualquer query. **Pendência de deploy:** sem essa var no `wrangler.toml` (W1c.P1), *qualquer* cliente DCR pode mintar uma key com `wallet:execute`.
+- **Sufixo do device por SHA-256** em vez de `device_id.slice(0,8)`.
+- **Revogação atinge todas as homônimas ativas** via `UPDATE ... RETURNING`. Não existe unique index em `api_key.name`; duas requisições concorrentes de mint deixavam uma *zombie key* com `wallet:execute` que o botão "Desconectar" não matava.
+- **`createdBy` exigido no replace** e **`organizationId` no WHERE do DELETE.**
+- **Q22 confirmada** — a key do desktop é mintada com `expiresAt: null`; o `catch (isUniqueViolation) → 409 "API key name already exists"` em `api-keys.ts:155-160` é **código morto**.
+
+### W1b.P1 (control-plane, schema da carteira + `/api/wallet/signer-granted`)
+
+Entregue: 4 colunas nullable em `user` (`privy_wallet_id`, `privy_wallet_address`, `signer_granted_at`, `signer_policy_id`) + índice; 3 enums (os primeiros `pgEnum` do arquivo); 3 tabelas (`wallet_gate`, `wallet_execution`, `wallet_daily_spend`); `lib/privy/users.ts`; `src/routes/wallet-signer.ts` (**não montado** — mount é W1c.P1). Migração `0008_breezy_lizard.sql` em `migrations-pg/`.
+
+**BLOCKER do QA — `delegated: true` não prova nada (corrigido em `8367df9`).** O plano mandava confiar no campo `delegated` de `GET /users/{did}`. A spec OpenAPI da Privy prova que ele é `true` para **qualquer** session signer de **qualquer** key quorum do app, com **qualquer** `override_policy_ids` — inclusive vazio. Ou seja: a policy global do Apêndice F, única defesa em profundidade caso o Guardian ou o backend seja comprometido, podia ser **ficção** exatamente nas carteiras que um cliente malicioso preparasse.
+
+Ordem de checagem implementada em `POST /api/wallet/signer-granted`:
+
+```
+503 temporarily_unavailable   ← guard de env vazia (fecha PRIVY_GLOBAL_POLICY_ID = "")
+400 invalid_policy            ← policyId do body é OPCIONAL; se presente precisa bater
+SELECT por privyUserId        ← antes de gastar a quota "heavily rate limited" da Privy
+404 not_provisioned
+503                           ← fetchPrivyUserAccounts falhou
+409 signer_not_delegated
+409 multiple_delegated_wallets ← seleção sticky; >1 match sem sticky é ambiguidade
+503                           ← fetchPrivyWallet falhou
+409 signer_not_bound          ← address divergente OU signer/policy não ligados na Privy
+UPDATE → 404 se 0 linhas
+console.log({evt, userId, addressSuffix: address.slice(-6)})   ← nunca o address completo
+```
+
+`GET /v1/wallets/{id}` (Basic auth + `privy-app-id`, **sem** authorization signature) expõe `owner_id`, `policy_ids[]`, `additional_signers: [{signer_id, override_policy_ids?}]`. `isSignerBoundWithPolicy` exige `signer_id === PRIVY_SIGNER_ID` **e** `(overridePolicyIds ?? policyIds).includes(PRIVY_GLOBAL_POLICY_ID)`. `signerPolicyId` é gravado a partir do que a Privy devolveu, **nunca do body**.
+
+**Premissa de segurança derrubada — a "Carteira Seraph" nunca é exclusivamente nossa.** Os campos `exported_at` e `imported` da spec da Privy provam que o usuário pode **exportar a chave privada da embedded wallet a qualquer momento** e assinar fora da Privy. Qualquer premissa futura de "só sai fundo via Guardian", nonce sequencial ou contabilidade de saldo é **falsa por design**. Não quebra nada do que foi construído; invalida lógica futura desse tipo. **Documentar no PRD de W5.P1.**
+
+**Invariante obrigatória para W1b.P3 (L3 do QA).** O `DELETE /api/wallet/signer-granted` **não revoga nada na Privy** — o backend continua *podendo* assinar; só o nosso flag muda. Logo: **todo caminho de assinatura precisa selecionar `privy_wallet_id` E `signer_granted_at IS NOT NULL` na MESMA query.**
+
+**Sem transação interativa (Q13 do QA).** O driver é `drizzle-orm/neon-http`: não existe `db.transaction` interativo, só `db.batch([...])`. Consequências para W1b.P3: a reserva do cap diário **precisa** ser um único statement `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE ... RETURNING` (reserve-before-sign); o consumo do gate **precisa** ser CAS (`UPDATE wallet_gate SET consumed_at = now() WHERE request_id = $1 AND consumed_at IS NULL AND expires_at > now() AND decision = 'allow' RETURNING`); consume + insert em `wallet_execution` via `db.batch`. **Check-then-write em dois statements = double-spend sob concorrência.**
+
+**`numeric(78,0)` devolve string, não number** (confirmado por teste). O executor precisa validar com `/^(0|[1-9][0-9]*)$/` antes de `BigInt()`. A migração `0008` já adicionou CHECKs de intervalo `[0, 2^256−1]` em `wallet_gate.value_wei` e `wallet_daily_spend.spent_wei` — o limite superior também exclui `NaN`, que o PG aceita em `numeric` e que compara como **maior que qualquer valor**, de modo que um `CHECK >= 0` sozinho não pegaria.
+
+### W1b.P2 (propagação de `userId`: validate-key → TenantInfo → header)
+
+Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**, guardian-proxy 995 → **1004**. Lint limpo nos 2 arquivos tocados.
+
+**SEV-1 CORRIGIDO — `created_by` é proveniência, não o principal que age.** O plano mandava anexar `userId = api_key.created_by` a **todo** tenant de API key. Mas `created_by` responde "quem mintou a key", não "sob a autoridade de quem o portador age". Um admin que minta uma key e entregue a um contractor/CI faria cada `guardian_execute` resolver para o `(orgId, userId)` do admin e assinar com a carteira custodial **do admin**; e o `guardian_wallet_status` vazaria endereço e saldos do admin para o portador. **Fix aplicado:** `userId` só é anexado quando `scopes.includes("wallet:execute")` — o escopo que só as keys de dispositivo (self-service, mintadas pelo próprio usuário no fluxo OAuth) carregam. Filtro aplicado na construção do `CachedTenantRecord`, de modo que cache e tenant ficam consistentes. Isso fecha também o SEV-2 "identidade propaga independentemente dos escopos".
+**Desvio do plano registrado:** W1b.P2.T2 dizia "record → tenant `:547-548` copia `userId`" sem condição de escopo. A condição é um endurecimento, não uma regressão.
+
+**SEV-2 CORRIGIDO — latência de revogação no caminho do dinheiro.** Revogação aqui é *só* por TTL (uma key revogada dá 404 no control-plane e nunca é cacheada, o que torna o ramo `record.revokedAt !== null` inalcançável na prática). Com TTL de 300 s, uma key roubada continuava capaz de assinar por ~5 min. **Fix:** registros que carregam `userId` são gravados com `expirationTtl = 60` (mínimo do KV) em vez de 300. Custo: ~5x mais chamadas a `validate-key` apenas para essas keys.
+
+**SEV-3 CORRIGIDO — leitura pela cadeia de protótipos e `userId` malformado.** O type guard passou a usar `Object.hasOwn` para `v` e `userId` (um primitivo de prototype pollution em qualquer ponto do isolate não pode carimbar um `userId` em todo tenant cacheado) e a validar `userId` com `/^[A-Za-z0-9_-]{1,128}$/` — o que também garante que o valor é seguro como header HTTP (o teste `bad user\r\nid` cobre injeção de CRLF).
+
+**SEV-3 CORRIGIDO — `valid:true` sem `userId` num key com escopo de carteira** agora emite `console.error({evt:"tenant_missing_user_id", apiKeyId})`. `created_by` é NOT NULL, então isso só acontece se o proxy for deployado antes do control-plane ou se a resposta regredir. O tenant fica sem identidade (fail closed), mas deixa de ser invisível.
+
+**Correção de processo:** o subagente havia enfraquecido uma asserção pré-existente (`headers: { "Content-Type": ... }` → `expect.objectContaining(...)`) sem necessidade. Revertida; 41/41 continuaram verdes com a asserção estrita.
+
+#### W1b.P2.T3 — contrato do header para W1b.P5
+
+- **Nome:** `X-Guardian-User-Id`.
+- **Emissor:** guardian-proxy, em `streamable-http.ts`, dentro do literal de headers do `new Request(tenant.targetServerUrl, …)` — o mesmo bloco de `X-Guardian-Org-Id` (`:1032`), `X-Guardian-Plan`, `X-Guardian-Scopes`. Headers de entrada do cliente **não** são copiados para esse Request, então o header não é spoofável.
+- **Presença:** emitido **somente** quando `tenant.userId` existe. Ausência = sem usuário resolvido; o consumidor deve tratar como fail-closed (`user_unresolved`), nunca como "qualquer usuário".
+- **Valor:** o `api_key.created_by` da key, já validado contra `/^[A-Za-z0-9_-]{1,128}$/` no tenant-resolver.
+- **Quem nunca recebe:** tenants OAuth (org-scoped) e API keys sem o escopo `wallet:execute`.
+- **Consumidor:** crypto-mcp (W1b.P4), que repassa `userId`/`orgId` ao executor. A confiança no header depende de o crypto-mcp **não ter rota pública** — verificar `workers_dev`/`routes` no `wrangler.toml` dele no pre-flight de W1b.P4.
+
+**Dívida aberta por este QA (não corrigida nesta phase):**
+
+| Id | Item | Onde resolver |
+|---|---|---|
+| QA-P2-1 | `validate-key` não verifica se o `created_by` ainda é membro ativo da org nem se a conta está viva. Um ex-membro com key não revogada continua validando e agora carrega identidade. Fazer o join em `validate-key` mexeria num caminho de auth quente; o lugar barato e correto é o executor. | W1b.P3 — o executor deve checar membership ativa + conta viva antes de assinar |
+| QA-P2-2 | `lookupFromControlPlane` devolve `null` tanto para "key desconhecida" quanto para "control-plane fora do ar", e ambos viram **401**. Pré-existente, mas o gate de versão o expõe por ~60 s no deploy. Fix: discriminar `{kind:"invalid"\|"unavailable"\|"ok"}` e mapear `unavailable` → 503 + `Retry-After`. | dívida (§7) |
+| QA-P2-3 | Sem singleflight por `keyHash` no isolate: N requisições concorrentes da mesma key = N chamadas a `validate-key`. Ruído na escala atual. | dívida (§7) |
+| QA-P2-4 | `TenantInfo.userId` é opcional em vez de ser uma união discriminada `{principal:"api_key"; userId:string} \| {principal:"oauth"; userId?:never}`. Hoje o invariante OAuth é comentário + teste, não tipo. | dívida (§7) |
+
 ---
 
 ## 9. Decisões aplicadas em execução
@@ -359,6 +438,10 @@ Veredito do QA heavy: "não deployar as-is". Quatro fixes aplicados no commit `a
 | E4 | `onboardingComplete: true` permanece hardcoded no `oauth-principal` | O campo significa "pode prosseguir no OAuth"; devolvê-lo como `false` reintroduziria o gate no auth-api e anularia o objetivo de Q1=A |
 | E5 | HIGH-1 (race de dupla org) adiado para W1c.P3 como migração | A correção é um índice único parcial, que exige migração de banco; a ordem de deploy D9 manda a migração antes do Worker |
 | E6 | `validate-org.ts:76-77` mantém o gate `onboarding_incomplete` | Rota diferente, fora do escopo de W1.P2; o plano só mandou remover o gate do `oauth-principal`. Reavaliar se a rota é usada pelo console |
+| E9 | Smoke real de W4.P2 **adiado** por decisão do usuário ("vou pular o smoke real, eu faço depois") | Falta o item 5 de B2: usuário de teste Privy com embedded wallet e ~0,003 ETH na Base. Registrar como item **aberto** na aceitação §6. Não bloqueia nenhuma phase |
+| E10 | Diretório de migração é **`migrations-pg/`**, não `drizzle/` | O plano (W1b.P1.T2) está errado. Última migração: `0008_breezy_lizard.sql` |
+| E11 | `userId` só é propagado para keys com o escopo `wallet:execute` | Endurecimento sobre o texto de W1b.P2.T2, exigido pelo SEV-1 do QA: `api_key.created_by` é proveniência, não o principal que age. Sem o gate de escopo, uma key de console mintada por um admin faria o portador assinar com a carteira do admin e ler o saldo dela |
+| E12 | Registros de tenant com `userId` são cacheados com `expirationTtl = 60` em vez de 300 | 60 s é o mínimo do Cloudflare KV. Revogação nesse caminho é só por TTL, e 5 min de janela para uma key capaz de assinar é inaceitável |
 
 ---
 
@@ -371,11 +454,18 @@ Veredito do QA heavy: "não deployar as-is". Quatro fixes aplicados no commit `a
 | W1.P1 | ✔ concluída + QA | auth-api 44 → **80** | `7264e83`, `bb6d848`, `1ed26f3` |
 | W1.P2 | ✔ concluída + QA | control-plane +24 nos 3 arquivos tocados | `5f444ac`, `20bbb8a`, `8a4d94b`, `a990002`, `99609d1` |
 | W1.P3 | ✔ concluída | guardian-proxy +23 nos 2 arquivos tocados | `72f2cdc`, `762d107` |
-| W1.P2b | ⏳ próxima | — | — |
-| W1b.* | 🔒 bloqueada por B2 (Privy) | — | — |
-| W2.* | 🔒 bloqueada por B2 (Privy) | — | — |
-| W1c.* | ⏳ aguarda W1.P2b + W1b | — | — |
+| W1.P2b | ✔ concluída + QA | control-plane | `de7ed03`, `d7f5f27`, `8b0d161`, `622ee32`, `a56c4c7` |
+| W1b.P1 | ✔ concluída + QA | control-plane | `ddc594a`, `8002c85`, `fd3ac3f`, `c12410a`, `3f35001`, `8367df9` = **S1b.1** |
+| W1b.P2 | ✔ concluída + QA | CP 1285 → **1289**; GP 995 → **1004** | `62f71a0`, `7c35ec4`, `a327172` = **S1b.2** |
+| W1b.P3 | ⏳ próxima (executor + assinatura Privy) | — | — |
+| W1b.P4, W1b.P5 | ⏳ aguardam S1b.3 / S1b.2 | — | — |
+| W1c.* | ⏳ aguarda W1b | — | — |
+| W2.* | ⏳ desbloqueada (credenciais Privy obtidas) | — | — |
 | W3.* | ⏳ desbloqueada, pode começar | — | — |
 | W4, W5 | pendentes | — | — |
+
+### Baselines de teste corrigidos
+
+O handover registrava 1301 (control-plane) e 1007 (guardian-proxy) ao fim de W1b.P1. Os números reais, medidos pelo orquestrador antes de tocar em qualquer arquivo nesta sessão, eram **1285** e **995**, ambos totalmente verdes. Os valores do handover estavam errados; não havia regressão.
 
 **Aceitação de W1.P1** ✔ — `tsc --noEmit` exit 0; `wrangler deploy --dry-run` OK (mostra `OAUTH_ALLOW_LOOPBACK_REDIRECTS ("true")` e `OAUTH_ALLOWED_RESOURCES ("https://seraph.kondux.io/mcp,https://...")`); nenhum teste antigo alterado; **nenhuma mudança em `/token`**; emissão para `/mcp` inalterada.
