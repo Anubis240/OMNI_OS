@@ -166,10 +166,11 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 TOOL_CALL_TIMEOUT   = 200  # see the try/except around _execute_tool() in _receive_audio() —
                            # generous ceiling above claude_agent's own 180s internal timeout
-SEND_RESPONSE_TIMEOUT = 30  # see _receive_audio()'s send_tool_response wrap — much shorter
-                            # than TOOL_CALL_TIMEOUT since this is just a network send on an
-                            # already-open session, not arbitrary tool work; a hang here means
-                            # the connection is bad, so recovery is a reconnect, not a retry
+SEND_RESPONSE_TIMEOUT = 30  # see _receive_audio()'s send_tool_response wrap, and
+                            # _send_realtime()'s send_realtime_input wrap — much shorter than
+                            # TOOL_CALL_TIMEOUT since both are just a network send on an
+                            # already-open session, not arbitrary tool work; a hang in either
+                            # means the connection is bad, so recovery is a reconnect, not a retry
 CONNECT_TIMEOUT = 30  # see run()'s connection handshake wrap — GEMZ4US 2026-09-17 (Finding
                       # #48): no timeout existed on the initial client.aio.live.connect()
                       # handshake at all, so a stalled one left the app stuck in "THINKING"
@@ -1549,7 +1550,24 @@ class JarvisLive:
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
-            await self.session.send_realtime_input(media=msg)
+            # GEMZ4US, 2026-09-20: this send had no timeout — if it stalls
+            # (a degraded connection that hasn't actually closed yet), it
+            # blocks here forever. Since the mic callback's queue put is a
+            # non-blocking put_nowait() into a maxsize=10 queue, a stuck
+            # send here doesn't just delay this one message: every
+            # subsequent mic frame silently fails to queue (QueueFull,
+            # swallowed by asyncio's default callback-exception handling)
+            # until the queue drains again — voice input goes quiet with no
+            # error the user ever sees. _receive_audio()'s own
+            # RECEIVE_IDLE_TIMEOUT would eventually force a reconnect and
+            # cancel this stuck await too, but only after its own much
+            # longer ceiling — this gives the same recovery, much sooner,
+            # when the send side specifically is what's stuck.
+            try:
+                await asyncio.wait_for(self.session.send_realtime_input(media=msg), timeout=SEND_RESPONSE_TIMEOUT)
+            except asyncio.TimeoutError:
+                self.ui.write_log("SYS: Lost the connection sending voice input — reconnecting.")
+                raise _ReconnectRequested()
 
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
