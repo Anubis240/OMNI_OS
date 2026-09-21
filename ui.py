@@ -2578,6 +2578,14 @@ class MainWindow(QMainWindow):
         if self._integrations_panel is None:
             from integrations_panel import IntegrationsPanel  # deferred: see integrations_panel.py's module docstring
             self._integrations_panel = IntegrationsPanel()
+            # GEMZ4US, Item M (2026-09-20): a freshly connected integration
+            # needs the live session's config re-read to become usable, and
+            # there was no user-accessible way to trigger that short of a
+            # full app restart. Same generic reconnect trigger World Panel/
+            # Settings already use for a companion change — despite the
+            # method's name, it's just a forwarder to main.py's one
+            # reconnect hook, not literally companion-specific.
+            self._integrations_panel.on_integration_changed = self._notify_companions_changed
             self._center_stack.addWidget(self._integrations_panel)
         return self._integrations_panel
 
