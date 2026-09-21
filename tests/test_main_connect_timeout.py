@@ -75,5 +75,51 @@ class ConnectWithTimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cm.aexit_calls, [(None, None, None)])
 
 
+async def _fake_source(items, delay_before_index=None, delay=0):
+    """A minimal async generator standing in for session.receive() — yields
+    `items` in order, optionally pausing for `delay` seconds right before
+    yielding the item at `delay_before_index` (to exercise the idle
+    timeout)."""
+    for i, item in enumerate(items):
+        if delay_before_index is not None and i == delay_before_index:
+            await asyncio.sleep(delay)
+        yield item
+
+
+class IterWithIdleTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    """main.py's _iter_with_idle_timeout — GEMZ4US, 2026-09-20: a voice
+    input got no transcript/reply, then even typed messages got no reply,
+    for ~48 minutes straight until a full restart. Root cause: the Gemini
+    SDK's session.receive() ultimately calls a plain websocket recv() with
+    no timeout of its own — if the server stops producing messages without
+    closing the socket, the receive loop blocks forever. This wraps any
+    async iterable so each individual item wait is bounded."""
+
+    async def test_yields_every_item_when_source_is_fast_enough(self):
+        out = [x async for x in main._iter_with_idle_timeout(_fake_source([1, 2, 3]), timeout=5)]
+        self.assertEqual(out, [1, 2, 3])
+
+    async def test_ends_normally_when_source_is_exhausted(self):
+        # No TimeoutError just because the underlying source is done —
+        # StopAsyncIteration must end the wrapped iteration the same way.
+        count = 0
+        async for _ in main._iter_with_idle_timeout(_fake_source([]), timeout=5):
+            count += 1
+        self.assertEqual(count, 0)
+
+    async def test_raises_timeout_error_when_an_item_is_late(self):
+        source = _fake_source([1, 2, 3], delay_before_index=1, delay=10)
+        collected = []
+        with self.assertRaises(asyncio.TimeoutError):
+            async for item in main._iter_with_idle_timeout(source, timeout=0.05):
+                collected.append(item)
+        self.assertEqual(collected, [1])  # got the first item before the stall
+
+    async def test_does_not_time_out_on_a_slow_but_within_budget_gap(self):
+        source = _fake_source([1, 2], delay_before_index=1, delay=0.02)
+        out = [x async for x in main._iter_with_idle_timeout(source, timeout=5)]
+        self.assertEqual(out, [1, 2])
+
+
 if __name__ == "__main__":
     unittest.main()
