@@ -538,5 +538,77 @@ class ScanCadenceTests(unittest.TestCase):
         self.assertEqual(captured["seconds"], 0)
 
 
+class ExitsCoverOffWatchlistPositionsTests(unittest.TestCase):
+    """Investigating Item J (GEMZ4US, 2026-09-20): a position not on the
+    watchlist never appeared in a scan cycle's snaps, so _cycle()'s exits
+    loop silently `continue`d past it -- no stop-loss, no take-profit, no
+    max-hold, ever, for as long as it stayed off the watchlist. Every
+    position opened via `adopt` is in exactly this state, since
+    adopt_one() never adds one to the watchlist -- directly contradicting
+    its own warning that "starting the trader will sell this on the next
+    scan". Fixed by fetching the position's price directly instead of
+    skipping it. No real network calls: market.snapshot/current_price and
+    live_mod.token_balance are mocked; analyze() is mocked to never
+    propose a buy, since this test isn't exercising that path."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.engine.armed_live = True
+        self.engine.running = True
+        for flag in ("autoDiscoverTrending", "autoDiscoverVolumeSpikes", "autoDiscoverMemeCoins"):
+            self.engine.config[flag] = False
+        self.engine.config["watchlist"] = [{"symbol": "WATCHED", "chain": "ethereum", "address": "0x" + "11" * 20}]
+        self.engine.config["stopLossPct"] = 2
+        self.engine.config["takeProfitPct"] = 1000
+        self.engine.config["maxHoldHours"] = 999
+        self.engine.state["livePositions"] = [
+            {"symbol": "WATCHED", "address": "0x" + "11" * 20, "chain": "ethereum",
+             "qty": 10, "entryPriceUsd": 1.0, "costUsd": 10.0, "openedAt": engine_mod._now_iso()},
+            {"symbol": "ADOPTED", "address": "0x" + "22" * 20, "chain": "ethereum",
+             "qty": 5, "entryPriceUsd": 10.0, "costUsd": 50.0, "openedAt": engine_mod._now_iso()},
+        ]
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run_cycle_with(self, adopted_price_usd):
+        watched_snap = {"symbol": "WATCHED", "address": "0x" + "11" * 20, "chain": "ethereum", "priceUsd": 1.0, "candles": []}
+        sold = []
+
+        def fake_execute_sell(pos, price_usd, reason, *a, **kw):
+            sold.append((pos["symbol"], price_usd, reason))
+
+        with patch.object(live_mod, "token_balance", side_effect=lambda chain, addr, owner: (
+            10 if addr == "0x" + "11" * 20 else 5
+        )), \
+             patch.object(engine_mod.market, "snapshot", return_value=watched_snap), \
+             patch.object(engine_mod.market, "current_price", return_value=adopted_price_usd) as mock_price, \
+             patch.object(engine_mod, "analyze", return_value={"symbol": "WATCHED", "direction": "sell", "score": 0}), \
+             patch.object(self.engine, "_execute_sell", side_effect=fake_execute_sell):
+            self.engine._cycle()
+        return sold, mock_price
+
+    def test_off_watchlist_position_past_stop_loss_is_still_sold(self):
+        # Entry $10, now $5 -- -50%, well past the 2% configured stop-loss.
+        sold, mock_price = self._run_cycle_with(adopted_price_usd=5.0)
+
+        adopted_sales = [s for s in sold if s[0] == "ADOPTED"]
+        self.assertEqual(len(adopted_sales), 1, "adopt_one()'s own warning promises exactly this")
+        _, price_usd, reason = adopted_sales[0]
+        self.assertAlmostEqual(price_usd, 5.0)
+        self.assertIn("stop-loss", reason)
+        mock_price.assert_any_call("0x" + "22" * 20, "ethereum")
+
+    def test_off_watchlist_position_within_bounds_is_not_sold(self):
+        # Entry $10, now $9.90 -- -1%, inside the 2% configured stop-loss.
+        sold, _ = self._run_cycle_with(adopted_price_usd=9.90)
+
+        self.assertEqual([s for s in sold if s[0] == "ADOPTED"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

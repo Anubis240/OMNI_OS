@@ -806,9 +806,26 @@ class TraderEngine:
         # Exits first
         for pos in list(self._positions()):
             snap = next((s for s in snaps if s["symbol"] == pos["symbol"]), None)
-            if not snap:
-                continue
-            move_pct = ((snap["priceUsd"] - pos["entryPriceUsd"]) / pos["entryPriceUsd"]) * 100
+            if snap:
+                price_usd = snap["priceUsd"]
+            else:
+                # Investigating Item J (GEMZ4US, 2026-09-20): a position not
+                # on the watchlist — every position opened via `adopt`,
+                # which never adds one — never appears in this cycle's
+                # snaps, so it was silently skipped here: no stop-loss, no
+                # take-profit, no max-hold, ever, for as long as it stays
+                # off the watchlist. That directly contradicts adopt_one()'s
+                # own warning that "starting the trader will sell this on
+                # the next scan" — it wouldn't have. Fetch its price
+                # directly instead of skipping it; this only runs for
+                # positions the broader scan didn't already cover, so it
+                # doesn't add a per-cycle cost proportional to watchlist size.
+                try:
+                    price_usd = market.current_price(pos["address"], pos.get("chain"))
+                except Exception as err:
+                    self._emit({"type": "log", "text": f"skip {pos['symbol']} (not on watchlist, price lookup failed): {err}"})
+                    continue
+            move_pct = ((price_usd - pos["entryPriceUsd"]) / pos["entryPriceUsd"]) * 100
             held_hours = (time.time() - datetime.fromisoformat(pos["openedAt"]).timestamp()) / 3600
             reason = None
             if move_pct >= self.config["takeProfitPct"] and not pos.get("held"):
@@ -829,7 +846,7 @@ class TraderEngine:
                 reason = f"max hold: closed after {held_hours:.2f}h, configured {self.config['maxHoldHours']:.2f}h"
             if reason:
                 try:
-                    self._execute_sell(pos, snap["priceUsd"], reason)
+                    self._execute_sell(pos, price_usd, reason)
                 except Exception as err:
                     self._emit({"type": "log", "text": f"sell {pos['symbol']} failed: {err}"})
 
