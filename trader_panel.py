@@ -657,7 +657,10 @@ class TraderPanel(QWidget):
         col.addWidget(chains_lbl)
         for key, info in chains_mod.CHAINS.items():
             cb = QCheckBox(info["name"])
-            cb.setFont(QFont("Segoe UI", 7))
+            # GEMZ4US, Item E (2026-09-20): still 7pt after the field-label
+            # contrast fix above (Part 4/C) was applied — same colour as
+            # the input values already, just smaller. Matched to 8pt.
+            cb.setFont(QFont("Segoe UI", 8))
             cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             self._chain_checks[key] = cb
             col.addWidget(cb)
