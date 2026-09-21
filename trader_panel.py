@@ -1449,6 +1449,8 @@ class TraderPanel(QWidget):
 
     def _on_save_config(self):
         partial = {}
+        rejected = []  # GEMZ4US, Item A (2026-09-20): see the notice below
+        field_labels = dict(_CONFIG_FIELDS)
         for key, inp in self._config_inputs.items():
             raw = inp.text().strip()
             if raw == "":
@@ -1456,7 +1458,7 @@ class TraderPanel(QWidget):
             try:
                 partial[key] = float(raw) if "." in raw else int(raw)
             except ValueError:
-                pass
+                rejected.append((key, raw))
         partial["chains"] = [k for k, cb in self._chain_checks.items() if cb.isChecked()] or ["ethereum"]
         self.engine.set_config(partial)
         # GEMZ4US, 2026-09-19 (Item C): the $100,000 Min liquidity $ floor
@@ -1467,9 +1469,22 @@ class TraderPanel(QWidget):
         # what will actually be applied.
         requested_liq = partial.get("minLiquidityUsd")
         if requested_liq is not None and self.engine.config["minLiquidityUsd"] != requested_liq:
+            # 2026-09-20 (Item B): a forced ",.0f" here printed "entered
+            # 50,000" for a typed "50000" with no comma at all — a reader
+            # could mistake it for the comma-input case just below, which
+            # is silently ignored rather than clamped. Plain formatting so
+            # the two cases can no longer look identical.
             self._append_feed_text(
                 f"SYS: Min liquidity $ raised to the ${self.engine.config['minLiquidityUsd']:,.0f} minimum "
-                f"(entered {requested_liq:,.0f})"
+                f"(entered {requested_liq:.0f})"
+            )
+        # GEMZ4US, Item A (2026-09-20): every Config field silently ignored
+        # unparseable input (a comma, a "K" suffix, ...) and kept its
+        # previous value, with nothing in the Event Feed to say so — asked
+        # directly whether a rejection notice was wanted; answer was yes.
+        for key, raw in rejected:
+            self._append_feed_text(
+                f'SYS: {field_labels.get(key, key)} — could not read "{raw}", kept previous value {self.engine.config.get(key)}'
             )
         self._load_config_into_ui()
         self._append_feed_text("SYS: config saved")

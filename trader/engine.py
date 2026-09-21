@@ -822,7 +822,11 @@ class TraderEngine:
                 # with the next scan cycle after the threshold (evaluated
                 # at scan cadence, same as TP/SL), not the instant it's
                 # crossed. Shows both explicitly now.
-                reason = f"max hold: closed after {held_hours:.1f}h, configured {self.config['maxHoldHours']:g}h"
+                # GEMZ4US, Item H (2026-09-20): held_hours had one decimal
+                # while maxHoldHours (:g) had as many as the config value
+                # itself needed — e.g. "0.4h, configured 0.25h", making the
+                # two awkward to compare at a glance. Two decimals for both.
+                reason = f"max hold: closed after {held_hours:.2f}h, configured {self.config['maxHoldHours']:.2f}h"
             if reason:
                 try:
                     self._execute_sell(pos, snap["priceUsd"], reason)
