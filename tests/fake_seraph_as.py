@@ -10,10 +10,12 @@ expire_access records all issued JWT jtis in expired_access_jtis; Part B must
 consult that set in addition to JWT exp. Newly issued tokens remain valid.
 """
 
+import asyncio
 import base64
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import ipaddress
 import json
 from pathlib import Path
@@ -23,16 +25,44 @@ import shutil
 import tempfile
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 import requests
 import uvicorn
+
+
+CAP_TX_WEI = 20_000_000_000_000_000
+CAP_DAY_WEI = 200_000_000_000_000_000
+MAX_TX_PER_DAY = 20
+GATE_TTL_MS = 180_000
+SELECTOR_APPROVE = "0x095ea7b3"
+SELECTOR_WETH_WITHDRAW = "0x2e1a7d4d"
+SELECTOR_V3_EXACT_INPUT_SINGLE = "0x04e45aaf"
+SELECTOR_V2_BUY = "0x7ff36ab5"
+SELECTOR_V2_SELL = "0x18cbafe5"
+FAKE_CHAINS = {
+    1: {"v3": "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45", "v2": "0x7a250d5630b4cf539739df2c5dacb4c659f2488d", "weth": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"},
+    10: {"v3": "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45", "v2": None, "weth": "0x4200000000000000000000000000000000000006"},
+    130: {"v3": "0x73855d06de49d0fe4a9c42636ba96c62da12ff9c", "v2": None, "weth": "0x4200000000000000000000000000000000000006"},
+    480: {"v3": "0x091ad9e2e6e5ed44c1c66db50e49a601f9f36cf6", "v2": None, "weth": "0x4200000000000000000000000000000000000006"},
+    4663: {"v3": "0xcaf681a66d020601342297493863e78c959e5cb2", "v2": None, "weth": "0x0bd7d308f8e1639fab988df18a8011f41eacad73"},
+    8453: {"v3": "0x2626664c2603336e57b271c5c0b26f421741e481", "v2": None, "weth": "0x4200000000000000000000000000000000000006"},
+    42161: {"v3": "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45", "v2": None, "weth": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"},
+}
+
+
+def _jcs(value):
+    """RFC 8785 subset: ASCII keys only, no floats. Code-point ordering of
+    ASCII keys is identical to JCS's UTF-16 ordering."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _generate_self_signed_cert(tmpdir: Path) -> tuple[Path, Path]:
@@ -81,8 +111,19 @@ class FakeSeraph:
         self._api_keys: dict[str, dict] = {}
         self._signer = {"address": None, "granted_at": None, "external": None}
         self._mint_failure: int | None = None
+        self._gates: dict = {}
+        self._executions: dict = {}
+        self._daily: dict = {}
+        self._privy_idem: dict = {}
+        self._privy_delay_ms: int = 0
+        self._internal_secret: str = "fake-internal-secret"
+        self._corrupt_privy_signature: bool = False
+        self._privy_auth_key = ec.generate_private_key(ec.SECP256R1())
+        self._privy_auth_pub = self._privy_auth_key.public_key()
+        self._wrong_auth_key = ec.generate_private_key(ec.SECP256R1())
         self._install_auth_routes()
         self._install_control_plane_routes()
+        self._install_wallet_routes()
 
     @property
     def base_url(self) -> str:
@@ -452,5 +493,292 @@ class FakeSeraph:
             return {"status": status}
 
 
-# PARTE B2: wallet executor + fake Privy.
+    @property
+    def internal_secret(self) -> str:
+        return self._internal_secret
+
+    def gates(self) -> dict:
+        return deepcopy(self._gates)
+
+    def executions(self) -> dict:
+        return deepcopy(self._executions)
+
+    def privy_signature_public_key_pem(self) -> str:
+        return self._privy_auth_pub.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
+
+    def _require_internal(self, request: Request) -> None:
+        if not hmac.compare_digest(request.headers.get("X-Internal-Secret", "").encode(),
+                                   self._internal_secret.encode()):
+            raise HTTPException(401, detail={"error": "unauthorized"})
+
+    @staticmethod
+    def _gate_update(data: dict) -> dict:
+        if (not all(isinstance(data.get(k), str) and data[k] for k in ("orgId", "userId"))
+                or data.get("decision") not in ("allow", "warn", "block", "unknown", "pending")
+                or any(type(data.get(k)) is not int for k in ("decidedAt", "expiresAt"))
+                or (data.get("reason") is not None and not isinstance(data["reason"], str))):
+            raise ValueError("invalid gate update")
+        return {"decision": data["decision"], "reason": data.get("reason"),
+                "decidedAt": data["decidedAt"],
+                "expiresAt": min(data["expiresAt"], int(time.time() * 1000) + GATE_TTL_MS)}
+
+    def _call_fake_privy(self, wallet_id, tx, chain_id, idempotency_key, reference_id):
+        if self._privy_delay_ms > 0:
+            return None
+        url = f"{self.base_url}/v1/wallets/{wallet_id}/rpc"
+        body = {"method": "eth_sendTransaction", "caip2": f"eip155:{chain_id}",
+                "params": {"transaction": tx}, "reference_id": reference_id}
+        headers = {"privy-app-id": "fake-app", "privy-idempotency-key": idempotency_key}
+        payload = {"version": 1, "method": "POST", "url": url,
+                   "body": body, "headers": headers.copy()}
+        key = self._wrong_auth_key if self._corrupt_privy_signature else self._privy_auth_key
+        signature = key.sign(_jcs(payload).encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+        headers.update({"Authorization": "Basic ZmFrZTpmYWtl",
+                        "privy-authorization-signature": base64.b64encode(signature).decode("ascii")})
+        with self.client_session() as session:
+            return session.post(url, json=body, headers=headers, timeout=10)
+
+    async def _submit_execution(self, record: dict) -> dict:
+        if record.get("in_flight"):
+            return {"ok": False, "code": "execution_pending"}
+        record["in_flight"] = True
+        try:
+            # requests runs off the event loop so this server can handle its own RPC.
+            response = await asyncio.to_thread(
+                self._call_fake_privy, record["wallet_id"], record["tx"],
+                record["chainId"], record["idempotency_key"], record["requestId"])
+        except requests.RequestException:
+            # Ambiguous transport failures retain the reservation and idempotency key.
+            return {"ok": False, "code": "execution_pending"}
+        finally:
+            record["in_flight"] = False
+        if response is None or response.status_code >= 500:
+            return {"ok": False, "code": "execution_pending"}
+        if 400 <= response.status_code < 500:
+            record.update(status="failed", code="privy_rejected")
+            daily = self._daily[record["daily_key"]]
+            daily["spent_wei"] -= record["valueWei"]
+            daily["tx_count"] -= 1
+            return {"ok": False, "code": "privy_rejected"}
+        record.update(status="submitted", txHash=response.json()["data"]["hash"])
+        return {"ok": True, "txHash": record["txHash"], "chainId": record["chainId"]}
+
+    def _install_wallet_routes(self) -> None:
+        @self.app.post("/api/internal/wallet/gate")
+        async def gate(request: Request):
+            self._require_internal(request)
+            try:
+                data = await request.json()
+                update = self._gate_update(data)
+                rid, payload = data["requestId"], data["payload"]
+                if (not isinstance(rid, str) or not 8 <= len(rid) <= 128
+                        or data.get("kind") not in ("swap", "approve", "withdraw")):
+                    raise ValueError("invalid gate")
+                chain = payload["chainId"]
+                if not (type(chain) is int or isinstance(chain, str) and re.fullmatch(r"[0-9]+", chain)):
+                    raise ValueError("invalid chain")
+                for name in ("to", "from"):
+                    if not isinstance(payload[name], str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", payload[name]):
+                        raise ValueError("invalid address")
+                calldata, value = payload["callData"], payload["value"]
+                if not isinstance(calldata, str) or not re.fullmatch(r"0x([0-9a-fA-F]{2})*", calldata):
+                    raise ValueError("invalid calldata")
+                if type(value) is int:
+                    value = str(value)
+                if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9]+|0x[0-9a-fA-F]+)", value):
+                    raise ValueError("invalid value")
+                immutable = {"orgId": data["orgId"], "userId": data["userId"], "kind": data["kind"],
+                             "chainId": int(chain), "to": payload["to"].lower(),
+                             "from": payload["from"].lower(), "callData": calldata.lower(),
+                             "valueWei": str(int(value, 16 if value.startswith("0x") else 10))}
+            except (ValueError, TypeError, KeyError, AttributeError):
+                return self._error("invalid_request")
+            old = self._gates.get(rid)
+            if old is not None:
+                if old["consumed_at"] is not None or any(old[k] != v for k, v in immutable.items()):
+                    return self._error("gate_conflict", 409)
+                old.update(update)
+            else:
+                self._gates[rid] = {"requestId": rid, **immutable, **update, "consumed_at": None}
+            self._stats["gates"] += 1
+            return Response(status_code=204)
+
+        @self.app.patch("/api/internal/wallet/gate/{requestId}")
+        async def patch_gate(requestId: str, request: Request):
+            self._require_internal(request)
+            try:
+                data = await request.json()
+                update = self._gate_update(data)
+            except (ValueError, TypeError, AttributeError):
+                return self._error("invalid_request")
+            old = self._gates.get(requestId)
+            if (old is None or old["consumed_at"] is not None or old["kind"] != "swap"
+                    or old["decision"] != "pending"
+                    or any(old[k] != data[k] for k in ("orgId", "userId"))):
+                return self._error("gate_not_found", 404)
+            old.update(update)
+            return Response(status_code=204)
+
+        @self.app.post("/api/internal/wallet/execute")
+        async def execute(request: Request):
+            self._stats["executes"] += 1
+            self._require_internal(request)
+            try:
+                data = await request.json()
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            def fail(code):
+                return {"ok": False, "code": code}
+            if not isinstance(data.get("userId"), str) or not data["userId"]:
+                return fail("user_unresolved")
+            if not self._signer or not self._signer.get("address") or not self._signer.get("granted_at"):
+                return fail("signer_not_granted")
+            rid = data.get("requestId")
+            gate = self._gates.get(rid) if isinstance(rid, str) else None
+            if gate is None:
+                return fail("gate_not_found")
+            if any(gate[k] != data.get(k) for k in ("orgId", "userId")):
+                return fail("gate_owner_mismatch")
+            record = self._executions.get(rid)
+            if record is not None:
+                if record["status"] == "submitted":
+                    return {"ok": True, "txHash": record["txHash"], "chainId": record["chainId"]}
+                if record["status"] == "failed":
+                    return fail(record["code"])
+                # Clearing the simulated delay resumes the SAME reserved execution
+                # with the SAME idempotency key, without consuming/reserving again.
+                if self._privy_delay_ms > 0:
+                    return fail("execution_pending")
+                return await self._submit_execution(record)
+            if gate["decision"] != "allow":
+                return fail("gate_not_allowed")
+            now = int(time.time() * 1000)
+            if gate["expiresAt"] <= now:
+                return fail("gate_expired")
+            if gate["consumed_at"] is not None:
+                return fail("gate_consumed")
+            gate["consumed_at"] = now
+            address, chain_id = gate["from"].lower(), gate["chainId"]
+            if address != self._signer["address"].lower():
+                return fail("wallet_mismatch")
+            chain = FAKE_CHAINS.get(chain_id)
+            if chain is None:
+                return fail("chain_not_allowed")
+            value = int(gate["valueWei"])
+            if value > CAP_TX_WEI:
+                return fail("cap_tx_exceeded")
+            calldata, to = gate["callData"], gate["to"]
+            selector = calldata[:10]
+            if gate["kind"] == "approve":
+                allowed = (selector == SELECTOR_APPROVE and value == 0 and len(calldata) == 138
+                           and calldata[10:34] == "0" * 24
+                           and "0x" + calldata[34:74] in (chain["v3"], chain["v2"]))
+            elif gate["kind"] == "withdraw":
+                allowed = (selector == SELECTOR_WETH_WITHDRAW and value == 0
+                           and len(calldata) == 74 and to == chain["weth"])
+            else:
+                allowed = ((selector == SELECTOR_V3_EXACT_INPUT_SINGLE and to == chain["v3"])
+                           or (selector in (SELECTOR_V2_BUY, SELECTOR_V2_SELL)
+                               and chain["v2"] is not None and to == chain["v2"]))
+            if not allowed:
+                return fail("calldata_not_allowed")
+            daily_key = (address, datetime.now(timezone.utc).date().isoformat())
+            daily = self._daily.setdefault(daily_key, {"spent_wei": 0, "tx_count": 0})
+            if daily["spent_wei"] + value > CAP_DAY_WEI or daily["tx_count"] >= MAX_TX_PER_DAY:
+                return fail("cap_day_exceeded")
+            daily["spent_wei"] += value
+            daily["tx_count"] += 1
+            record = {"requestId": rid, "status": "pending", "chainId": chain_id,
+                      "daily_key": daily_key, "valueWei": value, "wallet_id": "fake-wallet",
+                      "idempotency_key": rid,
+                      "tx": {"chain_id": chain_id, "from": address, "to": to,
+                             "data": calldata, "value": hex(value)}}
+            self._executions[rid] = record
+            return await self._submit_execution(record)
+
+        @self.app.get("/api/internal/wallet/status")
+        async def wallet_status(request: Request, userId: str = ""):
+            self._require_internal(request)
+            if not self._signer:
+                return {"address": None, "signerGranted": False,
+                        "signerGrantedAt": None, "linkedExternalAddress": None}
+            return self.signer_state()
+
+        @self.app.post("/v1/wallets/{wallet_id}/rpc")
+        async def privy_rpc(wallet_id: str, request: Request):
+            self._stats["privy_calls"] += 1
+            headers = request.headers
+            if not headers.get("authorization", "").startswith("Basic ") or not headers.get("privy-app-id"):
+                return self._error("unauthorized", 401)
+            idem = headers.get("privy-idempotency-key")
+            if not idem:
+                return self._error("invalid_request")
+            try:
+                body = await request.json()
+            except ValueError:
+                return self._error("invalid_request")
+            try:
+                signature = base64.b64decode(headers.get("privy-authorization-signature", ""), validate=True)
+                payload = {"version": 1, "method": "POST", "url": str(request.url), "body": body,
+                           "headers": {"privy-app-id": headers["privy-app-id"],
+                                       "privy-idempotency-key": idem}}
+                self._privy_auth_pub.verify(signature, _jcs(payload).encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+            except (InvalidSignature, ValueError, TypeError, UnicodeError):
+                return self._error("invalid_authorization_signature", 401)
+            if idem not in self._privy_idem:
+                try:
+                    tx = body["params"]["transaction"]
+                    chain_id = tx["chain_id"]
+                    chain = FAKE_CHAINS.get(chain_id) if type(chain_id) is int else None
+                    value = tx["value"]
+                    if (chain is None or body["method"] != "eth_sendTransaction"
+                            or body["caip2"] != f"eip155:{chain_id}"
+                            or tx["to"].lower() not in (chain["v3"], chain["v2"], chain["weth"])
+                            or not isinstance(value, str) or not re.fullmatch(r"0x[0-9a-fA-F]+", value)
+                            or int(value, 16) > CAP_TX_WEI
+                            or tx["data"][:10].lower() not in (SELECTOR_APPROVE, SELECTOR_WETH_WITHDRAW,
+                                SELECTOR_V3_EXACT_INPUT_SINGLE, SELECTOR_V2_BUY, SELECTOR_V2_SELL)):
+                        raise ValueError("policy violation")
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    return self._error("POLICY_VIOLATION")
+                self._privy_idem[idem] = "0x" + secrets.token_hex(32)
+            return {"data": {"hash": self._privy_idem[idem], "caip2": body.get("caip2"),
+                             "transaction_id": str(uuid.uuid4())}}
+
+        @self.app.post("/_test/privy_delay")
+        async def privy_delay(request: Request):
+            data = await request.json()
+            if type(data.get("ms")) is not int or data["ms"] < 0:
+                return self._error("invalid_request")
+            self._privy_delay_ms = data["ms"]
+            return {"ms": self._privy_delay_ms}
+
+        @self.app.post("/_test/corrupt_privy_signature")
+        async def corrupt_signature(request: Request):
+            data = await request.json()
+            if type(data.get("enabled")) is not bool:
+                return self._error("invalid_request")
+            self._corrupt_privy_signature = data["enabled"]
+            return {"enabled": self._corrupt_privy_signature}
+
+        @self.app.post("/_test/set_gate_decision")
+        async def set_gate_decision(request: Request):
+            data = await request.json()
+            gate = self._gates.get(data.get("requestId"))
+            if gate is None:
+                return self._error("gate_not_found", 404)
+            gate["decision"] = data["decision"]
+            return {}
+
+        @self.app.get("/_test/daily_spend")
+        async def daily_spend(address: str = ""):
+            key = (address.lower(), datetime.now(timezone.utc).date().isoformat())
+            daily = self._daily.get(key, {"spent_wei": 0, "tx_count": 0})
+            return {"spentWei": str(daily["spent_wei"]), "txCount": daily["tx_count"]}
+
+
 # PARTE C: fake /mcp.
