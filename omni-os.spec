@@ -58,13 +58,13 @@ datas = [
     # BASE_DIR pattern as everything else in this spec.
     (str(PROJECT_DIR / "assets" / "integration_icons"), "assets/integration_icons"),
 ]
-# eth_account.hdaccount reads its BIP-39 wordlist .txt files (english.txt,
-# etc.) off disk at runtime for wallet/mnemonic generation — same
-# non-code-data blind spot as openwakeword above. Missing this doesn't
-# fail at import time (eth_account.hdaccount is already a hiddenimport
-# below); it only surfaces the instant a wallet is actually created,
-# which is exactly how this was found — a real "create wallet" click in
-# the packaged trader panel throwing FileNotFoundError.
+# eth_account remains an internal web3 dependency after the desktop signing
+# module was removed in 1.12.0. Omni-OS no longer signs anything locally;
+# all transactions are signed on the server by the Seraph Wallet.
+# web3 resolves eth_account backends at runtime, beyond PyInstaller's static
+# analysis. Keep its package data (including eth_account.hdaccount wordlists)
+# and the hiddenimports below: removing either would break packaged web3
+# and its on-chain reads (balances, quotes and transaction receipts).
 datas += collect_data_files("eth_account")
 # py_ecc queries its installed version while Web3 imports eth_keyfile.
 datas += copy_metadata("py-ecc")
@@ -106,7 +106,8 @@ hiddenimports = onnxruntime_hiddenimports + [
     # integration if any) sometimes needs its genpy cache pre-seeded.
     # google-genai's websocket transport.
     "websockets",
-    # web3/eth-* stack — eth_account's key backends are looked up dynamically.
+    # web3's internal eth_account backends are resolved dynamically, beyond
+    # static analysis — required for packaged on-chain reads, not local signing.
     "eth_account",
     "eth_account.hdaccount",
 ]
