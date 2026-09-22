@@ -228,7 +228,18 @@ class McpClient:
                 return {"ok": False, "error": "seraph_unauthorized"}
             auth = get_default_auth()
             try:
-                fresh = auth.remint_api_key()
+                # on_unauthorized is typed Callable[[], str | None] precisely because it
+                # IS the re-minter: it hands back a fresh key or None. Honouring it here
+                # keeps the constructor's contract true in the OAuth mode too, and is what
+                # lets an integration test point this client at a throwaway SeraphAuth
+                # instead of the process-wide singleton. invalidate_session stays on the
+                # default auth because it only clears local storage, which the caller and
+                # the singleton share.
+                fresh = (
+                    self._on_unauthorized()
+                    if self._on_unauthorized is not None
+                    else auth.remint_api_key()
+                )
             except Exception:
                 fresh = None
             if not fresh:
