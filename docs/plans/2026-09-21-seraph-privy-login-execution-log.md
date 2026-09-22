@@ -457,6 +457,13 @@ QA adversarial feito pelo orquestrador.
 
 ---
 
+### W1c.P2 — auditoria de custódia
+
+- **Achado (f) — CORRIGIDO em `51e5568`.** `approve` com spender fora da allowlist, `withdraw` para contrato diferente do WETH da chain, ou qualquer um deles com valor nativo, caíam em `kind: "swap"` e herdavam o veredito upstream. O executor já recusava com `calldata_not_allowed` antes de consumir o gate; não era exploração de fundos, mas o gate sinalizava uma execução que não podia cumprir. O crypto-mcp agora grava `decision: "block"` com `reason: "non_swap_not_allowlisted"`, preservando o corpo do firewall verbatim. Seis casos novos em `crypto-mcp/src/__tests__/wallet-tools.test.ts` (35 testes no arquivo), incluindo regressões de approve legítimo e swap genuíno; detalhes em §13.
+- **PENDÊNCIA DE SEGURANÇA ABERTA — `DESKTOP_CLIENT_ID`.** Não definido no `wrangler.toml`; `src/routes/desktop-api-keys.ts:75` trata a ausência como "qualquer client OAuth", permitindo que qualquer cliente com `api-keys:write` minte uma key de desktop em produção. O valor real depende do Dynamic Client Registration do desktop em W3. **Precisa ser fixado antes do release 1.12.0.**
+
+---
+
 ## 9. Decisões aplicadas em execução
 
 | # | Decisão | Motivo |
@@ -482,6 +489,7 @@ QA adversarial feito pelo orquestrador.
 | E19 | `wallet:execute` é o scope **DEDICADO** de `guardian_execute` e **SUBSTITUI** a checagem pelo nome literal, não soma a ela | `["wallet:execute"]` sozinho autoriza `guardian_execute` e mais nada; `["guardian_execute"]` sozinho **NÃO** autoriza; `["*"]` **NÃO** autoriza. Tenants OAuth nunca carregam o grant |
 | E20 | Gates não-swap e gates com decisão terminal são imutáveis: `patchGate` exige `kind = 'swap'` **E** `decision = 'pending'` no WHERE | Fecha P4-3 e P4-4 com uma só mudança |
 | E21 | Não existe var `CONTROL_PLANE_URL` no `wrangler.toml` do crypto-mcp, deliberadamente | Sem o service binding, as tools de carteira falham fechado em vez de alcançar a internet pública |
+| E22 | `WALLET_RPC_URLS_JSON` deliberadamente **NÃO** declarado no `wrangler.toml` do control-plane, divergindo do texto do plano em W1c.P1.T1 | Nenhum código do control-plane lê essa variável; `lib/wallet/gas.ts` e `lib/wallet/nonce.ts` obtêm as RPC URLs da tabela estática `lib/wallet/chains.ts`. Declarar uma variável que ninguém consome é dívida, não wiring. Alternativa rejeitada: declará-la para "seguir o plano à risca" |
 
 ---
 
@@ -500,7 +508,9 @@ QA adversarial feito pelo orquestrador.
 | W1b.P3 | ✔ concluída em código / **DESBLOQUEADA** — ver §11 | Testes registrados nos commits de §11; não reexecutados nesta atualização documental | 18 commits desde `a327172`; `6204e89` = **S1b.3** |
 | W1b.P4 | ✔ concluída + QA — ver §12 | crypto-mcp **210**; control-plane **1672** | `7d880ee`, `66b11c7`, `98376b7`, `8f9888a`, `d89a71d`, `a29f4ef`, `271bc43`, `6ad5354` |
 | W1b.P5 | ✔ concluída + QA — ver §12 | guardian-proxy **1027** | `8568113`, `a740bc1`, `448ee48` = **S1b.5** |
-| W1c.* | ⏳ próxima — S1b.5 = `448ee48` disponível | — | — |
+| W1c.P1 | ✔ concluída — ver §13 | 13 testes; `tsc`, `eslint` e dry-run produção/preview exit 0 | `126b6b4` |
+| W1c.P2 | ✔ concluída + QA — ver §13; T12 sem prova empírica e `DESKTOP_CLIENT_ID` pendente | 6 casos novos; `wallet-tools.test.ts` com 35 testes | `51e5568` |
+| W1c.P3 | ⏳ próxima — migração e deploy em produção; depende de aprovação explícita do usuário | — | — |
 | W2.* | ⏳ desbloqueada (credenciais Privy obtidas) | — | — |
 | W3.* | ⏳ desbloqueada, pode começar | — | — |
 | W4, W5 | pendentes | — | — |
@@ -676,3 +686,56 @@ Medidos pessoalmente pelo orquestrador, todos exit 0; não reexecutados nesta at
 2. Allow estático para approve/withdraw ignora um `block` upstream (D22 literal); o único backstop é a revalidação ABI do executor.
 3. Chains 480 (worldchain) e 4663 (robinhood) têm uma única RPC URL pública, sem fallback.
 4. A constante `WALLET_EXECUTE_SCOPE` está duplicada em `scope-enforcement.ts` e `tenant-resolver.ts`.
+
+---
+
+## 13. Checkpoint W1c.P1 e W1c.P2 — wiring e auditoria de custódia
+
+**W1c.P1 e W1c.P2 concluídas.** Próxima phase: **W1c.P3**, que envolve migração e deploy em produção e **depende de aprovação explícita do usuário**. Este checkpoint registra as evidências fornecidas para a atualização documental; commits, testes e verificações de segurança não foram reexecutados nesta atualização do log. Conclusão em código não registra deploy/release.
+
+### W1c.P1 — wiring do control-plane (commit `126b6b4`)
+
+- Três rotas montadas em `src/index.ts`: `/api/desktop/api-keys` e `/api/wallet/signer-granted` no topo (protegidas por OAuth e por token Privy respectivamente, **NUNCA sob `internal`**), e `/wallet` dentro do bloco `internal` (protegido por `X-Internal-Secret`).
+- `wrangler.toml`: cinco vars novas em produção (`PRIVY_GLOBAL_POLICY_ID`, `PRIVY_SIGNER_ID`, `AUTH_API_JWKS_URL`, `OAUTH_ISSUER`, `OAUTH_API_RESOURCE`) e as equivalentes em `[env.preview]`, mais o service binding `AUTH_API` (produção → `auth-api`, preview → `auth-api-staging`). Issuer e resource foram copiados do `wrangler.toml` do próprio auth-api, não inventados.
+- `src/env.ts` **NÃO foi alterado**: já declarava todos os campos exigidos.
+- Novo `src/__tests__/route-mounts.test.ts` com **13 testes** provando a separação das três autoridades: o mint devolve 401 mesmo com `X-Internal-Secret` correto; o signer idem; as rotas internas devolvem 401 sem o header e com o header errado; e `POST /api/internal/wallet/gate` com o segredo correto e corpo `{}` devolve 400 `invalid_request`, provando que o middleware passou e o handler foi alcançado.
+- **Verificado:** 13 testes exit 0, `tsc` exit 0, `eslint` exit 0, e `wrangler deploy --dry-run` exit 0 em produção e em `--env preview`, listando o binding `AUTH_API` e as cinco vars em cada ambiente.
+- **PENDÊNCIA DE SEGURANÇA ABERTA:** `DESKTOP_CLIENT_ID` não está definido no `wrangler.toml`. A rota trata "não definido" como "qualquer client OAuth" (`src/routes/desktop-api-keys.ts:75`), ou seja, em produção qualquer cliente portando `api-keys:write` pode mintar uma key de desktop. O valor real só existirá quando o desktop fizer Dynamic Client Registration em W3. **Precisa ser fixado antes do release 1.12.0.**
+
+### W1c.P2 — auditoria de custódia: resultado
+
+| # | Ameaça | Mitigação verificada | Onde está o teste |
+|---|---|---|---|
+| T1 | Campos de tx no `guardian_execute` | Input aceita só `requestId`; `logIgnoredCallerFields` registra apenas os **NOMES** das chaves extras e nunca os valores. **FECHADO.** | `crypto-mcp/src/__tests__/wallet-tools.test.ts`, caso "ignores and logs caller transaction fields" |
+| T2 | Replay de `requestId` | Claim atômica com CTEs (`consumed_at IS NULL` dentro da statement) e replay de linha `submitted` devolvendo o mesmo `txHash`. **FECHADO.** | `control-plane-api/lib/wallet/__tests__/executor.test.ts`, casos de claim concorrente e de replay |
+| T3 | TOCTOU entre gate e assinatura | Payload imutável (o `setWhere` de `recordGate` exige payload idêntico), corpo enviado à Privy derivado só do gate, e `expiresAt` clampado a 180 s na rota interna. **FECHADO.** | `executor.test.ts` e `wallet-internal.test.ts` |
+| T4 | Key revogada aceita até 5 min de cache | Executor consulta `signer_granted_at` em SQL e **REPETE** a consulta imediatamente antes de assinar; TTL de KV para registros com identidade caiu para 60 s (E12). **FECHADO E REFORÇADO ALÉM DO PLANO.** | `executor.test.ts`, casos de grant revogado durante a estimativa de gas e após a primeira leitura |
+| T5 | Membro usando key de outro usuário | `userId` derivado de `api_key.created_by` apenas para keys com `wallet:execute`, mais `gate_owner_mismatch`, `wallet_mismatch` e exigência de membership viva em organização ativa (QA-P2-1 fechada). **FECHADO.** | `executor.test.ts`, casos de ownership estrangeiro e de membership |
+| T6 | Chain mismatch | `isAllowedChain` sobre as 7 chains, `chainId` congelado no gate, e coerência entre `caip2` e `tx.chain_id` validada antes de assinar. **FECHADO.** | `executor.test.ts` e `wallet-rpc.test.ts` |
+| T7 | Spoofing de `from` | `from` congelado no gate e comparado em minúsculas com `user.privy_wallet_address`. **FECHADO.** | `executor.test.ts`, caso `wallet_mismatch` |
+| T8 | Gas griefing | Margem de 20%, caps de fee e de priority por chain, e teto de custo total de 0,01 ETH aplicado antes do consumo do gate. **FECHADO**, com endurecimento opcional pendente (F3: `gasLimit` não tem teto próprio, e uma RPC hostil devolvendo `baseFeePerGas = 0` esvazia o teto de custo; o efeito é indisponibilidade, não perda). | `executor.test.ts` e `gas.test.ts` |
+| T9 | Corrida no cap diário | Reserva atômica por upsert condicional dentro da mesma statement da claim, com estorno somente em negativa explícita. **FECHADO.** | `executor.test.ts`, casos de claims concorrentes e de recusa por valor e por contagem |
+| T10 | Confusão de audience entre `/api` e `/mcp` | Audiences estritas nos dois lados; `lib/oauth-token.ts` compara `aud` com `OAUTH_API_RESOURCE` e `iss` com `OAUTH_ISSUER`, ambos normalizando barra final. **FECHADO em fase anterior.** | Testes de audience das fases W1.P1 e W1.P2b |
+| T11 | Key sem `wallet:execute` chamando `guardian_execute` | Guardian-proxy exige o grant dedicado, que substitui e não soma à checagem por nome literal (E19), e o alias legado com ponto também é gateado. **FECHADO.** | `guardian-proxy/src/__tests__/scope-enforcement.test.ts` |
+| T12 | Executor comprometido | Policy global da Privy com 31 regras limita os métodos e os contratos alcançáveis; chave de owner offline é a defesa prevista (transferência de ownership ainda pendente conforme E8). **ÚNICO ITEM SEM PROVA EMPÍRICA; depende de W4.P2.** | Probe da fase W0.P1.T12 executado; smoke com fundos reais adiado pelo usuário (E9) e prova empírica do default-deny pendente (E7) |
+| T13 | Segredos da Privy em logs | Cliente da Privy nunca registra `Authorization`, assinatura, corpo nem resposta; todos os módulos de carteira usam conjuntos fechados de campos de log. **FECHADO.** | Asserções negativas de log em `wallet-rpc.test.ts`, `executor.test.ts` e `reconcile.test.ts` |
+| T14 | Mint com JWT reaproveitado ou enumeração de keys | Validade de 15 minutos, limite por organização e `DELETE` exigindo a combinação de identificador, dispositivo, criador e organização. **FECHADO em fase anterior.** | Testes da fase W1.P2b |
+
+### Itens (a) a (m) do plano
+
+- **Todos verificados.** Um único achado exigiu código novo: o item (f).
+- **Item (c) resolvido por inspeção:** o `requestId` do fluxo assíncrono é gerado por `crypto.randomUUID()` em `packages/wallet-fw-api/src/routes/pretrade.ts:1846`, sem nenhuma entrada controlada pelo chamador, e o arquivo não usa `Math.random` em lugar nenhum. Quando o upstream não devolve identificador, o crypto-mcp gera `gate_<uuid>` também por `crypto.randomUUID()`. Com 122 bits de entropia, a ocupação antecipada de identificador entre tenants não é praticável.
+- **Item (k) resolvido por inspeção:** busca por `wallet-auth:`, `wallet-api:` e cabeçalhos de chave privada PEM nos três repositórios não encontrou nenhuma chave real. As únicas ocorrências são a constante de prefixo e o JSDoc do módulo de assinatura, o vetor de teste sintético de escalar fixo documentado como não-real, um placeholder em teste de rota, e PEMs sintéticos em fixtures do scanner de segredos.
+- **Item (l) resolvido por inspeção:** `WalletStatusResult` expõe apenas endereço, estado do grant, data do grant e carteira externa vinculada. O identificador de carteira da Privy nunca cruza a fronteira do backend.
+
+### Achado (f) — corrigido no commit `51e5568`
+
+- **Sintoma:** um `approve` para um spender fora da allowlist, um `withdraw` para um contrato que não é o WETH da chain, ou qualquer um dos dois carregando valor nativo, são classificados como `kind: "swap"`. O gate então herdava o veredito do firewall upstream, e um `allow` gravava um gate que parecia executável.
+- **Por que não era exploração de fundos:** a política de calldata do executor só aceita os três seletores de swap sob `kind: "swap"` e roda antes do consumo do gate, de modo que a execução já era recusada com `calldata_not_allowed` sem queimar o gate.
+- **Por que ainda assim foi corrigido:** o sinal era desonesto. O gate é a autoridade e precisa dizer a verdade sobre o que pode executar.
+- **Correção:** o crypto-mcp passou a gravar `decision: "block"` com `reason: "non_swap_not_allowlisted"` nesses casos. O corpo do firewall continua chegando ao agente verbatim, porque o veredito do firewall é informação e o gate é autoridade, e não são a mesma coisa — assim nenhum cliente MCP existente sofre mudança de contrato.
+- **Seis casos novos** em `crypto-mcp/src/__tests__/wallet-tools.test.ts` (**35 testes** no arquivo), incluindo duas regressões que garantem que o approve legítimo continua recebendo o allow estático e que um swap genuíno continua carregando o veredito upstream.
+
+### Veredito da W1c.P2
+
+**Auditoria fechada**, com um único item sem prova empírica (**T12**, que depende do smoke com fundos reais adiado pelo usuário) e uma pendência de configuração aberta (**`DESKTOP_CLIENT_ID`**) que precisa ser fixada antes do release **1.12.0**. As dívidas previamente registradas, inclusive E8, permanecem abertas; este checkpoint não as encerra.
