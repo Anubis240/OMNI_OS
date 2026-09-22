@@ -464,6 +464,14 @@ QA adversarial feito pelo orquestrador.
 
 ---
 
+### W2 — console (QA adversarial conduzido pelo orquestrador)
+
+- **Achado SEV-1 corrigido em `8baa74c`:** `WalletPanel.tsx` e `WithdrawForm.tsx` liam saldos fazendo `fetch` direto do browser para hosts de RPC de terceiros. O `connect-src` da CSP (`lib/csp.ts`) não lista nenhum host de RPC, então em produção o browser bloquearia as 14 leituras e o painel mostraria `—` nas 7 redes, com o botão "Máximo" do saque inoperante. Os testes não pegaram porque mockam `fetch` e jsdom não aplica CSP. Isso também violava a decisão D3 já documentada em `app/api/rpc/route.ts` ("The browser never dials a third-party RPC endpoint directly"). Correção: ambos passaram a usar `buildRpcRoutePath(chain.key, undefined)` com token Privy no header `Authorization`. `lib/csp.ts`, `app/api/rpc/route.ts`, `lib/trade/wallet.ts` e `lib/trade/chains.ts` ficaram intactos — acrescentar hosts à CSP seria a correção errada, pois derrotaria a D3, exporia o IP do usuário e removeria a allowlist de métodos do proxy. Teste de anti-regressão: `reads balances through the same-origin rpc proxy`, que percorre as 15 chamadas e assere que todas começam com `/api/rpc`, nenhuma com `http`, e todas carregam o Bearer.
+- **Ameaças verificadas e fechadas:** XSS via `client_name` (React escapa; zero `dangerouslySetInnerHTML`); open redirect no Cancel (`isLoopbackHttpRedirect` compara `hostname` por igualdade exata, recusando `127.0.0.1.evil.example` e `localhost`); SSRF no `/client-info` (URL montada no servidor, `client_id` só em searchParams, regex validada antes de qualquer rede); consentimento de carteira exibido a quem já tem signer; "Agora não" alterando o escopo; falha do `grant()` travando o fluxo OAuth; `/client-info` lento bloqueando a tela; allowlist do gateway liberando só o path exato; saque tocando o session signer. Todas com teste dedicado.
+- **Dívidas registradas, não corrigidas:** (i) abrir `/wallet` dispara 15 requisições simultâneas ao `/api/rpc`, contra um orçamento de 60 por 60 s por usuário — 4 recargas em um minuto esgotam a janela; coalescer em batch JSON-RPC é impossível porque cada rede é um host distinto e o proxy resolve o alvo por `chainKey`; (ii) `WithdrawForm.tsx` usa non-null assertion ao casar `WITHDRAW_CHAIN_IDS` com `CHAINS`.
+
+---
+
 ## 9. Decisões aplicadas em execução
 
 | # | Decisão | Motivo |
@@ -490,6 +498,10 @@ QA adversarial feito pelo orquestrador.
 | E20 | Gates não-swap e gates com decisão terminal são imutáveis: `patchGate` exige `kind = 'swap'` **E** `decision = 'pending'` no WHERE | Fecha P4-3 e P4-4 com uma só mudança |
 | E21 | Não existe var `CONTROL_PLANE_URL` no `wrangler.toml` do crypto-mcp, deliberadamente | Sem o service binding, as tools de carteira falham fechado em vez de alcançar a internet pública |
 | E22 | `WALLET_RPC_URLS_JSON` deliberadamente **NÃO** declarado no `wrangler.toml` do control-plane, divergindo do texto do plano em W1c.P1.T1 | Nenhum código do control-plane lê essa variável; `lib/wallet/gas.ts` e `lib/wallet/nonce.ts` obtêm as RPC URLs da tabela estática `lib/wallet/chains.ts`. Declarar uma variável que ninguém consome é dívida, não wiring. Alternativa rejeitada: declará-la para "seguir o plano à risca" |
+| E23 | O app id da Privy deixou de ter valor padrão embutido: `PrivyClientProvider.tsx` lança erro em produção quando `NEXT_PUBLIC_PRIVY_APP_ID` está ausente e só usa um placeholder inerte fora de produção | O default hard-coded `cmonnatih002s0cl19xcridpk` é o app de **OUTRO projeto**, diferente do app do Seraph (`cmp1fe7sm004v0cjmn1i9rwyc`). Com `createOnLogin: "all-users"` habilitado nesta fase, um build sem a variável passaria a criar carteiras de custódia dentro do app errado. Alternativa rejeitada: manter o default, que silenciava o erro de configuração justo onde ele custa carteiras |
+| E24 | `NEXT_PUBLIC_PRIVY_SIGNER_ID` e `NEXT_PUBLIC_PRIVY_GLOBAL_POLICY_ID` obrigatórias **apenas em produção**: default vazio no schema; `getPublicEnv()` só rejeita valores vazios quando `NODE_ENV === "production"` | Exigi-las sempre quebraria a suíte de testes, que não configura ambiente. O hook `useSeraphWalletSigner` valida ambas antes de tocar a Privy e falha com `signer_config_missing`, então o default vazio nunca chega a virar uma concessão de assinatura malformada |
+| E25 | `/wallet` é rota estática própria, fora do esquema de views do console; link em `pageNavigation`, sem acrescentar a `VALID_VIEWS` | Acrescentá-la a `VALID_VIEWS` criaria uma view que o renderizador não sabe desenhar. Navegação separada das views preserva o tipo `View` intacto |
+| E26 | O saque usa o owner path da Privy (`useSendTransaction` do módulo principal, com `options.address` da Carteira Seraph), **nunca o session signer** | `@privy-io/react-auth/tempo` exporta uma `useSendTransaction` homônima e experimental, com assinatura diferente (`{transaction, wallet}`); ela **NÃO** deve ser usada. Teste `never touches the session signer` fixa a invariante |
 
 ---
 
@@ -510,9 +522,13 @@ QA adversarial feito pelo orquestrador.
 | W1b.P5 | ✔ concluída + QA — ver §12 | guardian-proxy **1027** | `8568113`, `a740bc1`, `448ee48` = **S1b.5** |
 | W1c.P1 | ✔ concluída — ver §13 | 13 testes; `tsc`, `eslint` e dry-run produção/preview exit 0 | `126b6b4` |
 | W1c.P2 | ✔ concluída + QA — ver §13; T12 sem prova empírica e `DESKTOP_CLIENT_ID` pendente | 6 casos novos; `wallet-tools.test.ts` com 35 testes | `51e5568` |
-| W1c.P3 | ⏳ próxima — migração e deploy em produção; depende de aprovação explícita do usuário | — | — |
-| W2.* | ⏳ desbloqueada (credenciais Privy obtidas) | — | — |
-| W3.* | ⏳ desbloqueada, pode começar | — | — |
+| W1c.P3 | ⏳ deliberadamente adiada junto com W2.P5 — decisão do usuário de deployar tudo junto após W3 fixar o `DESKTOP_CLIENT_ID` real | — | — |
+| W2.P1 | ✔ concluída + QA — ver §14 | baseline consolidado da W2 em §14 | `d473ff0`, `2151672`, `61354e8` |
+| W2.P2 | ✔ concluída + QA — ver §14 | baseline consolidado da W2 em §14 | `fdac6b8`, `ea08fd5`, `10766ea` |
+| W2.P3 | ✔ concluída + QA — ver §14 | baseline consolidado da W2 em §14 | `ebee028`, `d7b3604`, `090e371` |
+| W2.P4 | ✔ concluída + QA — ver §14 | console 858 / 45 arquivos → **1021 / 50 arquivos**, exit 0 | `b849938`, `07a9de3`, `a58e4b4`, `8baa74c` |
+| W2.P5 | ⏳ deploy do console deliberadamente adiado junto com W1c.P3 — decisão do usuário de deployar tudo junto após W3 fixar o `DESKTOP_CLIENT_ID` real | — | — |
+| W3.* | ⏳ próxima fase — desktop Omni-OS | — | — |
 | W4, W5 | pendentes | — | — |
 
 ### Baselines de teste corrigidos
@@ -739,3 +755,45 @@ Medidos pessoalmente pelo orquestrador, todos exit 0; não reexecutados nesta at
 ### Veredito da W1c.P2
 
 **Auditoria fechada**, com um único item sem prova empírica (**T12**, que depende do smoke com fundos reais adiado pelo usuário) e uma pendência de configuração aberta (**`DESKTOP_CLIENT_ID`**) que precisa ser fixada antes do release **1.12.0**. As dívidas previamente registradas, inclusive E8, permanecem abertas; este checkpoint não as encerra.
+
+---
+
+## 14. Checkpoint W2 — console
+
+**W2.P1–W2.P4 concluídas em código.** Próxima fase: **W3 (desktop Omni-OS)**. **W2.P5 (deploy do console) deliberadamente adiada** junto com W1c.P3, por decisão do usuário de deployar tudo junto após W3 fixar o `DESKTOP_CLIENT_ID` real. Este checkpoint registra as evidências fornecidas para a atualização documental; commits, testes e verificações de segurança não foram reexecutados nesta atualização do log. **Nada da W2 foi para produção.**
+
+### Commits, em ordem
+
+**13 commits** (descrições de escopo, não transcrições das mensagens):
+
+| Commit | Escopo / evidência registrada |
+|---|---|
+| `d473ff0` | Provider Privy com SMS e embedded wallets |
+| `2151672` | Allowlist do gateway |
+| `61354e8` | Hook `useSeraphWalletSigner` |
+| `fdac6b8` | Cancel para loopback + helpers de escopo |
+| `ea08fd5` | Proxy `/client-info` |
+| `10766ea` | Tela `/authorize` com nome do cliente e consentimento de carteira |
+| `ebee028` | Área `/wallet` somente leitura |
+| `d7b3604` | Formulário de saque pelo owner path |
+| `090e371` | Link na navegação |
+| `b849938` | Testes do hook (19) |
+| `07a9de3` | Testes da tela authorize (14) |
+| `a58e4b4` | Testes da área wallet (20) |
+| `8baa74c` | Leitura de saldos pelo proxy same-origin |
+
+### Baseline
+
+A fase começou em `3cc0473` com **858 testes / 45 arquivos** e terminou com **1021 testes / 50 arquivos**, exit 0. Nenhum teste existente foi removido ou enfraquecido.
+
+### Contrato da tela `/authorize`
+
+O POST para `/authorize/privy` carrega `scope` e `resource` **exatamente como recebidos na query**, em ambos os caminhos do consentimento de carteira ("Autorizar carteira" e "Agora não"). Recusar a carteira não reescreve escopo nem concede signer.
+
+### Contrato do hook
+
+`grant()` valida as duas variáveis públicas antes de tocar a Privy, resolve a carteira embedded por polling com uma única chamada a `createWallet()`, e só então chama `addSessionSigners` com o endereço da embedded — **nunca o da carteira externa**. O backend é a fonte de verdade de `signerGranted` e `linkedExternalAddress`; quando o GET falha, há fallback client-side por `delegated` e um erro recuperável `status_unavailable`.
+
+### Pendência de segurança que atravessa para W3
+
+**`DESKTOP_CLIENT_ID` continua sem valor no `wrangler.toml` do control-plane.** Enquanto estiver ausente, `desktop-api-keys.ts:75` trata qualquer client OAuth como autorizado a mintar chave de desktop — e é justamente essa chave que carrega `wallet:execute`. **Precisa ser fixado com o client_id real que o DCR do desktop gerar, antes de qualquer deploy.**
