@@ -118,16 +118,23 @@ class FakeSeraph:
         self._privy_delay_ms: int = 0
         self._internal_secret: str = "fake-internal-secret"
         self._corrupt_privy_signature: bool = False
+        self._pretrade_pending = False
+        self._gate_decision_override = None
         self._privy_auth_key = ec.generate_private_key(ec.SECP256R1())
         self._privy_auth_pub = self._privy_auth_key.public_key()
         self._wrong_auth_key = ec.generate_private_key(ec.SECP256R1())
         self._install_auth_routes()
         self._install_control_plane_routes()
         self._install_wallet_routes()
+        self._install_mcp_routes()
 
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    @property
+    def mcp_url(self) -> str:
+        return self.base_url + "/mcp"
 
     @property
     def ca_bundle(self) -> str:
@@ -565,45 +572,51 @@ class FakeSeraph:
         record.update(status="submitted", txHash=response.json()["data"]["hash"])
         return {"ok": True, "txHash": record["txHash"], "chainId": record["chainId"]}
 
+    def _record_gate(self, data: dict):
+        try:
+            update = self._gate_update(data)
+            rid, payload = data["requestId"], data["payload"]
+            if (not isinstance(rid, str) or not 8 <= len(rid) <= 128
+                    or data.get("kind") not in ("swap", "approve", "withdraw")):
+                raise ValueError("invalid gate")
+            chain = payload["chainId"]
+            if not (type(chain) is int or isinstance(chain, str) and re.fullmatch(r"[0-9]+", chain)):
+                raise ValueError("invalid chain")
+            for name in ("to", "from"):
+                if not isinstance(payload[name], str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", payload[name]):
+                    raise ValueError("invalid address")
+            calldata, value = payload["callData"], payload["value"]
+            if not isinstance(calldata, str) or not re.fullmatch(r"0x([0-9a-fA-F]{2})*", calldata):
+                raise ValueError("invalid calldata")
+            if type(value) is int:
+                value = str(value)
+            if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9]+|0x[0-9a-fA-F]+)", value):
+                raise ValueError("invalid value")
+            immutable = {"orgId": data["orgId"], "userId": data["userId"], "kind": data["kind"],
+                         "chainId": int(chain), "to": payload["to"].lower(),
+                         "from": payload["from"].lower(), "callData": calldata.lower(),
+                         "valueWei": str(int(value, 16 if value.startswith("0x") else 10))}
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return self._error("invalid_request")
+        old = self._gates.get(rid)
+        if old is not None:
+            if old["consumed_at"] is not None or any(old[k] != v for k, v in immutable.items()):
+                return self._error("gate_conflict", 409)
+            old.update(update)
+        else:
+            self._gates[rid] = {"requestId": rid, **immutable, **update, "consumed_at": None}
+        self._stats["gates"] += 1
+        return Response(status_code=204)
+
     def _install_wallet_routes(self) -> None:
         @self.app.post("/api/internal/wallet/gate")
         async def gate(request: Request):
             self._require_internal(request)
             try:
                 data = await request.json()
-                update = self._gate_update(data)
-                rid, payload = data["requestId"], data["payload"]
-                if (not isinstance(rid, str) or not 8 <= len(rid) <= 128
-                        or data.get("kind") not in ("swap", "approve", "withdraw")):
-                    raise ValueError("invalid gate")
-                chain = payload["chainId"]
-                if not (type(chain) is int or isinstance(chain, str) and re.fullmatch(r"[0-9]+", chain)):
-                    raise ValueError("invalid chain")
-                for name in ("to", "from"):
-                    if not isinstance(payload[name], str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", payload[name]):
-                        raise ValueError("invalid address")
-                calldata, value = payload["callData"], payload["value"]
-                if not isinstance(calldata, str) or not re.fullmatch(r"0x([0-9a-fA-F]{2})*", calldata):
-                    raise ValueError("invalid calldata")
-                if type(value) is int:
-                    value = str(value)
-                if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9]+|0x[0-9a-fA-F]+)", value):
-                    raise ValueError("invalid value")
-                immutable = {"orgId": data["orgId"], "userId": data["userId"], "kind": data["kind"],
-                             "chainId": int(chain), "to": payload["to"].lower(),
-                             "from": payload["from"].lower(), "callData": calldata.lower(),
-                             "valueWei": str(int(value, 16 if value.startswith("0x") else 10))}
             except (ValueError, TypeError, KeyError, AttributeError):
                 return self._error("invalid_request")
-            old = self._gates.get(rid)
-            if old is not None:
-                if old["consumed_at"] is not None or any(old[k] != v for k, v in immutable.items()):
-                    return self._error("gate_conflict", 409)
-                old.update(update)
-            else:
-                self._gates[rid] = {"requestId": rid, **immutable, **update, "consumed_at": None}
-            self._stats["gates"] += 1
-            return Response(status_code=204)
+            return self._record_gate(data)
 
         @self.app.patch("/api/internal/wallet/gate/{requestId}")
         async def patch_gate(requestId: str, request: Request):
@@ -629,77 +642,83 @@ class FakeSeraph:
                 data = await request.json()
             except ValueError:
                 data = {}
-            if not isinstance(data, dict):
-                data = {}
-            def fail(code):
-                return {"ok": False, "code": code}
-            if not isinstance(data.get("userId"), str) or not data["userId"]:
-                return fail("user_unresolved")
-            if not self._signer or not self._signer.get("address") or not self._signer.get("granted_at"):
-                return fail("signer_not_granted")
-            rid = data.get("requestId")
-            gate = self._gates.get(rid) if isinstance(rid, str) else None
-            if gate is None:
-                return fail("gate_not_found")
-            if any(gate[k] != data.get(k) for k in ("orgId", "userId")):
-                return fail("gate_owner_mismatch")
-            record = self._executions.get(rid)
-            if record is not None:
-                if record["status"] == "submitted":
-                    return {"ok": True, "txHash": record["txHash"], "chainId": record["chainId"]}
-                if record["status"] == "failed":
-                    return fail(record["code"])
-                # Clearing the simulated delay resumes the SAME reserved execution
-                # with the SAME idempotency key, without consuming/reserving again.
-                if self._privy_delay_ms > 0:
-                    return fail("execution_pending")
-                return await self._submit_execution(record)
-            if gate["decision"] != "allow":
-                return fail("gate_not_allowed")
-            now = int(time.time() * 1000)
-            if gate["expiresAt"] <= now:
-                return fail("gate_expired")
-            if gate["consumed_at"] is not None:
-                return fail("gate_consumed")
-            gate["consumed_at"] = now
-            address, chain_id = gate["from"].lower(), gate["chainId"]
-            if address != self._signer["address"].lower():
-                return fail("wallet_mismatch")
-            chain = FAKE_CHAINS.get(chain_id)
-            if chain is None:
-                return fail("chain_not_allowed")
-            value = int(gate["valueWei"])
-            if value > CAP_TX_WEI:
-                return fail("cap_tx_exceeded")
-            calldata, to = gate["callData"], gate["to"]
-            selector = calldata[:10]
-            if gate["kind"] == "approve":
-                allowed = (selector == SELECTOR_APPROVE and value == 0 and len(calldata) == 138
-                           and calldata[10:34] == "0" * 24
-                           and "0x" + calldata[34:74] in (chain["v3"], chain["v2"]))
-            elif gate["kind"] == "withdraw":
-                allowed = (selector == SELECTOR_WETH_WITHDRAW and value == 0
-                           and len(calldata) == 74 and to == chain["weth"])
-            else:
-                allowed = ((selector == SELECTOR_V3_EXACT_INPUT_SINGLE and to == chain["v3"])
-                           or (selector in (SELECTOR_V2_BUY, SELECTOR_V2_SELL)
-                               and chain["v2"] is not None and to == chain["v2"]))
-            if not allowed:
-                return fail("calldata_not_allowed")
-            daily_key = (address, datetime.now(timezone.utc).date().isoformat())
-            daily = self._daily.setdefault(daily_key, {"spent_wei": 0, "tx_count": 0})
-            if daily["spent_wei"] + value > CAP_DAY_WEI or daily["tx_count"] >= MAX_TX_PER_DAY:
-                return fail("cap_day_exceeded")
-            daily["spent_wei"] += value
-            daily["tx_count"] += 1
-            record = {"requestId": rid, "status": "pending", "chainId": chain_id,
-                      "daily_key": daily_key, "valueWei": value, "wallet_id": "fake-wallet",
-                      "idempotency_key": rid,
-                      "tx": {"chain_id": chain_id, "from": address, "to": to,
-                             "data": calldata, "value": hex(value)}}
-            self._executions[rid] = record
-            return await self._submit_execution(record)
+            return await self._execute_gate(data)
 
+        self._install_wallet_aux_routes()
+
+    async def _execute_gate(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            data = {}
+        def fail(code):
+            return {"ok": False, "code": code}
+        if not isinstance(data.get("userId"), str) or not data["userId"]:
+            return fail("user_unresolved")
+        if not self._signer or not self._signer.get("address") or not self._signer.get("granted_at"):
+            return fail("signer_not_granted")
+        rid = data.get("requestId")
+        gate = self._gates.get(rid) if isinstance(rid, str) else None
+        if gate is None:
+            return fail("gate_not_found")
+        if any(gate[k] != data.get(k) for k in ("orgId", "userId")):
+            return fail("gate_owner_mismatch")
+        record = self._executions.get(rid)
+        if record is not None:
+            if record["status"] == "submitted":
+                return {"ok": True, "txHash": record["txHash"], "chainId": record["chainId"]}
+            if record["status"] == "failed":
+                return fail(record["code"])
+            # Clearing the simulated delay resumes the SAME reserved execution
+            # with the SAME idempotency key, without consuming/reserving again.
+            if self._privy_delay_ms > 0:
+                return fail("execution_pending")
+            return await self._submit_execution(record)
+        if gate["decision"] != "allow":
+            return fail("gate_not_allowed")
+        now = int(time.time() * 1000)
+        if gate["expiresAt"] <= now:
+            return fail("gate_expired")
+        if gate["consumed_at"] is not None:
+            return fail("gate_consumed")
+        gate["consumed_at"] = now
+        address, chain_id = gate["from"].lower(), gate["chainId"]
+        if address != self._signer["address"].lower():
+            return fail("wallet_mismatch")
+        chain = FAKE_CHAINS.get(chain_id)
+        if chain is None:
+            return fail("chain_not_allowed")
+        value = int(gate["valueWei"])
+        if value > CAP_TX_WEI:
+            return fail("cap_tx_exceeded")
+        calldata, to = gate["callData"], gate["to"]
+        selector = calldata[:10]
+        if gate["kind"] == "approve":
+            allowed = (selector == SELECTOR_APPROVE and value == 0 and len(calldata) == 138
+                       and calldata[10:34] == "0" * 24
+                       and "0x" + calldata[34:74] in (chain["v3"], chain["v2"]))
+        elif gate["kind"] == "withdraw":
+            allowed = (selector == SELECTOR_WETH_WITHDRAW and value == 0
+                       and len(calldata) == 74 and to == chain["weth"])
+        else:
+            allowed = ((selector == SELECTOR_V3_EXACT_INPUT_SINGLE and to == chain["v3"])
+                       or (selector in (SELECTOR_V2_BUY, SELECTOR_V2_SELL)
+                           and chain["v2"] is not None and to == chain["v2"]))
+        if not allowed:
+            return fail("calldata_not_allowed")
+        daily_key = (address, datetime.now(timezone.utc).date().isoformat())
+        daily = self._daily.setdefault(daily_key, {"spent_wei": 0, "tx_count": 0})
+        if daily["spent_wei"] + value > CAP_DAY_WEI or daily["tx_count"] >= MAX_TX_PER_DAY:
+            return fail("cap_day_exceeded")
+        daily["spent_wei"] += value
+        daily["tx_count"] += 1
+        record = {"requestId": rid, "status": "pending", "chainId": chain_id,
+                  "daily_key": daily_key, "valueWei": value, "wallet_id": "fake-wallet",
+                  "idempotency_key": rid,
+                  "tx": {"chain_id": chain_id, "from": address, "to": to,
+                         "data": calldata, "value": hex(value)}}
+        self._executions[rid] = record
+        return await self._submit_execution(record)
+
+    def _install_wallet_aux_routes(self) -> None:
         @self.app.get("/api/internal/wallet/status")
         async def wallet_status(request: Request, userId: str = ""):
             self._require_internal(request)
@@ -768,6 +787,11 @@ class FakeSeraph:
         @self.app.post("/_test/set_gate_decision")
         async def set_gate_decision(request: Request):
             data = await request.json()
+            if "requestId" not in data:
+                if data.get("decision") not in (None, "block", "warn", "unknown"):
+                    return self._error("invalid_request")
+                self._gate_decision_override = data.get("decision")
+                return {}
             gate = self._gates.get(data.get("requestId"))
             if gate is None:
                 return self._error("gate_not_found", 404)
@@ -781,4 +805,125 @@ class FakeSeraph:
             return {"spentWei": str(daily["spent_wei"]), "txCount": daily["tx_count"]}
 
 
-# PARTE C: fake /mcp.
+    # Fake guardian-proxy: JSON responses on the Streamable HTTP endpoint.
+    def _install_mcp_routes(self) -> None:
+        names = ("guardian_pretrade_check", "guardian_pretrade_result",
+                 "guardian_execute", "guardian_wallet_status", "crypto_get_price")
+
+        @self.app.post("/_test/pretrade_pending")
+        async def pretrade_pending(request: Request):
+            data = await request.json()
+            if type(data.get("enabled")) is not bool:
+                return self._error("invalid_request")
+            self._pretrade_pending = data["enabled"]
+            return {"enabled": self._pretrade_pending}
+
+        @self.app.post("/mcp")
+        async def mcp(request: Request):
+            authorization = request.headers.get("authorization", "").split()
+            key = None
+            if (len(authorization) == 2 and authorization[0].lower() == "bearer"
+                    and authorization[1].startswith("mcfw_")):
+                key = self._api_keys.get(authorization[1])
+            if key is None or key["revoked"]:
+                self._stats["mcp_401s"] += 1
+                return self._error("unauthorized", 401)
+
+            def error(code, message, rid=None):
+                return JSONResponse({"jsonrpc": "2.0", "id": rid,
+                                     "error": {"code": code, "message": message}})
+
+            try:
+                data = await request.json()
+            except ValueError:
+                return error(-32700, "Parse error")
+            if not isinstance(data, dict):
+                return error(-32600, "Invalid Request")
+            rid, method = data.get("id"), data.get("method")
+            headers = {}
+            if method == "initialize":
+                result = {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "fake-seraph", "version": "1.0.0"}}
+                headers["Mcp-Session-Id"] = secrets.token_urlsafe(24)
+            elif method == "notifications/initialized" and "id" not in data:
+                return Response(status_code=202)
+            elif method == "tools/list":
+                result = {"tools": [{"name": name, "inputSchema": {
+                    "type": "object", "properties": {}}} for name in names]}
+            elif method == "tools/call":
+                params = data.get("params", {})
+                if not isinstance(params, dict):
+                    return error(-32602, "Invalid params", rid)
+                name = params.get("name")
+                if name not in names:
+                    return error(-32601, "Unknown tool", rid)
+                if name == "guardian_execute" and "wallet:execute" not in key["scopes"]:
+                    return self._error("insufficient_scope", 403)
+                args = params.get("arguments", {})
+                if not isinstance(args, dict):
+                    return error(-32602, "Invalid arguments", rid)
+                try:
+                    output = await self._mcp_tool(name, args, key)
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    return error(-32602, "Invalid arguments", rid)
+                result = {"content": [{"type": "text", "text": json.dumps(output)}],
+                          "isError": False}
+            else:
+                return error(-32601, "Unknown method", rid)
+            return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": result}, headers=headers)
+
+    async def _mcp_tool(self, name: str, args: dict, key: dict) -> dict:
+        if name == "crypto_get_price":
+            return {"asset": args.get("asset", "ETH"), "priceUsd": 3000.0}
+        if name == "guardian_wallet_status":
+            return {"ok": True, **self.signer_state(),
+                    "chains": [{"chainId": chain, "nativeBalanceWei": "1000000000000000000"}
+                               for chain in sorted(FAKE_CHAINS)],
+                    "linkedExternalChains": sorted(FAKE_CHAINS) if self._signer["external"] else []}
+        if name == "guardian_execute":
+            self._stats["executes"] += 1
+            result = await self._execute_gate({"requestId": args.get("requestId"),
+                                              "orgId": "org_fake", "userId": key["created_by"]})
+            if not result["ok"]:
+                return {"ok": False, "error": result["code"],
+                        "message": result["code"].replace("_", " ")}
+            return result
+        if name == "guardian_pretrade_result":
+            rid = args.get("requestId")
+            gate = self._gates.get(rid)
+            if (gate is None or gate["expiresAt"] <= int(time.time() * 1000)
+                    or gate["userId"] != key["created_by"] or gate["orgId"] != "org_fake"):
+                return {"error": "unknown_or_expired_request"}
+            if gate["decision"] == "pending":
+                gate.update(decision="allow", reason="upstream_verdict",
+                            decidedAt=int(time.time() * 1000))
+            return {"status": "complete", "decision": gate["decision"], "requestId": rid}
+
+        chain = FAKE_CHAINS.get(int(args["chainId"]), {})
+        calldata, to = args["callData"].lower(), args["to"].lower()
+        value = str(args.get("value", "0"))
+        zero = int(value, 16 if value.startswith("0x") else 10) == 0
+        kind = "swap"
+        if (calldata[:10] == SELECTOR_APPROVE and zero and len(calldata) == 138
+                and calldata[10:34] == "0" * 24
+                and "0x" + calldata[34:74] in (chain.get("v3"), chain.get("v2"))):
+            kind = "approve"
+        elif (calldata[:10] == SELECTOR_WETH_WITHDRAW and zero and len(calldata) == 74
+              and to == chain.get("weth")):
+            kind = "withdraw"
+        decision = "allow"
+        if kind == "swap":
+            decision = self._gate_decision_override or ("pending" if self._pretrade_pending else "allow")
+        rid, now = "gate_" + str(uuid.uuid4()), int(time.time() * 1000)
+        response = self._record_gate({
+            "requestId": rid, "orgId": "org_fake", "userId": key["created_by"], "kind": kind,
+            "decision": decision, "reason": "upstream_verdict" if kind == "swap" else "non_swap_allowlisted",
+            "decidedAt": now, "expiresAt": now + GATE_TTL_MS,
+            "payload": {"chainId": args["chainId"], "to": to, "callData": calldata,
+                        "value": value, "from": args.get("from", self._signer["address"])}})
+        if response.status_code != 204:
+            raise ValueError("invalid gate")
+        result = {"decision": decision, "requestId": rid, "reasons": [], "gateRecorded": True}
+        if decision == "pending":
+            result.update(status="pending", retryAfterMs=50)
+        return result
