@@ -5,6 +5,7 @@ confirmed on-chain but was reported to the user as failed, with the trade
 never recorded in the ledger — see trader/engine.py's
 _reconcile_pending_live_buys for the other half. No real RPC/network calls."""
 
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 from hexbytes import HexBytes
@@ -77,17 +78,60 @@ class CheckBuyReceiptTests(unittest.TestCase):
         self.assertAlmostEqual(result["priceUsd"], result["costUsd"] / result["qty"], places=9)
 
 
-class LiveBuyPendingTranslationTests(unittest.TestCase):
+class _FakeMcp:
+    """Wire-shaped Seraph responses; unexpected tools must never reach a network."""
+
+    def __init__(self, verdict="allow", request_ids=None, execute_responses=None,
+                 pending_gate=False, execute_error=None):
+        self.calls = []
+        self.verdict = verdict
+        self.request_ids = iter(request_ids or ["request-1", "request-2", "request-3"])
+        self.execute_responses = list(execute_responses or [{"ok": True, "txHash": TX_HASH}])
+        self.pending_gate = pending_gate
+        self.execute_error = execute_error
+
+    def __call__(self, name, args):
+        self.calls.append((name, dict(args)))
+        if name == "guardian_pretrade_check":
+            request_id = next(self.request_ids)
+            payload = {"decision": self.verdict, "requestId": request_id}
+            if self.pending_gate:
+                payload = {"status": "pending", "requestId": request_id, "retryAfterMs": 1}
+        elif name == "guardian_pretrade_result":
+            payload = {"decision": self.verdict, "requestId": args["requestId"]}
+        elif name == "guardian_execute":
+            if self.execute_error:
+                return {"ok": False, "error": self.execute_error}
+            payload = self.execute_responses[0]
+            if len(self.execute_responses) > 1:
+                self.execute_responses.pop(0)
+        else:
+            raise AssertionError(f"unexpected MCP tool: {name}")
+        return {"ok": True, "text": json.dumps(payload)}
+
+
+class _WalletStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_provider = live_mod._wallet_status_provider
+        live_mod.set_wallet_status_provider(lambda: {
+            "connected": True, "address": OWNER_ADDRESS, "signerGranted": True,
+        })
+
+    def tearDown(self):
+        # Authorization belongs to each test, never to the next test's wallet.
+        live_mod.set_wallet_status_provider(self.previous_provider)
+
+
+class LiveBuyPendingTranslationTests(_WalletStatusTests):
     """live_buy() must turn a plain '_wait_for_receipt timed out' RuntimeError
     into a BuyPendingError carrying the tx hash and trade context — that's
     what lets engine.py track it instead of the trade silently vanishing."""
 
     def test_timeout_becomes_buy_pending_error_with_context(self):
         token = {"symbol": "STOCKER", "chain": "ethereum", "address": TOKEN_ADDRESS}
-        with patch.object(live_mod.wallet, "status", return_value={"connected": True, "address": OWNER_ADDRESS}), \
+        with patch.object(live_mod, "_mcp_call", _FakeMcp()), \
              patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
              patch.object(live_mod, "best_quote", return_value={"amountOut": 23362 * 10**18, "dex": "v2"}), \
-             patch.object(live_mod.wallet, "send_transaction", return_value=TX_HASH), \
              patch.object(live_mod, "_wait_for_receipt",
                           side_effect=RuntimeError(f"timed out waiting for confirmation (still pending): {TX_HASH}")):
             with self.assertRaises(live_mod.BuyPendingError) as ctx:
@@ -102,16 +146,191 @@ class LiveBuyPendingTranslationTests(unittest.TestCase):
         # A genuine on-chain revert is a real, final failure — must NOT be
         # swallowed into the pending-tracking path.
         token = {"symbol": "STOCKER", "chain": "ethereum", "address": TOKEN_ADDRESS}
-        with patch.object(live_mod.wallet, "status", return_value={"connected": True, "address": OWNER_ADDRESS}), \
+        with patch.object(live_mod, "_mcp_call", _FakeMcp()), \
              patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
              patch.object(live_mod, "best_quote", return_value={"amountOut": 23362 * 10**18, "dex": "v2"}), \
-             patch.object(live_mod.wallet, "send_transaction", return_value=TX_HASH), \
              patch.object(live_mod, "_wait_for_receipt",
                           side_effect=RuntimeError(f"transaction reverted on-chain: {TX_HASH}")):
             with self.assertRaises(RuntimeError) as ctx:
                 live_mod.live_buy(token=token, trade_size_usd=7.87, bypass_gate=True)
         self.assertNotIsInstance(ctx.exception, live_mod.BuyPendingError)
         self.assertIn("reverted on-chain", str(ctx.exception))
+
+
+class ExecuteViaGuardianTests(_WalletStatusTests):
+    def setUp(self):
+        super().setUp()
+        self.fake = _FakeMcp()
+        self.token = {"symbol": "STOCKER", "chain": "ethereum", "address": TOKEN_ADDRESS}
+        self.tx = {"to": TOKEN_ADDRESS, "data": "0x1234", "value": 123}
+        self.w3 = MagicMock()
+        functions = self.w3.eth.contract.return_value.functions
+        functions.decimals.return_value.call.return_value = 18
+        functions.balanceOf.return_value.call.return_value = 10**18
+        functions.allowance.return_value.call.return_value = 0
+        self.enterContext(patch.object(live_mod, "_mcp_call", self.fake))
+        self.enterContext(patch.object(live_mod, "_with_rpc", lambda chain, fn: fn(self.w3)))
+        self.enterContext(patch.object(live_mod, "eth_usd_price", return_value=3000.0))
+        self.enterContext(patch.object(live_mod, "best_quote", return_value={
+            "amountOut": 10**18, "dex": "v3", "fee": 3000, "gasEstimate": 170000,
+        }))
+        self.sleep = self.enterContext(patch.object(live_mod.time, "sleep"))
+        self.receipt = {"status": 1, "gasUsed": 21000, "gasPrice": 1_000_000_000}
+        self.enterContext(patch.object(live_mod, "_get_receipt_or_none", side_effect=self._receipt))
+
+    def _receipt(self, chain, tx_hash):
+        self.fake.calls.append(("receipt", {"txHash": tx_hash}))
+        return self.receipt
+
+    def _execute(self):
+        return live_mod._execute_via_guardian("ethereum", self.tx, kind="swap")
+
+    def _calls(self, name):
+        return [args for tool, args in self.fake.calls if tool == name]
+
+    def _assert_single_gate_and_execute(self):
+        # The signer must consume the exact authorization returned by the gate.
+        self.assertEqual([name for name, _ in self.fake.calls],
+                         ["guardian_pretrade_check", "guardian_execute", "receipt"])
+        self.assertEqual(self._calls("guardian_execute"), [{"requestId": "request-1"}])
+
+    def _sell(self, **kwargs):
+        return live_mod.live_sell(dict(self.token, qty=1.0, costUsd=10.0), **kwargs)
+
+    def test_approve_gates_then_executes_with_the_returned_request_id(self):
+        live_mod._ensure_allowance("ethereum", TOKEN_ADDRESS, OWNER_ADDRESS, OTHER_ADDRESS, 10**18)
+        self._assert_single_gate_and_execute()
+
+    def test_buy_gates_then_executes_with_the_returned_request_id(self):
+        result = live_mod.live_buy(self.token, 7.87)
+        self.assertEqual(result["txHash"], TX_HASH)
+        self._assert_single_gate_and_execute()
+
+    def test_unwrap_gates_then_executes_with_the_returned_request_id(self):
+        result = live_mod.unwrap_weth("ethereum", amount_wei=10**18)
+        self.assertEqual(result["txHash"], TX_HASH)
+        self._assert_single_gate_and_execute()
+
+    def test_execute_never_receives_transaction_fields(self):
+        # Sending calldata again would let the client replace the custodial payload.
+        self.fake.request_ids = iter(f"request-{i}" for i in range(5))
+        live_mod.live_buy(self.token, 7.87)
+        live_mod.unwrap_weth("ethereum", amount_wei=10**18)
+        self._sell(bypass_gate=True)
+        executes = self._calls("guardian_execute")
+        self.assertEqual(len(executes), 4)
+        for args in executes:
+            self.assertEqual(set(args), {"requestId"})
+            self.assertTrue(set(args).isdisjoint({"to", "data", "value", "chainId", "from"}))
+
+    def test_sell_with_bypass_takes_two_gates_and_two_executes_with_distinct_request_ids(self):
+        # Force bypasses profit simulation, not custodial authorization of either tx.
+        self._sell(bypass_gate=True)
+        self.assertEqual(len(self._calls("guardian_pretrade_check")), 2)
+        self.assertEqual(self._calls("guardian_execute"),
+                         [{"requestId": "request-1"}, {"requestId": "request-2"}])
+        self.assertEqual([name for name, _ in self.fake.calls], [
+            "guardian_pretrade_check", "guardian_execute", "receipt",
+            "guardian_pretrade_check", "guardian_execute", "receipt",
+        ])
+        self.assertEqual(self._calls("receipt")[0], {"txHash": TX_HASH})
+
+    def test_sell_without_bypass_takes_three_gates_because_the_profit_check_gates_too(self):
+        # The first gate feeds min-net-profit simulation (the "sell X force"
+        # message), the second authorizes approve, and the third authorizes swap.
+        # The swap gate is deliberately fresh: waiting for the approve receipt
+        # can exceed the gate's 180 s window. Lock down the common path's real
+        # cost so any future gate consolidation becomes an explicit change.
+        self._sell()
+        self.assertEqual(len(self._calls("guardian_pretrade_check")), 3)
+        self.assertEqual(self._calls("guardian_execute"),
+                         [{"requestId": "request-2"}, {"requestId": "request-3"}])
+        self.assertEqual([name for name, _ in self.fake.calls], [
+            "guardian_pretrade_check", "guardian_pretrade_check", "guardian_execute",
+            "receipt", "guardian_pretrade_check", "guardian_execute", "receipt",
+        ])
+
+    def test_gate_block_raises_and_never_executes(self):
+        # Anything short of allow must fail closed before requesting a signature.
+        for verdict in ("block", "warn", "unknown"):
+            with self.subTest(verdict=verdict):
+                fake = _FakeMcp(verdict=verdict)
+                with patch.object(live_mod, "_mcp_call", fake):
+                    with self.assertRaises(RuntimeError):
+                        self._execute()
+                self.assertEqual([name for name, _ in fake.calls], ["guardian_pretrade_check"])
+
+    def test_executor_error_code_surfaces_in_the_exception(self):
+        # Custodial refusals must remain actionable, not masquerade as a broadcast.
+        for code in ("signer_not_granted", "cap_tx_exceeded", "wallet_mismatch", "calldata_not_allowed"):
+            with self.subTest(code=code):
+                fake = _FakeMcp(execute_responses=[{"ok": False, "error": code, "message": "refused"}])
+                with patch.object(live_mod, "_mcp_call", fake):
+                    with self.assertRaisesRegex(RuntimeError, code):
+                        self._execute()
+
+    def test_execution_pending_is_retried_then_raises(self):
+        # Retry only the same authorization: a new gate could authorize a second spend.
+        self.fake.execute_responses = [{"ok": False, "error": "execution_pending", "message": "waiting"}]
+        with self.assertRaisesRegex(RuntimeError, "execution_pending"):
+            self._execute()
+        self.assertEqual(self._calls("guardian_execute"),
+                         [{"requestId": "request-1"}] * live_mod.EXECUTION_PENDING_RETRIES)
+        self.assertEqual(len(self._calls("guardian_pretrade_check")), 1)
+        self.assertEqual(self.sleep.call_count, live_mod.EXECUTION_PENDING_RETRIES - 1)
+
+    def test_execution_pending_then_success_returns_the_hash(self):
+        # A pending signer response is not a rejection or a new transaction.
+        self.fake.execute_responses = [
+            {"ok": False, "error": "execution_pending", "message": "waiting"},
+            {"ok": True, "txHash": TX_HASH},
+        ]
+        self.assertEqual(self._execute(), TX_HASH)
+        self.assertEqual(self._calls("guardian_execute"), [{"requestId": "request-1"}] * 2)
+        self.sleep.assert_called_once_with(live_mod.EXECUTION_PENDING_SLEEP_S)
+
+    def test_no_wallet_address_raises_before_any_mcp_call(self):
+        # No authorized custodial wallet means no request may reach the signer.
+        live_mod.set_wallet_status_provider(lambda: {
+            "connected": False, "address": None, "signerGranted": False,
+        })
+        with self.assertRaisesRegex(RuntimeError, "wallet not authorized"):
+            self._execute()
+        self.assertEqual(self.fake.calls, [])
+
+    def test_pending_gate_is_polled_then_executed(self):
+        # Pending is not permission: wait for the decision on that same request.
+        self.fake.pending_gate = True
+        self.assertEqual(self._execute(), TX_HASH)
+        self.assertEqual([name for name, _ in self.fake.calls],
+                         ["guardian_pretrade_check", "guardian_pretrade_result", "guardian_execute"])
+        self.assertEqual(self._calls("guardian_pretrade_result"), [{"requestId": "request-1"}])
+        self.assertEqual(self._calls("guardian_execute"), [{"requestId": "request-1"}])
+        self.sleep.assert_called_once_with(0.001)
+
+    def test_revert_still_raises_after_execution(self):
+        # A custodial broadcast hash does not prove on-chain success.
+        self.receipt = {"status": 0}
+        with self.assertRaisesRegex(RuntimeError, "reverted on-chain") as ctx:
+            live_mod.live_buy(self.token, 7.87)
+        self.assertNotIsInstance(ctx.exception, live_mod.BuyPendingError)
+        self._assert_single_gate_and_execute()
+
+    def test_chain_id_is_int_and_value_is_decimal_string_in_the_gate(self):
+        # The authorization must bind an unambiguous chain and wei amount.
+        self._execute()
+        args, = self._calls("guardian_pretrade_check")
+        self.assertIs(type(args["chainId"]), int)
+        self.assertIsInstance(args["value"], str)
+        self.assertRegex(args["value"], r"^[0-9]+$")
+        self.assertEqual(args["value"], "123")
+
+    def test_executor_unavailable_when_mcp_call_is_not_ok(self):
+        # Transport failure cannot be reported as a successfully signed trade.
+        self.fake.execute_error = "executor offline"
+        with self.assertRaisesRegex(RuntimeError, "executor unavailable.*executor offline"):
+            self._execute()
+        self.assertEqual(self._calls("guardian_execute"), [{"requestId": "request-1"}])
 
 
 class AdoptFromTxTests(unittest.TestCase):
