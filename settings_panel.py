@@ -16,6 +16,7 @@ module-load time since ui.py only imports this lazily, on first click.
 from __future__ import annotations
 
 import subprocess
+from urllib.parse import urlparse
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -1015,6 +1016,15 @@ class SettingsPanel(QWidget):
         url = self._new_mcp_url.text().strip()
         if not name or not url:
             self._status_sig.emit("Name and URL are both required to add a server.", True)
+            return
+        # GEMZ4US, Item J (2026-09-21): a value that isn't a URL at all
+        # (e.g. "pas-une-url", no protocol) was accepted with a success
+        # message — only emptiness was ever checked. McpClient always
+        # POSTs to this URL directly (trader/mcp_client.py), so it must
+        # be a real http(s) URL with a host.
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            self._status_sig.emit(f'"{url}" doesn\'t look like a URL — it needs http:// or https:// and a host.', True)
             return
         self.settings["mcp_servers"].append({
             "id": settings_store.new_id(), "name": name, "url": url,
