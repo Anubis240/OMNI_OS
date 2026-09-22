@@ -47,13 +47,13 @@ TOOL_DECLARATIONS = [
             "token) on a supported EVM chain, in both native units and USD. "
             "Read-only — never signs or sends anything, no wallet setup required. Use "
             "this for 'what's my balance' / 'how much ETH do I have on Base' type "
-            "questions. If no address is given, checks the trader panel's own wallet "
-            "(the one created/imported/unlocked there) if one is currently unlocked."
+            "questions. If no address is given, checks the user's Seraph wallet "
+            "when they are signed in and the server-side signer is authorized."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "address": {"type": "STRING", "description": "0x wallet address to check — omit to use the trader panel's currently-unlocked wallet, if any"},
+                "address": {"type": "STRING", "description": "0x wallet address to check — omit to use the user's authorized Seraph wallet, if available"},
                 "chain": {
                     "type": "STRING",
                     "description": f"One of: {', '.join(_LIVE_CHAINS)}. Defaults to ethereum.",
@@ -71,7 +71,7 @@ TOOL_DECLARATIONS = [
             "type": "OBJECT",
             "properties": {
                 "token_address": {"type": "STRING", "description": "0x contract address of the ERC20 token"},
-                "owner_address": {"type": "STRING", "description": "0x wallet address to check — omit to use the trader panel's currently-unlocked wallet, if any"},
+                "owner_address": {"type": "STRING", "description": "0x wallet address to check — omit to use the user's authorized Seraph wallet, if available"},
                 "chain": {
                     "type": "STRING",
                     "description": f"One of: {', '.join(_LIVE_CHAINS)}. Defaults to ethereum.",
@@ -117,24 +117,25 @@ def _gas_price_gwei(chain: str) -> float:
     raise RuntimeError(f"all RPC endpoints failed: {last_err}")
 
 
-def _unlocked_wallet_address() -> str | None:
-    """The trader panel's own wallet, if one is currently unlocked — see
-    trader/wallet/local_wallet.py's status(). Only ever returns the public
-    address, never key material. Used as a fallback so 'what's my balance'
-    doesn't require pasting an address the user just unlocked in the
-    Trader Panel a moment ago (found missing via GEMZ4US's 2026-09-09
-    report). Imported lazily for the same reason trader/live.py is."""
-    from trader.wallet import local_wallet
-    return local_wallet.status().get("address")
+def _seraph_wallet_address() -> str | None:
+    """The user's Seraph wallet address, when they are signed in and the
+    server-side signer is authorized — see trader/live.py's wallet_address().
+    Only ever the public address; this device never holds key material at all
+    since the local wallet was removed in 1.12.0. Used as a fallback so
+    "what's my balance" doesn't require pasting an address the app already
+    knows (found missing via GEMZ4US's 2026-09-09 report). Imported lazily for
+    the same reason trader/live.py is elsewhere in this module."""
+    from trader import live as live_mod
+    return live_mod.wallet_address()
 
 
 def check_wallet_balance(parameters: dict, response=None, player=None, session_memory=None) -> str:
     from trader import live as live_mod
 
     params = parameters or {}
-    address = (params.get("address") or "").strip() or _unlocked_wallet_address()
+    address = (params.get("address") or "").strip() or _seraph_wallet_address()
     if not address:
-        return "No wallet address given, and no wallet is currently unlocked in the trader panel."
+        return "No wallet address given, and the Seraph wallet is not available — sign in to Seraph and authorize the wallet in the console."
     chain = _resolve_chain(params.get("chain"))
     chain_name = chains_mod.resolve(chain)["name"]
     try:
@@ -151,11 +152,11 @@ def check_token_balance(parameters: dict, response=None, player=None, session_me
 
     params = parameters or {}
     token = (params.get("token_address") or "").strip()
-    owner = (params.get("owner_address") or "").strip() or _unlocked_wallet_address()
+    owner = (params.get("owner_address") or "").strip() or _seraph_wallet_address()
     if not token:
         return "Need a token contract address."
     if not owner:
-        return "No owner wallet address given, and no wallet is currently unlocked in the trader panel."
+        return "No owner wallet address given, and the Seraph wallet is not available — sign in to Seraph and authorize the wallet in the console."
     chain = _resolve_chain(params.get("chain"))
     chain_name = chains_mod.resolve(chain)["name"]
     try:
