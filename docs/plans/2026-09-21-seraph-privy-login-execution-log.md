@@ -483,6 +483,19 @@ QA adversarial conduzido pelo orquestrador; evidências fornecidas para esta atu
 
 ---
 
+### W4.P1 — QA adversarial (conduzido pelo orquestrador)
+
+Evidências fornecidas para esta atualização documental, não reexecutadas aqui.
+
+- **Duas divergências fake-vs-real ENCONTRADAS E CORRIGIDAS.** (i) Commit `1675165`: o contador `mints` do fake incrementava na primeira linha do handler, ANTES de `_require_oauth`, contando como mint requisições recusadas por token expirado ou scope faltando; movido para logo antes da emissão da key. (ii) Commit `b92d5c2`: o `guardian_pretrade_check` do fake devolvia `{"decision":"pending","status":"pending",...}`, mas o wallet-fw-api real emite o envelope pending SEM `decision` no topo (`{status, requestId, partial:{verdict,reasons}, retryAfterMs}`); `trader/live.py:303` só reconhece pending quando `decision` está ausente, logo o fake aceitava uma forma que a produção corretamente recusa. Corrigido para espelhar o real.
+- **Assinatura Privy provada, não presumida.** Quatro cenários rodados contra o fake Privy: assinatura correta → 200; chave errada → 401; **corpo adulterado (`caip2` trocado) portando assinatura válida do corpo original → 401**; sem header → 401. O terceiro caso prova que a assinatura cobre o payload inteiro e não é carimbo simbólico.
+- **Portas e estado: limpos.** Thread uvicorn `daemon=True` + `should_exit` + `join(timeout=10)`, com `stop()` em todo tearDown. O único estado de nível de módulo no fake é `FAKE_CHAINS` (constante de dados); todos os contadores e tabelas são por instância, então um teste nunca vê o `stats` de outro.
+- **`/token` não é permissivo:** compara `redirect_uri` EXATO, incluindo a porta efêmera (`fake_seraph_as.py:319`). A porta-insensibilidade existe só no `/authorize`, que é onde o cliente registra `http://127.0.0.1/callback` sem porta.
+- **Limitação de cobertura registrada (não é brecha):** o executor fake implementa 15 dos 19 códigos de D23. `execution_abandoned` é do reconciliador (cron do control-plane, fora do fluxo do desktop) e está corretamente ausente. `gas_estimate_failed` e `gas_cost_exceeded` exigem RPC on-chain, que o fake não possui — o estágio de gas inteiro não existe ali, logo NENHUM teste contra o fake prova esse caminho; ele só é exercitado pelos testes unitários do control-plane e pelo smoke real da W4.P2. `privy_unavailable` não tem controle `_test` correspondente.
+- **Achado de produção (dívida, não corrigido):** `actions/image_generator.py:108` executa `os.environ["REQUESTS_CA_BUNDLE"] = ...` durante o IMPORT do módulo (chamado na linha 113, em nível de módulo), reconfigurando a verificação TLS do processo inteiro. Bastava DESCOBRIR a suíte, sem executar nada, para os testes de integração quebrarem com `SSLCertVerificationError`. Contornado nos testes com snapshot/restauração de `os.environ`, `session.trust_env = False` e `REQUESTS_CA_BUNDLE` apontado ao certificado do fake.
+
+---
+
 ## 9. Decisões aplicadas em execução
 
 | # | Decisão | Motivo |
@@ -517,6 +530,10 @@ QA adversarial conduzido pelo orquestrador; evidências fornecidas para esta atu
 | E28 | `arm_live` exige `signerGranted` explicitamente, além do `connected` derivado | Armar o modo live é a única ação que gasta fundos reais pelo signer do servidor; falha fechado por conta própria em vez de confiar no campo derivado pelo provider |
 | E29 | O segredo da carteira local antiga (`get_data_dir()/config/trader/wallet/local-wallet.enc`, JSON cifrado por Windows DPAPI) fica **INTOCADO**; nenhum código da 1.12.0 o lê, migra ou apaga | As release notes devem instruir o usuário a mover os fundos **ANTES de atualizar**, ou usando a **1.11.x** |
 | E30 | `_gas_quote_log_line` foi removida do engine junto com o módulo da carteira local | A margem de gas passou a ser aplicada pelo executor no servidor; o desktop não pode reportar um número que não computa mais |
+| E31 | O fake Seraph serve HTTPS real com certificado autoassinado, e o cliente confia nele por injeção de `session` | `trader/seraph_auth.py:513-523` exige `https` em todos os endpoints e valida até o próprio fallback `DEFAULT_ENDPOINTS` antes de qualquer request, levantando `ValueError("OAuth issuer must use HTTPS")`. Alternativa rejeitada: patchear `_valid_metadata` no teste, o que desativaria justamente a defesa que o teste de integração existe para exercitar |
+| E32 | O parâmetro `on_unauthorized` do `McpClient` passou a ser honrado também no modo `api_key_oauth` (commit `36c65d0`) | Antes era ignorado no caminho principal, tornando o módulo intestável em integração sem mexer no singleton global que aponta para produção. O tipo `Callable[[], str \| None]` já era exatamente a assinatura de `remint_api_key()`, ou seja, o parâmetro foi projetado para isso e a implementação é que divergia |
+| E33 | `api-keys:write` é scope do GRANT OAuth, não da key mintada. A key recebe `["mcp","wallet:execute"]` | O texto do plano confundia os dois |
+| E34 | Família de refresh revogada faz `remint_api_key()` devolver `None`, mas a key local SOBREVIVE e `needs_login` continua False | Key e refresh token são credenciais independentes, e matar uma key funcional porque o refresh morreu seria destrutivo. `needs_login` só vira True quando o `McpClient` chama `invalidate_session()` após um 401 que sobreviveu ao re-mint |
 
 ---
 
@@ -551,6 +568,15 @@ QA adversarial conduzido pelo orquestrador; evidências fornecidas para esta atu
 | W3.P6 | ✔ concluída + QA — ver §15 | desktop 201 → **337**, OK (3 skips pré-existentes) | relação consolidada em §15 |
 | W4 | ⏳ próxima fase — fakes e UAT | — | — |
 | W5 | pendente | — | — |
+
+**Atualização após W4.P1** (as linhas W4/W5 acima preservam o checkpoint anterior):
+
+| Phase | Status | Testes | Commits |
+|---|---|---|---|
+| W4.P1 | ✔ concluída + QA — ver §16 | desktop 201 → **369 testes, OK (skipped=3)**; 14 testes OAuth + 18 de execução | `12b8b30`, `6e4af63`, `e6ca681`, `1f40e54`, `36c65d0`, `1675165`, `312b497`, `b92d5c2` |
+| W4.P2 | **BLOQUEADA** — exige W1c.P3 e W2.P5 (deploys adiados por decisão explícita do usuário), mais um humano com ≥0,005 ETH em Base | — | — |
+| W4.P3 | **BLOQUEADA** — exige W4.P2 e um humano | — | — |
+| W5 | **Próxima fase executável** — PRD, release notes, packaging, QA global | — | — |
 
 **Sync point W3: S3.1 = `0264ef5`** (esqueleto `SeraphAuth`). W1c.P3 e W2.P5 (deploy) seguem **deliberadamente adiadas até que o `DESKTOP_CLIENT_ID` real seja fixado**.
 
@@ -869,3 +895,36 @@ O desktop começou a wave com **201 testes** e terminou com **337**, **OK com os
 ### Pendência que bloqueia o release
 
 **`DESKTOP_CLIENT_ID` ainda não fixado no `wrangler.toml` do control-plane.** Enquanto estiver unset, a rota de mint trata qualquer cliente OAuth como autorizado, e a key de desktop é justamente a que carrega `wallet:execute`. O valor só existirá quando o desktop fizer seu **primeiro DCR real**. **Precisa ser fixado antes do release; W1c.P3 e W2.P5 permanecem adiadas.**
+
+---
+
+## 16. Checkpoint W4.P1 — fakes e integração end-to-end local
+
+**W4.P1 concluída.** W4.P2 e W4.P3 permanecem **BLOQUEADAS**, conforme §10; próxima fase executável: **W5 (PRD, release notes, packaging, QA global)**. Este checkpoint registra as evidências fornecidas para a atualização documental; commits, testes e verificações de segurança não foram reexecutados nesta atualização do log. Integração local não registra smoke real, deploy ou release.
+
+### Commits, em ordem
+
+**Oito commits** (descrições de escopo, não transcrições das mensagens):
+
+| Commit | Escopo / evidência registrada |
+|---|---|
+| `12b8b30` | Fake parte A: TLS + OAuth |
+| `6e4af63` | B1: mint/delete/signer |
+| `e6ca681` | B2: executor + Privy com assinatura real |
+| `1f40e54` | C: fake `/mcp` |
+| `36c65d0` | Fix do `on_unauthorized` |
+| `1675165` | Fix do contador de mints |
+| `312b497` | T2: 14 testes OAuth |
+| `b92d5c2` | T3: 18 testes de execução + fix do envelope pending |
+
+### Fake e baseline
+
+- `tests/fake_seraph_as.py`: **933 linhas**, um único arquivo simulando quatro serviços (auth-api, control-plane, Privy, guardian-proxy `/mcp`) sobre HTTPS em porta efêmera.
+- Baseline de testes do desktop: **201 → 369 testes, OK (skipped=3)**. Os 3 skips são de empacotamento macOS/Linux, preexistentes e jamais tocados.
+- **Custo:** a suíte passou de ~9 s para ~340 s, porque cada um dos 32 testes de integração sobe e derruba um servidor uvicorn HTTPS próprio. Isolamento total entre casos foi preferido a velocidade.
+
+### O que ficou provado de ponta a ponta sem rede externa
+
+DCR → authorize com PKCE → token com `aud` de `/api` → mint da key `mcfw_` → `/mcp` só com `Bearer mcfw_` → `guardian_wallet_status` → gate de pretrade → `guardian_execute` recebendo SÓ o `requestId` → fake Privy verificando a assinatura de autorização → 401 → re-mint → "Desconectar este dispositivo".
+
+As limitações de cobertura do fake e o achado de produção não corrigido estão registrados em §8; este checkpoint não os encerra.
