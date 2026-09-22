@@ -22,7 +22,9 @@ defaults:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -40,8 +42,24 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Compile Python/spec sources without app imports
         run: python -S scripts/release_bundle.py syntax
-      - name: Stdlib tests without application startup or credentials
-        run: python -S -m unittest discover -s tests -v
+      - name: Linux test-only system dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libportaudio2
+      - name: Isolated test environment with application dependencies
+        run: |
+          python -m venv .venv-test
+          if ($LASTEXITCODE -ne 0) { throw 'venv failed' }
+          $python = if ($IsWindows) { Join-Path $PWD '.venv-test/Scripts/python.exe' } else { Join-Path $PWD '.venv-test/bin/python' }
+          "TEST_PYTHON=$python" >> $env:GITHUB_ENV
+          & $python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+      - name: Full test suite without application startup or credentials
+        run: |
+          & $env:TEST_PYTHON -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Test suite failed' }
       - name: Workflow lint (pinned actionlint image, Ubuntu only)
         if: runner.os == 'Linux'
         shell: bash
