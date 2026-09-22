@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -68,6 +69,7 @@ class _LoopbackListener:
         self.event = threading.Event()
         self.code: str | None = None
         self.error: str | None = None
+        self.state_mismatch_seen = False
         self._accepted = False
         listener = self
 
@@ -87,6 +89,7 @@ class _LoopbackListener:
                     query = parse_qs(parsed.query, keep_blank_values=True)
                     states = query.get("state", [])
                     if len(states) != 1 or not hmac.compare_digest(states[0].encode("utf-8"), state.encode("utf-8")):
+                        listener.state_mismatch_seen = True
                         self._reply(400)
                         return
                     codes = query.get("code", [])
@@ -150,6 +153,13 @@ class AuthResult:
     status: AuthStatus | None = None
 
 
+class _MintError(Exception):
+    def __init__(self, code: str, status_code: int | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status_code = status_code
+
+
 class SeraphAuth:
     def __init__(self, *, issuer=SERAPH_ISSUER, resource=SERAPH_API_RESOURCE, scopes=SERAPH_SCOPES, api_keys_url: str | None = None,
                  settings_key=SETTINGS_KEY, session: "requests.Session | None" = None, opener: Callable[[str], bool] | None = None,
@@ -176,6 +186,13 @@ class SeraphAuth:
         self._last_error: str | None = None
         # The future login implementation must reset this before each flow.
         self._registrations_this_login = 0
+        # Separate flow locks serialize operations without blocking status/UI waits.
+        self._login_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
+        self._remint_lock = threading.Lock()
+        self._active_listener = None
+        self._last_forced_refresh = None
+        self._last_remint = None
 
     def __repr__(self) -> str:
         """Return a secret-free description of the authentication mode."""
@@ -184,11 +201,113 @@ class SeraphAuth:
 
     def login(self, on_status: Callable[[str], None] | None = None, timeout_s: int = LOGIN_TIMEOUT_S) -> AuthResult:
         """Run OAuth login and device-key issuance, reporting progress until timeout."""
-        raise NotImplementedError("W3.P2 will implement login")
+        if not self._login_lock.acquire(blocking=False):
+            return AuthResult(ok=False, error="cancelled", error_description="login already in progress")
+        listener = None
+        notify = on_status or (lambda message: None)
+        try:
+            notify("Checking Seraph configuration…")
+            with self._lock:
+                self._registrations_this_login = 0
+            try:
+                meta = self._discover_metadata()
+            except Exception:
+                return AuthResult(ok=False, error="metadata_error")
+            client_id = self._ensure_client(f"http://{LOOPBACK_HOST}{CALLBACK_PATH}")
+            if not client_id:
+                return AuthResult(ok=False, error="registration_failed")
+            verifier, challenge = self._pkce_pair()
+            state = self._new_state()
+            listener = _LoopbackListener(state)
+            with self._lock:
+                self._active_listener = listener
+            url = self._build_authorize_url(client_id=client_id, challenge=challenge,
+                                            state=state, redirect_uri=listener.redirect_uri)
+            notify("Opening your browser to sign in…")
+            import webbrowser
+            if not (self.opener or webbrowser.open)(url):
+                return AuthResult(ok=False, error="browser_open_failed", error_description=url)
+            notify("Waiting for browser sign-in…")
+            completed = listener.wait(timeout_s)
+            if listener.error == "cancelled":
+                return AuthResult(ok=False, error="cancelled")
+            if not completed:
+                # Do not let an unsolicited bad state abort a legitimate login.
+                error = "state_mismatch" if listener.state_mismatch_seen else "timeout"
+                return AuthResult(ok=False, error=error)
+            if listener.error:
+                error = listener.error if listener.error in ("access_denied", "state_mismatch") else "token_exchange_failed"
+                return AuthResult(ok=False, error=error)
+            if not listener.code:
+                return AuthResult(ok=False, error="token_exchange_failed")
+            notify("Completing sign-in…")
+            response = (self.session or requests).post(meta["token_endpoint"], data={
+                "grant_type": "authorization_code", "code": listener.code,
+                "redirect_uri": listener.redirect_uri, "client_id": client_id,
+                "code_verifier": verifier, "resource": self._resource,
+            }, timeout=HTTP_TIMEOUT_S)
+            try:
+                tokens = response.json()
+                if not isinstance(tokens, dict):
+                    raise ValueError("invalid token response")
+            except (ValueError, TypeError):
+                return AuthResult(ok=False, error="token_exchange_failed")
+            if response.status_code != 200:
+                if tokens.get("error") == "invalid_client":
+                    self._persist(lambda block: block.update(client_id=None))
+                    return AuthResult(ok=False, error="invalid_client")
+                return AuthResult(ok=False, error="token_exchange_failed")
+            access = tokens.get("access_token")
+            if not isinstance(access, str) or not access:
+                return AuthResult(ok=False, error="token_exchange_failed")
+            try:
+                expires = float(tokens.get("expires_in") or DEFAULT_EXPIRES_IN_S)
+            except (ValueError, TypeError):
+                return AuthResult(ok=False, error="token_exchange_failed")
+            identity = {}
+            try:
+                payload = access.split(".")[1]
+                decoded = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+                if isinstance(decoded, dict):
+                    identity = decoded
+            except (ValueError, IndexError, UnicodeError):
+                logger.warning("oauth_identity_unavailable")
+            notify("Creating your Seraph API key…")
+            try:
+                fields = self._mint_api_key(access)
+            except _MintError as exc:
+                return AuthResult(ok=False, error=exc.code)
+            now = self._clock()
+            fields.update(access_token=access, access_expires_at=now + expires,
+                          refresh_token=tokens.get("refresh_token"), refresh_issued_at=now,
+                          scope=tokens.get("scope"), subject=identity.get("sub"), org_id=identity.get("org_id"))
+            with self._lock:
+                if listener.error == "cancelled":
+                    return AuthResult(ok=False, error="cancelled")
+                self._persist(lambda block: block.update(fields))
+                self._needs_login = False
+                self._last_error = None
+                self._last_forced_refresh = None
+                self._last_remint = None
+            notify("Signed in")
+            return AuthResult(ok=True, status=self.status())
+        except requests.RequestException:
+            return AuthResult(ok=False, error="network_error")
+        finally:
+            try:
+                with self._lock:
+                    self._active_listener = None
+                if listener is not None:
+                    listener.stop()
+            finally:
+                self._login_lock.release()
 
     def cancel_login(self) -> None:
         """Cancel an in-progress login flow."""
-        raise NotImplementedError("W3.P2 will implement cancel_login")
+        with self._lock:
+            if self._active_listener is not None:
+                self._active_listener.error = "cancelled"
+                self._active_listener.event.set()
 
     def get_api_key(self) -> str | None:
         """Return the available device API key, or None when unavailable."""
@@ -196,7 +315,60 @@ class SeraphAuth:
 
     def remint_api_key(self) -> str | None:
         """Reissue the device API key using the OAuth session when possible."""
-        raise NotImplementedError("W3.P2 will implement remint_api_key")
+        with self._remint_lock:
+            with self._lock:
+                now = self._clock()
+                if self._last_remint is not None and 0 <= now - self._last_remint < REMINT_DEDUP_S:
+                    return self.get_api_key()
+                self._last_remint = now
+            try:
+                access = self._get_access_token()
+                if not access:
+                    raise _MintError("api_key_mint_failed")
+                try:
+                    fields = self._mint_api_key(access)
+                except _MintError as exc:
+                    if exc.status_code != 401:
+                        raise
+                    access = self._get_access_token(force_refresh=True)
+                    if not access:
+                        raise _MintError("api_key_mint_failed") from exc
+                    fields = self._mint_api_key(access)
+                with self._lock:
+                    self._persist(lambda block: block.update(fields))
+                    self._last_error = None
+                    self._needs_login = False
+                return fields["api_key"]
+            except Exception:
+                with self._lock:
+                    self._last_error = "remint_failed"
+                logger.warning("remint_failed")
+                return None
+
+    def _mint_api_key(self, access_token: str) -> dict:
+        """Validate a device key without persisting partial credentials."""
+        try:
+            response = (self.session or requests).post(self.api_keys_url,
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                json={"name": CLIENT_NAME, "device_id": self._device_id(), "replace_existing": True},
+                timeout=MINT_TIMEOUT_S)
+            if response.status_code != 201:
+                raise _MintError("insufficient_scope" if response.status_code == 403 else "api_key_mint_failed",
+                                 response.status_code)
+            data = response.json()
+            key = data.get("key") if isinstance(data, dict) else None
+            if not isinstance(key, str) or not key.startswith(API_KEY_PREFIX):
+                raise _MintError("api_key_mint_failed")
+            if "mcpUrl" in data and data["mcpUrl"] != SERAPH_MCP_URL:
+                logger.warning("mint_mcp_url_mismatch")
+            scopes = data.get("scopes", [])
+            if not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes):
+                scopes = []
+            return {"api_key": key, "api_key_id": data.get("id"),
+                    "api_key_prefix": data.get("keyPrefix") or key[:12], "api_key_name": CLIENT_NAME,
+                    "api_key_created_at": self._clock(), "api_key_source": "oauth", "api_key_scopes": scopes}
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            raise _MintError("api_key_mint_failed") from exc
 
     def set_manual_api_key(self, key: str) -> None:
         """Store a user-supplied API key and select manual authentication mode."""
@@ -217,7 +389,44 @@ class SeraphAuth:
 
     def disconnect_device(self) -> None:
         """Disconnect the device, revoking credentials and clearing local authentication."""
-        raise NotImplementedError("W3.P2 will implement disconnect_device")
+        try:
+            with self._lock:
+                block = self._load()
+            try:
+                access = self._get_access_token()
+                if access and block.get("api_key_id"):
+                    response = (self.session or requests).delete(
+                        f"{self.api_keys_url}/{block['api_key_id']}",
+                        params={"device_id": self._device_id()},
+                        headers={"Authorization": f"Bearer {access}"}, timeout=DISCONNECT_TIMEOUT_S)
+                    if not 200 <= response.status_code < 300:
+                        logger.warning("disconnect_remote_delete_failed")
+            except Exception:
+                logger.warning("disconnect_remote_delete_failed")
+            try:
+                with self._lock:
+                    block = self._load()
+                if block.get("refresh_token"):
+                    endpoint = block.get("revocation_endpoint") or self._discover_metadata()["revocation_endpoint"]
+                    response = (self.session or requests).post(endpoint, data={
+                        "token": block["refresh_token"], "client_id": block.get("client_id"),
+                        "token_type_hint": "refresh_token"}, timeout=REVOKE_TIMEOUT_S)
+                    if not 200 <= response.status_code < 300:
+                        logger.warning("disconnect_remote_revoke_failed")
+            except Exception:
+                logger.warning("disconnect_remote_revoke_failed")
+        except Exception:
+            logger.warning("disconnect_failed")
+        finally:
+            try:
+                with self._lock:
+                    self._clear_session()
+                    self._needs_login = False
+                    self._last_error = None
+                    self._last_remint = None
+                    self._last_forced_refresh = None
+            except Exception:
+                logger.warning("disconnect_local_clear_failed")
 
     def status(self) -> AuthStatus:
         """Return a pure, secret-free snapshot without network or persistence writes."""
@@ -407,11 +616,61 @@ class SeraphAuth:
 
     def _get_access_token(self, force_refresh: bool = False) -> str | None:
         """Obtain an API-resource access token, refreshing forcibly when requested."""
-        raise NotImplementedError("W3.P2 will implement _get_access_token")
+        # Serialize refresh rotation, but release the auth lock during network I/O.
+        with self._refresh_lock:
+            with self._lock:
+                block = self._load()
+                now = self._clock()
+                access = block.get("access_token")
+                expires = block.get("access_expires_at")
+                valid = isinstance(expires, (int, float)) and now < expires - REFRESH_SKEW_S
+                if not block.get("refresh_token"):
+                    return access if valid else None
+                if not force_refresh and valid:
+                    return access
+                if (force_refresh and self._last_forced_refresh is not None
+                        and 0 <= now - self._last_forced_refresh < REFRESH_DEDUP_S):
+                    return access
+            try:
+                endpoint = block.get("token_endpoint") or self._discover_metadata()["token_endpoint"]
+                response = (self.session or requests).post(endpoint, data={
+                    "grant_type": "refresh_token", "refresh_token": block["refresh_token"],
+                    "client_id": block.get("client_id"), "resource": self._resource}, timeout=HTTP_TIMEOUT_S)
+                if response.status_code >= 500:
+                    return None
+                data = response.json()
+                if not isinstance(data, dict):
+                    return None
+                with self._lock:
+                    # Do not restore credentials cleared/replaced while the POST ran.
+                    current = self._load()
+                    if any(current.get(name) != block.get(name) for name in ("refresh_token", "access_token", "client_id")):
+                        return None
+                    if data.get("error") == "invalid_grant":
+                        self._clear_tokens()
+                        return None
+                    access = data.get("access_token")
+                    if response.status_code != 200 or not isinstance(access, str) or not access:
+                        return None
+                    fields = {"access_token": access, "access_expires_at": self._clock() +
+                              float(data.get("expires_in") or DEFAULT_EXPIRES_IN_S)}
+                    if data.get("refresh_token"):
+                        fields.update(refresh_token=data["refresh_token"], refresh_issued_at=self._clock())
+                    self._persist(lambda current: current.update(fields))
+                    if force_refresh:
+                        self._last_forced_refresh = self._clock()
+                    return access
+            except (requests.RequestException, ValueError, TypeError):
+                logger.warning("oauth_refresh_failed")
+                return None
 
     def invalidate_session(self) -> None:
         """Invalidate the current OAuth session so authentication can be renewed."""
-        raise NotImplementedError("W3.P2 will implement invalidate_session")
+        with self._lock:
+            self._clear_session()
+            self._needs_login = True
+            self._last_remint = None
+            self._last_forced_refresh = None
 
 
 _default_auth: SeraphAuth | None = None
