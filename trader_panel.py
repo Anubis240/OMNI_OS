@@ -12,6 +12,7 @@ only imports TraderPanel lazily, on first click of the TRADER button.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -29,7 +30,7 @@ from PyQt6.QtWidgets import (
 from trader import chains as chains_mod
 from trader import mcp_client
 from trader.engine import TraderEngine
-from trader.seraph_auth import SERAPH_WALLET_CONSOLE_URL
+from trader.seraph_auth import SERAPH_WALLET_CONSOLE_URL, get_default_auth, format_identity
 
 _FEED_MAX_ITEMS = 300
 _FORCE_SELL_HINT_RE = re.compile(r"sell\s+(\S+)\s+force", re.I)
@@ -68,12 +69,10 @@ _CONFIG_FIELDS = [
 
 
 class McpKeySetupOverlay(QWidget):
-    """First-use popup asking for the Seraph MCP API key, shown over the
-    trader panel when no key was found (neither in the Seraph Guardian
-    app's settings nor previously saved by save_seraph_api_key). Only
-    appears once — mcp_client.save_seraph_api_key persists the key so
-    later sessions never hit this again."""
+    """Connect to Seraph through browser login or a manually supplied key."""
 
+    sign_in_requested = pyqtSignal()
+    cancel_requested = pyqtSignal()
     done = pyqtSignal(str)
 
     def __init__(self, C, parent=None):
@@ -99,13 +98,74 @@ class McpKeySetupOverlay(QWidget):
             w.setStyleSheet(f"color: {color}; background: transparent;")
             return w
 
-        layout.addWidget(_lbl("◈  SERAPH MCP KEY REQUIRED", 12, True))
-        layout.addWidget(_lbl("The trader needs a Seraph API key to gate and execute trades.", 8, color=C.PRI_DIM))
+        layout.addWidget(_lbl("◈  CONNECT TO SERAPH", 12, True))
+        subtitle = _lbl("Sign in with your Seraph account to use the trader. We'll create your Seraph API key automatically — nothing to copy or paste.", 8, color=C.PRI_DIM)
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
         layout.addSpacing(6)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
         layout.addSpacing(4)
+
+        self._sign_in_btn = QPushButton("▸  SIGN IN WITH SERAPH")
+        self._sign_in_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._sign_in_btn.setFixedHeight(36)
+        self._sign_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sign_in_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 1px;
+            }}
+            QPushButton:hover {{
+                background: {C.PRI_GHO_BG}; border: 1px solid {C.PRI};
+            }}
+        """)
+        self._sign_in_btn.clicked.connect(self.sign_in_requested.emit)
+        layout.addWidget(self._sign_in_btn)
+
+        self._status_lbl = _lbl("", 8, color=C.TEXT_DIM)
+        self._status_lbl.setWordWrap(True)
+        layout.addWidget(self._status_lbl)
+        self._status_lbl.hide()
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setFont(QFont("Segoe UI", 8))
+        self._cancel_btn.setFixedHeight(20)
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_DIM}; border: none; }}
+            QPushButton:hover {{ color: {C.TEXT}; }}
+        """)
+        self._cancel_btn.clicked.connect(self.cancel_requested.emit)
+        layout.addWidget(self._cancel_btn)
+        self._cancel_btn.hide()
+
+        self._storage_warn_lbl = _lbl("⚠ Secure storage unavailable on this device — your key will be stored unencrypted.", 8, color=C.RED)
+        self._storage_warn_lbl.setWordWrap(True)
+        layout.addWidget(self._storage_warn_lbl)
+        self._storage_warn_lbl.hide()
+
+        self._manual_link = QPushButton("Use an API key instead")
+        self._manual_link.setFont(QFont("Segoe UI", 8))
+        self._manual_link.setFixedHeight(22)
+        self._manual_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manual_link.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.ACC2};
+                border: none; text-align: left; padding: 2px 0;
+            }}
+            QPushButton:hover {{ color: {C.PRI}; text-decoration: underline; }}
+        """)
+        self._manual_link.clicked.connect(
+            lambda: self._manual_widget.setVisible(self._manual_widget.isHidden())
+        )
+        layout.addWidget(self._manual_link)
+        self._manual_widget = QWidget()
+        manual_layout = QVBoxLayout(self._manual_widget)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._manual_widget)
+        self._manual_widget.hide()
 
         self._key_input = QLineEdit()
         self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -119,7 +179,7 @@ class McpKeySetupOverlay(QWidget):
             }}
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
         """)
-        layout.addWidget(self._key_input)
+        manual_layout.addWidget(self._key_input)
 
         get_key_btn = QPushButton("Get a Seraph API key ↗")
         get_key_btn.setFont(QFont("Segoe UI", 8))
@@ -133,8 +193,6 @@ class McpKeySetupOverlay(QWidget):
             QPushButton:hover {{ color: {C.PRI}; text-decoration: underline; }}
         """)
         get_key_btn.clicked.connect(lambda: webbrowser.open(mcp_client.SERAPH_KEY_SIGNUP_URL))
-        layout.addWidget(get_key_btn)
-        layout.addSpacing(10)
 
         submit_btn = QPushButton("▸  SAVE KEY")
         submit_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -150,18 +208,8 @@ class McpKeySetupOverlay(QWidget):
             }}
         """)
         submit_btn.clicked.connect(self._submit)
-        layout.addWidget(submit_btn)
-
-        skip_btn = QPushButton("Skip for now")
-        skip_btn.setFont(QFont("Segoe UI", 8))
-        skip_btn.setFixedHeight(20)
-        skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        skip_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.TEXT_DIM}; border: none; }}
-            QPushButton:hover {{ color: {C.TEXT}; }}
-        """)
-        skip_btn.clicked.connect(self.hide)
-        layout.addWidget(skip_btn)
+        manual_layout.addWidget(submit_btn)
+        manual_layout.addWidget(get_key_btn)
 
     def _submit(self):
         key = self._key_input.text().strip()
@@ -172,6 +220,17 @@ class McpKeySetupOverlay(QWidget):
             )
             return
         self.done.emit(key)
+
+    def set_status(self, text: str) -> None:
+        self._status_lbl.setText(text)
+        self._status_lbl.setVisible(bool(text))
+
+    def set_waiting(self, waiting: bool) -> None:
+        self._sign_in_btn.setEnabled(not waiting)
+        self._cancel_btn.setVisible(waiting)
+
+    def set_storage_warning(self, insecure: bool) -> None:
+        self._storage_warn_lbl.setVisible(insecure)
 
 
 class TraderPanel(QWidget):
@@ -207,6 +266,9 @@ class TraderPanel(QWidget):
         self._run_on_gui_sig.connect(lambda fn: fn())
         self._config_inputs: dict[str, QLineEdit] = {}
         self._chain_checks: dict[str, QCheckBox] = {}
+        self._login_in_flight = False
+        self._needs_login_overlay_shown = False
+        self._mcp_key_overlay: "McpKeySetupOverlay | None" = None
 
         self._build_ui()
         self._refresh_stats()
@@ -214,14 +276,24 @@ class TraderPanel(QWidget):
         self._refresh_watchlist()
         self._load_config_into_ui()
 
-        self._mcp_key_overlay: "McpKeySetupOverlay | None" = None
-        if not mcp_client.get_default_client().api_key:
+        if not mcp_client.has_credentials():
+            self._set_panel_enabled(False)
             self._show_mcp_key_setup()
 
     # ---------- Seraph MCP key first-use setup ----------
 
     def _show_mcp_key_setup(self):
+        if self._mcp_key_overlay is not None:
+            self._mcp_key_overlay.show()
+            self._mcp_key_overlay.raise_()
+            return
         ov = McpKeySetupOverlay(self._C, self)
+        try:
+            ov.set_storage_warning(not mcp_client.credential_status().get("secure_storage", True))
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to read Seraph secure storage status")
+        ov.sign_in_requested.connect(self._start_seraph_login)
+        ov.cancel_requested.connect(self._cancel_seraph_login)
         ov.done.connect(self._on_mcp_key_submitted)
         self._position_mcp_key_overlay(ov)
         ov.show()
@@ -229,7 +301,7 @@ class TraderPanel(QWidget):
         self._mcp_key_overlay = ov
 
     def _position_mcp_key_overlay(self, ov: "McpKeySetupOverlay"):
-        ow, oh = 440, 260
+        ow, oh = 440, 380
         ov.setGeometry(
             (self.width()  - ow) // 2,
             (self.height() - oh) // 2,
@@ -243,6 +315,66 @@ class TraderPanel(QWidget):
             self._mcp_key_overlay = None
         if self._key_warn_lbl:
             self._key_warn_lbl.hide()
+        self._set_panel_enabled(True)
+        self._refresh_seraph_status()
+        self._refresh_seraph_account_row()
+
+    def _start_seraph_login(self) -> None:
+        if self._login_in_flight:
+            return
+        self._login_in_flight = True
+        if self._mcp_key_overlay is not None:
+            self._mcp_key_overlay.set_waiting(True)
+            self._mcp_key_overlay.set_status("Starting…")
+
+        def on_status(text):
+            self._run_on_gui_sig.emit(lambda t=text: self._mcp_key_overlay and self._mcp_key_overlay.set_status(t))
+
+        self._background(lambda: get_default_auth().login(on_status=on_status), self._on_seraph_login_done)
+
+    def _cancel_seraph_login(self) -> None:
+        try:
+            get_default_auth().cancel_login()
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to cancel Seraph login")
+        if self._mcp_key_overlay is not None:
+            self._mcp_key_overlay.set_status("Cancelling…")
+
+    def _on_seraph_login_done(self, result) -> None:
+        self._login_in_flight = False
+        if getattr(result, "ok", False):
+            if self._mcp_key_overlay is not None:
+                self._mcp_key_overlay.hide()
+                self._mcp_key_overlay = None
+            self._set_panel_enabled(True)
+            if self._key_warn_lbl:
+                self._key_warn_lbl.hide()
+            self._append_feed_text("OK: connected to Seraph.")
+            self._refresh_seraph_status()
+            self._refresh_seraph_account_row()
+        else:
+            message = TraderPanel._seraph_login_error_text(
+                getattr(result, "error", None), getattr(result, "error_description", None)
+            )
+            if self._mcp_key_overlay is not None:
+                self._mcp_key_overlay.set_waiting(False)
+                self._mcp_key_overlay.set_status(message)
+            self._append_feed_text("SYS: " + message)
+
+    def _set_panel_enabled(self, enabled: bool) -> None:
+        for widget in self._gated_widgets:
+            widget.setEnabled(enabled)
+
+    def _refresh_seraph_status(self) -> None:
+        try:
+            status = mcp_client.credential_status()
+        except Exception:
+            return
+        self._seraph_status_lbl.setText(TraderPanel._seraph_status_text(status))
+        if status.get("needs_login") and not self._needs_login_overlay_shown:
+            self._needs_login_overlay_shown = True
+            self._set_panel_enabled(False)
+            self._show_mcp_key_setup()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -374,6 +506,7 @@ class TraderPanel(QWidget):
     # ---------- UI ----------
 
     def _build_ui(self):
+        self._gated_widgets: list[QWidget] = []
         C = self._C
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -392,11 +525,16 @@ class TraderPanel(QWidget):
         header.addWidget(self._mode_lbl)
 
         self._key_warn_lbl = None
-        if not mcp_client.get_default_client().api_key:
+        if not mcp_client.has_credentials():
             self._key_warn_lbl = QLabel("⚠ no Seraph API key found — trades will fail closed")
             self._key_warn_lbl.setFont(QFont("Segoe UI", 8))
             self._key_warn_lbl.setStyleSheet(f"color: {C.RED}; background: transparent;")
             header.addWidget(self._key_warn_lbl)
+
+        self._seraph_status_lbl = QLabel("")
+        self._seraph_status_lbl.setFont(QFont("Segoe UI", 8))
+        self._seraph_status_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        header.addWidget(self._seraph_status_lbl)
 
         # Toggled via MainWindow, which owns the actual config panel widget
         # (a floating overlay over the orb/trader view — see
@@ -410,6 +548,7 @@ class TraderPanel(QWidget):
         header.addWidget(self._start_btn)
         scan_btn = self._make_button("⟳ SCAN NOW", lambda: self._run_command("/scan"))
         header.addWidget(scan_btn)
+        self._gated_widgets.extend([config_btn, self._start_btn, scan_btn])
         root.addLayout(header)
 
         # Stats row
@@ -509,6 +648,7 @@ class TraderPanel(QWidget):
         # Command bar
         cmd_row = QHBoxLayout()
         self._cmd_input = QLineEdit()
+        self._gated_widgets.append(self._cmd_input)
         self._cmd_input.setPlaceholderText("buy SYM:0x... · sell SYM · watch SYM:0x... · help")
         self._cmd_input.setFont(QFont("Segoe UI", 9))
         self._cmd_input.setStyleSheet(
@@ -523,6 +663,10 @@ class TraderPanel(QWidget):
         # empty stretch region below the sys-monitor bars), not down here —
         # see left_panel_widget() / MainWindow.set_left_panel_extra().
         self._left_config_widget = self._build_left_config_panel()
+        self._seraph_timer = QTimer(self)
+        self._seraph_timer.timeout.connect(self._refresh_seraph_status)
+        self._seraph_timer.start(30000)
+        self._refresh_seraph_status()
 
     def left_panel_widget(self) -> QWidget:
         """Mounted into the main window's left sidebar while this panel is
@@ -584,6 +728,13 @@ class TraderPanel(QWidget):
         # Settings had a key field at all. save_seraph_api_key() already
         # persists + live-applies with no restart needed (mcp_client.py);
         # this was purely a missing UI affordance to reach it again.
+        self._seraph_identity_lbl = QLabel("Seraph account: —")
+        self._seraph_identity_lbl.setFont(QFont("Segoe UI", 7))
+        self._seraph_identity_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        col.addWidget(self._seraph_identity_lbl)
+        self._seraph_account_btn = self._make_button("…", self._on_seraph_account_button)
+        col.addWidget(self._seraph_account_btn)
+
         key_lbl = QLabel("Seraph API key")
         key_lbl.setFont(QFont("Segoe UI", 7))
         key_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; margin-top: 4px;")
@@ -597,7 +748,58 @@ class TraderPanel(QWidget):
         key_save_btn = self._make_button("SAVE KEY", self._on_save_seraph_key)
         col.addWidget(key_save_btn)
 
+        self._refresh_seraph_account_row()
         return wrap
+
+    def _refresh_seraph_account_row(self) -> None:
+        # The left config panel is built lazily (left_panel_widget), so these
+        # widgets may not exist yet when a login/disconnect finishes. Refreshing
+        # is best-effort: _build_left_config_panel calls this itself on create.
+        if getattr(self, "_seraph_identity_lbl", None) is None:
+            return
+        try:
+            status = mcp_client.credential_status()
+        except Exception:
+            return
+        try:
+            identity = "Seraph account: " + format_identity(status)
+        except Exception:
+            identity = "Seraph account: —"
+        self._seraph_identity_lbl.setText(identity)
+        self._seraph_account_btn.setText(
+            "DESCONECTAR ESTE DISPOSITIVO" if mcp_client.has_credentials() else "SIGN IN"
+        )
+
+    def _on_seraph_account_button(self) -> None:
+        if not mcp_client.has_credentials():
+            self._show_mcp_key_setup()
+            return
+        if not self._confirm_warning(
+            "Desconectar este dispositivo?",
+            "Isto remove a key do Seraph deste dispositivo e a revoga no servidor.",
+        ):
+            return
+        self._background(self._disconnect_device_work, self._on_disconnect_device_done,
+                         pending_text="SYS: desconectando este dispositivo…")
+
+    def _disconnect_device_work(self) -> dict:
+        try:
+            get_default_auth().disconnect_device()
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to complete Seraph device disconnect")
+        try:
+            mcp_client.get_default_client().invalidate()
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to invalidate Seraph client")
+        return {"ok": True}
+
+    def _on_disconnect_device_done(self, _result) -> None:
+        self._append_feed_text("OK: dispositivo desconectado do Seraph.")
+        self._refresh_seraph_status()
+        self._refresh_seraph_account_row()
+        self._set_panel_enabled(False)
+        self._needs_login_overlay_shown = False
+        self._show_mcp_key_setup()
 
     def _on_save_seraph_key(self):
         key = self._seraph_key_input.text().strip()
