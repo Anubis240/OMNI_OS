@@ -436,6 +436,27 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 
 ---
 
+### W1b.P4 — QA adversarial
+
+QA adversarial feito pelo orquestrador; diff `6204e89..a29f4ef`.
+
+- **P4-1 SEV-2 — CORRIGIDO em `271bc43`.** `readNativeBalances` dava um `AbortSignal.timeout(3000)` NOVO a cada URL da lista, sequencialmente. Ethereum tem 4 URLs, então o pior caso por chain era 12 s; somado aos 5 s de `walletStatus`, `guardian_wallet_status` podia levar ~17 s contra um budget de proxy de ~14 s. Agravante: os IPs de egress compartilhados da Cloudflare levam 429 de RPC pública com frequência, então o caminho lento é comum. Fix: deadline agregado de 3 s por chain cobrindo todas as tentativas daquela chain.
+- **P4-2 SEV-3 — CORRIGIDO em `271bc43`.** `executeGate` mascarava 4xx conclusivo (a rota `/api/internal/wallet/execute` devolve 400 para `requestId`/`orgId` sintaticamente inválidos) como `executor_unavailable`, fazendo o agente retentar para sempre um pedido que nunca funcionaria. Fix: `callControlPlane` ganhou `decodeConclusiveError` opcional; só `executeGate` o passa, mapeando 4xx para `{ok:false, code:"invalid_request"}`.
+- **P4-3 SEV-2 — CORRIGIDO em `6ad5354`.** Downgrade de gate non-swap via poll: se o upstream devolvesse `pending` para um approve/withdraw, o gate nascia com `allow` estático, mas o `guardian_pretrade_result` posterior fazia `patchGate` com o verdict upstream (o crypto-mcp é stateless e não sabe o `kind`). Fix no control-plane: `patchGate` só altera gate com `kind = 'swap'`.
+- **P4-4 SEV-3 — CORRIGIDO em `6ad5354`.** Extensão indefinida de TTL por re-poll: cada `guardian_pretrade_result` num request já `complete` fazia PATCH com `decidedAt`/`expiresAt` novos, permitindo manter um `allow` vivo indefinidamente re-pollando a cada menos de 180 s. Fix no mesmo lugar: `patchGate` só altera gate com `decision = 'pending'`; decisões terminais são imutáveis.
+- **Analisado e descartado:** `logIgnoredCallerFields` loga só nomes de chaves, nunca valores; PATCH cross-tenant é fail-closed no servidor (`orgId`/`userId` no WHERE); drift entre as tabelas de chains do crypto-mcp e do control-plane só pode tornar o crypto-mcp mais conservador; `guardian_wallet_status` gasta no máximo 15 subrequests, bem abaixo do teto de 50 do Workers.
+
+### W1b.P5 — QA adversarial
+
+QA adversarial feito pelo orquestrador.
+
+- **SEV-2 bypass pelo alias legado — CORRIGIDO em `448ee48`.** `LEGACY_TOOL_ALIASES` do crypto-mcp mapeia `guardian.execute` para `guardian_execute`, e `canonicalToolName` roda ANTES do dispatch. O gate do proxy comparava só a grafia com underscore, então uma key com `["*"]` e sem `wallet:execute` enviando `params.name = "guardian.execute"` passava pelo gate. Dano real na configuração atual: zero, porque sem `wallet:execute` o tenant não tem `userId`, o header não é emitido e `walletExecute` devolve `user_unresolved` sem round-trip — mas o controle primário estava furado e o sistema dependia de uma única barreira. Fix: `WALLET_EXECUTE_TOOL_NAMES` é um `ReadonlySet` com as duas grafias.
+- **Hipótese descartada com prova: case sensitivity.** `canonicalToolName` não faz `toLowerCase()`, então `Guardian_Execute` passa pelo proxy sob wildcard mas morre em `Unknown tool` (-32601) no crypto-mcp.
+- **Hipótese descartada com prova: tenant OAuth com `wallet:execute`.** O tenant-resolver mantém apenas scopes mcp-namespaced e descarta o resto, então um token OAuth nunca carrega `wallet:execute`.
+- **Dívida registrada:** o acoplamento entre `WALLET_EXECUTE_TOOL_NAMES` (guardian-proxy) e `LEGACY_TOOL_ALIASES` (crypto-mcp) é por convenção, não por tipo. A correção estrutural seria mover o mapa de aliases para `@mcp-firewall/shared-types`.
+
+---
+
 ## 9. Decisões aplicadas em execução
 
 | # | Decisão | Motivo |
@@ -457,6 +478,10 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 | E15 | Prova negativa on-chain via nonce vale **apenas como veto negativo** | Nonce nunca é autoridade positiva de existência; o lookup da Privy por `reference_id` é a única autoridade |
 | E16 | Webhooks Privy **avaliados e descartados**; adotar polling | Produção exige plano Enterprise e a administração é exclusiva pelo dashboard; spec OpenAPI oficial com 159 paths e nenhum contendo `webhook` |
 | E17 | Estorno permitido **apenas mediante negativa explícita da Privy** | Falha de transporte pode ocorrer após commit; Privy inalcançável não prova ausência de envio e nunca autoriza estorno |
+| E18 | Binding `CONTROL_PLANE` de `[[env.staging.services]]` do crypto-mcp aponta para `mcp-firewall-control-plane-api-preview` | O crypto-mcp só tem o ambiente nomeado `staging`; o control-plane-api só tem `preview`. Registrado em comentário no próprio `wrangler.toml` |
+| E19 | `wallet:execute` é o scope **DEDICADO** de `guardian_execute` e **SUBSTITUI** a checagem pelo nome literal, não soma a ela | `["wallet:execute"]` sozinho autoriza `guardian_execute` e mais nada; `["guardian_execute"]` sozinho **NÃO** autoriza; `["*"]` **NÃO** autoriza. Tenants OAuth nunca carregam o grant |
+| E20 | Gates não-swap e gates com decisão terminal são imutáveis: `patchGate` exige `kind = 'swap'` **E** `decision = 'pending'` no WHERE | Fecha P4-3 e P4-4 com uma só mudança |
+| E21 | Não existe var `CONTROL_PLANE_URL` no `wrangler.toml` do crypto-mcp, deliberadamente | Sem o service binding, as tools de carteira falham fechado em vez de alcançar a internet pública |
 
 ---
 
@@ -473,9 +498,9 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 | W1b.P1 | ✔ concluída + QA | control-plane | `ddc594a`, `8002c85`, `fd3ac3f`, `c12410a`, `3f35001`, `8367df9` = **S1b.1** |
 | W1b.P2 | ✔ concluída + QA | CP 1285 → **1289**; GP 995 → **1004** | `62f71a0`, `7c35ec4`, `a327172` = **S1b.2** |
 | W1b.P3 | ✔ concluída em código / **DESBLOQUEADA** — ver §11 | Testes registrados nos commits de §11; não reexecutados nesta atualização documental | 18 commits desde `a327172`; `6204e89` = **S1b.3** |
-| W1b.P4 | ⏳ próxima — S1b.3 disponível | — | — |
-| W1b.P5 | ⏳ pendente — S1b.2 disponível | — | — |
-| W1c.* | ⏳ aguarda W1b | — | — |
+| W1b.P4 | ✔ concluída + QA — ver §12 | crypto-mcp **210**; control-plane **1672** | `7d880ee`, `66b11c7`, `98376b7`, `8f9888a`, `d89a71d`, `a29f4ef`, `271bc43`, `6ad5354` |
+| W1b.P5 | ✔ concluída + QA — ver §12 | guardian-proxy **1027** | `8568113`, `a740bc1`, `448ee48` = **S1b.5** |
+| W1c.* | ⏳ próxima — S1b.5 = `448ee48` disponível | — | — |
 | W2.* | ⏳ desbloqueada (credenciais Privy obtidas) | — | — |
 | W3.* | ⏳ desbloqueada, pode começar | — | — |
 | W4, W5 | pendentes | — | — |
@@ -587,3 +612,67 @@ Reavaliar antes do release; não reabre o bloqueio removido de W1b.P3.
 **Linear:** nenhuma issue identificada e variável Linear não localizada na inspeção anterior; nenhuma atualização da API efetuada. Não inferir ausência definitiva de integração.
 
 **Saída deste checkpoint:** W1b.P3 concluída em código e desbloqueada; **S1b.3 = `6204e89`**, seguir para **W1b.P4**. Dívidas acima permanecem registradas; nenhum deploy/release efetuado nesta atualização documental.
+
+---
+
+## 12. Checkpoint W1b.P4 e W1b.P5 — concluídas
+
+**W1b.P4 e W1b.P5 concluídas.** Sync point **S1b.5 = `448ee48`**; próxima phase: **W1c**. Este checkpoint registra as evidências fornecidas pelo orquestrador; commits, testes e verificações de segurança não foram reexecutados nesta atualização documental. Conclusão em código não registra deploy/release.
+
+### Commits da W1b.P4
+
+Base da fase: `6204e89`.
+
+| Commit | Descrição |
+|---|---|
+| `7d880ee` | `feat(crypto-mcp): add control-plane wallet client` — `src/wallet/chains.ts` (7 chains, endereços minúsculos) e `src/wallet/control-plane.ts` |
+| `66b11c7` | `feat(crypto-mcp): bind crypto-mcp to the control-plane API` — binding `CONTROL_PLANE` em prod e staging, campos em `CryptoMcpEnv` |
+| `98376b7` | `feat(crypto-mcp): record pretrade gate payloads for execution` — classificação de `kind`, registro do gate, `userId` em `readGuardianIdentity` |
+| `8f9888a` | `feat(crypto-mcp): add guardian_execute and guardian_wallet_status tools` — as duas tools mais `src/wallet/balances.ts` |
+| `d89a71d` | `test(crypto-mcp): assert gate fields instead of verbatim passthrough` — 9 testes existentes convertidos |
+| `a29f4ef` | `test(crypto-mcp): add wallet tools tests` — `src/__tests__/wallet-tools.test.ts`, 26 testes |
+| `271bc43` | `fix(crypto-mcp): bound balance reads per chain and surface conclusive 4xx` — P4-1 e P4-2 |
+| `6ad5354` | `fix(control-plane): make decided and non-swap gates immutable` — P4-3 e P4-4 |
+
+### Commits da W1b.P5
+
+| Commit | Descrição |
+|---|---|
+| `8568113` | `feat(guardian-proxy): require wallet:execute scope for guardian_execute` |
+| `a740bc1` | `feat(guardian-proxy): forward X-Guardian-User-Id to upstream MCP` |
+| `448ee48` | `fix(guardian-proxy): gate the legacy dotted alias of guardian_execute` — **S1b.5** |
+
+### Contrato observável novo do `guardian_pretrade_check` / `guardian_pretrade_result`
+
+O passthrough verbatim foi encerrado de propósito, porque o plano exige `requestId` sempre.
+
+| Caminho | Resultado |
+|---|---|
+| check, corpo JSON objeto | `{...upstream, requestId, gateRecorded}` — `gateRecorded` sempre presente |
+| check, corpo não-JSON | envelope degradado com `reasons:["upstream_malformed"]`, `requestId` gerado, `gateRecorded:false` |
+| check, timeout upstream | envelope degradado com `reasons:["upstream_timeout"]`, zero chamadas ao control-plane |
+| result, `complete`/`failed` | `{...upstream, requestId, gateRecorded}` |
+| result, `running`/404 | `{...upstream, requestId}` — `gateRecorded` AUSENTE, nenhum patch tentado |
+| result, corpo não-JSON | passthrough verbatim, inalterado |
+| result, timeout | `POLL_DEGRADED_RESULT` verbatim, inalterado |
+
+**Classificação de `kind` (fail-closed).** Chain desconhecida, `value` não-zero, `to` fora do formato de endereço ou calldata de comprimento ímpar caem todos em `swap`. `approve` exige comprimento exato de 138 chars, padding zero na word do spender e spender pertencente aos routers da chain. `withdraw` exige comprimento exato de 74 chars e `to` igual ao WETH da chain. Tudo o mais é `swap`, que exige `allow` do upstream.
+
+### Baselines de teste ao fim da W1b.P5
+
+Medidos pessoalmente pelo orquestrador, todos exit 0; não reexecutados nesta atualização documental.
+
+| Pacote | Arquivos | Testes |
+|---|---|---|
+| crypto-mcp | 12 | 210 |
+| control-plane-api | 120 | 1672 |
+| guardian-proxy | 51 | 1027 |
+
+**Segurança confirmada.** O `wrangler.toml` do crypto-mcp tem `workers_dev = false` em produção e em staging, zero `[[routes]]` e zero `route =`. O worker é binding-only de fato, alcançável apenas pelo service binding `UPSTREAM_MCP` do guardian-proxy. É isso que torna o header `X-Guardian-User-Id` confiável.
+
+### Dívidas registradas nesta fase
+
+1. Acoplamento por convenção entre `WALLET_EXECUTE_TOOL_NAMES` e `LEGACY_TOOL_ALIASES` — a correção estrutural é mover o mapa para `@mcp-firewall/shared-types`.
+2. Allow estático para approve/withdraw ignora um `block` upstream (D22 literal); o único backstop é a revalidação ABI do executor.
+3. Chains 480 (worldchain) e 4663 (robinhood) têm uma única RPC URL pública, sem fallback.
+4. A constante `WALLET_EXECUTE_SCOPE` está duplicada em `scope-enforcement.ts` e `tenant-resolver.ts`.
