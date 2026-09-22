@@ -393,6 +393,31 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        # GEMZ4US, 2026-09-21 (voice/session watchdog, item d): the date/
+        # time given by Omni was observed stale across several reconnects
+        # in a row — the same value repeated while the app clock moved on
+        # by nearly an hour. The [CURRENT DATE & TIME] block below is only
+        # sent as part of system_instruction, built fresh on every
+        # reconnect (see _build_config) — but session_resumption restores
+        # the model's own prior context, and it isn't verified whether a
+        # freshly-sent system_instruction actually overrides what the
+        # model already "knows" from before a resumed reconnect, versus a
+        # tool call, which always executes fresh regardless of resumption.
+        # A real tool sidesteps that uncertainty entirely: whenever the
+        # model needs the actual current time (a reminder, "what time is
+        # it"), it can call this instead of relying on carried-forward
+        # context.
+        "name": "get_current_time",
+        "description": (
+            "Returns the current real-world date and time. Call this whenever you need "
+            "to know or state what time or date it actually is right now — for a "
+            "reminder, a 'what time is it' question, or anything else time-sensitive — "
+            "instead of relying on whatever date/time you were told earlier in this "
+            "conversation, which can become stale after a reconnect."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
         "name": "send_message",
         "description": "Sends a text message via WhatsApp, Telegram, or other messaging platform.",
         "parameters": {
@@ -1425,6 +1450,15 @@ class JarvisLive:
             elif name == "open_app":
                 r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
                 result = r or f"Opened {args.get('app_name')}."
+
+            elif name == "get_current_time":
+                # Deliberately a fresh datetime.now() read, not the
+                # system_instruction's own [CURRENT DATE & TIME] block —
+                # see the tool declaration's own comment. Local import,
+                # matching _build_config's own (datetime isn't imported
+                # at module level in this file).
+                from datetime import datetime
+                result = datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
 
             elif name == "weather_report":
                 r = await loop.run_in_executor(None, lambda: weather_action(parameters=args, player=self.ui))
