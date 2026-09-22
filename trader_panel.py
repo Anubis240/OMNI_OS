@@ -941,6 +941,90 @@ class TraderPanel(QWidget):
         self._refresh_stats()
         self._refresh_positions()
 
+    @staticmethod
+    def _abbreviate_address(address: str | None) -> str:
+        """0x-prefixed address shortened for display: first 6 chars, ellipsis,
+        last 4. Anything that is not a plausible address renders as an em dash
+        rather than a truncated fragment the user might mistake for real."""
+        if not isinstance(address, str) or len(address) < 12:
+            return "—"
+        return f"{address[:6]}…{address[-4:]}"
+
+    @staticmethod
+    def _seraph_status_text(status: dict) -> str:
+        """Header line describing the Seraph credential. Never renders the key
+        itself — only the 12-character prefix the backend already treats as
+        public."""
+        mode = status.get("mode")
+        if status.get("needs_login"):
+            base = "Seraph session expired — sign in again"
+        elif mode is None or mode == "none":
+            base = "not connected to Seraph — sign in to use the trader"
+        else:
+            prefix = status.get("api_key_prefix") or "—"
+            label = {
+                "api_key_oauth": "signed in",
+                "api_key_manual": "manual",
+                "api_key_legacy": "legacy",
+                "api_key_explicit": "configured",
+            }.get(mode, "unknown")
+            base = f"Seraph: key {prefix} ({label})"
+        if status.get("last_error") == "unauthorized":
+            base += " — key rejected"
+        return base
+
+    @staticmethod
+    def _seraph_login_error_text(error: str | None, error_description: str | None = None) -> str:
+        """Human-readable message for every AuthResult.error code. The raw code
+        is never shown on its own: an unmapped code still gets a sentence."""
+        message = {
+            "access_denied": "Sign-in was denied. Nothing was changed.",
+            "timeout": "Sign-in timed out. Try again.",
+            "cancelled": "Sign-in was cancelled.",
+            "state_mismatch": "Sign-in could not be verified. Try again.",
+            "network_error": "Could not reach Seraph. Check your connection and try again.",
+            "metadata_error": "Could not reach Seraph. Check your connection and try again.",
+            "invalid_client": "This device needs to register with Seraph again. Try signing in once more.",
+            "registration_failed": "This device needs to register with Seraph again. Try signing in once more.",
+            "token_exchange_failed": "Seraph refused the sign-in. Try again.",
+            "api_key_mint_failed": "Signed in, but the Seraph API key could not be created. Try again.",
+            "insufficient_scope": "Your Seraph account is missing permissions for this device. Contact support.",
+            "browser_open_failed": "Could not open your browser. Copy the sign-in link and open it manually.",
+        }.get(error, "Sign-in failed. Try again.")
+        if isinstance(error_description, str) and error_description:
+            return f"{message} ({error_description})"
+        return message
+
+    @staticmethod
+    def _wallet_block_text(wallet: dict) -> dict:
+        """Pure rendering of the Seraph wallet block from a guardian_wallet_status
+        payload. Kept free of Qt so the copy that tells the user WHICH wallet
+        actually trades can be asserted in a test — depositing into the wrong
+        one is a silent, unrecoverable user error."""
+        address = wallet.get("address")
+        external = wallet.get("linkedExternalAddress")
+        signer_granted = wallet.get("signerGranted")
+        embedded_line = "Carteira Seraph: não disponível — faça login"
+        if isinstance(address, str) and address:
+            embedded_line = f"Carteira Seraph: {TraderPanel._abbreviate_address(address)}"
+        external_line = None
+        if isinstance(external, str) and external:
+            external_line = f"Carteira externa (login): {TraderPanel._abbreviate_address(external)}"
+        # Um endereço truncado numa instrução de depósito é inútil e perigoso: o usuário pode copiar o fragmento errado.
+        if not address:
+            copy = "Faça login no Seraph para ver sua Carteira Seraph."
+        elif external:
+            copy = f"Seus trades usam a Carteira Seraph ({address}), não sua carteira externa ({external}). Deposite fundos na Carteira Seraph para operar."
+        else:
+            copy = f"Seus trades usam a Carteira Seraph ({address}). Deposite fundos nela para operar."
+        return {
+            "embedded_line": embedded_line,
+            "signer_line": "Signer: autorizado" if signer_granted else "Signer: não autorizado — autorize no console",
+            "external_line": external_line,
+            "copy": copy,
+            "live_allowed": bool(signer_granted) and bool(address),
+        }
+
     def _panel_style(self) -> str:
         C = self._C
         return f"""
