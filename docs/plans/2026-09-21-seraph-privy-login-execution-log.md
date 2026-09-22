@@ -180,7 +180,7 @@ Contradições encontradas entre §3 do plano e a realidade, já registradas aci
 5. Token Cloudflare sem escopo de Workers → bloqueio B1 (T3).
 Nenhuma delas altera decisões de arquitetura; o plano permanece válido.
 
-**Linear:** nenhuma integração/MCP Linear disponível nesta sessão → **Linear não em uso** (diretiva (w) satisfeita; nada a criar). Registrado uma única vez.
+**Linear (registro corrigido no checkpoint P3):** nenhuma issue identificada; variável Linear não localizada na inspeção anterior. A API não foi atualizada. Isso **não comprova ausência de integração** nem permite declarar a diretiva (w) satisfeita.
 
 ---
 
@@ -457,7 +457,7 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 | W1.P2b | ✔ concluída + QA | control-plane | `de7ed03`, `d7f5f27`, `8b0d161`, `622ee32`, `a56c4c7` |
 | W1b.P1 | ✔ concluída + QA | control-plane | `ddc594a`, `8002c85`, `fd3ac3f`, `c12410a`, `3f35001`, `8367df9` = **S1b.1** |
 | W1b.P2 | ✔ concluída + QA | CP 1285 → **1289**; GP 995 → **1004** | `62f71a0`, `7c35ec4`, `a327172` = **S1b.2** |
-| W1b.P3 | ⏳ próxima (executor + assinatura Privy) | — | — |
+| W1b.P3 | ⏳ em andamento / **BLOQUEADA** — QA completa não aprovada; ver §11 | DoD anterior: 117 arquivos / 1482 testes (não reexecutado agora); validator isolado: 55 testes + tsc + eslint | `56531f5`, `664a252`, `79f30ac`, `98adc35`, `d2dc775`, `c9ad764`, `da9a13b`, `864d3e7` |
 | W1b.P4, W1b.P5 | ⏳ aguardam S1b.3 / S1b.2 | — | — |
 | W1c.* | ⏳ aguarda W1b | — | — |
 | W2.* | ⏳ desbloqueada (credenciais Privy obtidas) | — | — |
@@ -469,3 +469,59 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 O handover registrava 1301 (control-plane) e 1007 (guardian-proxy) ao fim de W1b.P1. Os números reais, medidos pelo orquestrador antes de tocar em qualquer arquivo nesta sessão, eram **1285** e **995**, ambos totalmente verdes. Os valores do handover estavam errados; não havia regressão.
 
 **Aceitação de W1.P1** ✔ — `tsc --noEmit` exit 0; `wrangler deploy --dry-run` OK (mostra `OAUTH_ALLOW_LOOPBACK_REDIRECTS ("true")` e `OAUTH_ALLOWED_RESOURCES ("https://seraph.kondux.io/mcp,https://...")`); nenhum teste antigo alterado; **nenhuma mudança em `/token`**; emissão para `/mcp` inalterada.
+
+---
+
+## 11. Checkpoint W1b.P3 — em andamento / BLOQUEADA
+
+**P3 não concluída. QA completa da phase ainda não aprovada; não fazer deploy/release.** Este checkpoint registra as evidências fornecidas para a atualização documental; os commits, testes e consultas à documentação abaixo não foram reexecutados nesta atualização do log.
+
+### Implementação e verificações registradas
+
+Commits em `D:\git\agent-guardian` (descrições de escopo, não transcrições das mensagens):
+
+| Commit | Escopo / evidência registrada |
+|---|---|
+| `56531f5` | Assinatura Privy — 34 testes |
+| `664a252` | Wallet RPC — 28 testes |
+| `79f30ac` | Gas — 12 testes |
+| `98adc35` | Correção de tipagem de P2 |
+| `d2dc775` | Executor |
+| `c9ad764` | Rotas |
+| `da9a13b` | Testes do executor — 62 testes |
+| `864d3e7` | Testes das rotas — 57 testes |
+| `e7bbc92` | Validador ABI isolado e seletor V3 corrigido — 55 testes; ainda sem integracao ao executor |
+
+- **Baseline DoD anterior:** 117 arquivos / 1482 testes. Não reexecutado agora; não representa aprovação da implementação atual nem da phase inteira.
+- **Novo calldata validator isolado:** 55 testes verificados, além de `tsc` e `eslint`. **NÃO integrado ao executor**; essa validação isolada não prova proteção no caminho de execução.
+- Seletor confirmado com `Web3.keccak`: `0x04e45aaf`; `0x414bf389` rejeitado. Validação ABI estrita, recipient igual à própria carteira, spender restrito aos routers permitidos e `withdraw` de WETH. Calldata preservado byte a byte.
+
+### Bloqueio — contrato de idempotência Privy / D23
+
+A documentação de [`eth_sendTransaction`](https://docs.privy.io/api-reference/wallets/ethereum/eth-send-transaction) informa que respostas **4xx/5xx são cacheadas para a mesma chave**, com exceção relacionada à policy. **Não foi encontrada garantia de retenção** na documentação consultada. Uma janela local de **10 minutos**, inventada sem esse contrato, **não prova proteção contra duplicação** e não fundamenta reenvio seguro.
+
+O lookup por `reference_id` em [transactions/external-id](https://docs.privy.io/api-reference/transactions/external-id) **não prova deduplicação**. Uma lista vazia tampouco prova ausência de broadcast; não autoriza reenviar uma operação de resultado incerto.
+
+**Para desbloquear, é necessária uma das alternativas, explicitamente confirmada:**
+
+1. Confirmação da Privy sobre o contrato de **atomicidade e retenção** que sustente reenvio seguro; **OU**
+2. Decisão explícita de alterar **D23** para manter a operação em `pending`, **sem replay automático**, com **reconciliação positiva**.
+
+Nenhuma dessas alternativas está aprovada neste checkpoint. **Não implementar mudança silenciosa de requisito.** O plano original permanece intocado.
+
+### QA pendente antes de aprovar P3
+
+- Atomicidade entre consumo do gate, reserva do cap e criação da execução (`consume/reserve/execution`).
+- Persistência do corpo da requisição, `walletId` e `priority` para preservar a operação exata.
+- CAS de lease/status para impedir disputas e transições indevidas.
+- Membership e organização ativas, além de nova checagem do signer antes de assinar.
+- Sanitização de erros de banco, sem expor SQL, parâmetros ou dados sensíveis.
+- Resposta **409** para conflito.
+- Validação de chain no intervalo **int32**.
+- Integração do calldata validator ao executor e verificação do caminho integrado.
+
+**Recomendações incorretas de QA descartadas:** `withdraw` de WETH não é transferência externa; converter calldata para lowercase viola o contrato de preservação; caps nativos não garantem limite de notional de tokens.
+
+**Linear:** nenhuma issue identificada e variável Linear não localizada na inspeção anterior; nenhuma atualização da API efetuada. Não inferir ausência definitiva de integração.
+
+**Saída deste checkpoint:** registro documental de progresso e bloqueio, não aceite da phase, não autorização de deploy/release.
