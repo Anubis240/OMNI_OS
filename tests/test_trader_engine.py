@@ -356,6 +356,27 @@ class GasQuoteLogLineTests(unittest.TestCase):
         self.assertIsNone(engine_mod._gas_quote_log_line({}))
 
 
+class RouteLogLineTests(unittest.TestCase):
+    """Item E (GEMZ4US, 2026-09-21): a real sell routed through a $51-
+    liquidity V2 pool at ~15% worse than a $67K pool, only discoverable
+    afterward on Etherscan -- neither the DEX used nor the simulated
+    price impact was ever surfaced anywhere."""
+
+    def test_formats_dex_and_price_impact(self):
+        text = engine_mod._route_log_line({"dex": "v2", "priceImpactBps": 1450})
+        self.assertEqual(text, "Routed via Uniswap V2 — 14.50% simulated price impact")
+
+    def test_formats_dex_without_price_impact(self):
+        # bypass_gate=True (e.g. FORCE) never computes a gate, so no
+        # price-impact figure is available -- the DEX alone is still useful.
+        text = engine_mod._route_log_line({"dex": "v3", "priceImpactBps": None})
+        self.assertEqual(text, "Routed via Uniswap V3")
+
+    def test_missing_dex_returns_none(self):
+        self.assertIsNone(engine_mod._route_log_line({}))
+        self.assertIsNone(engine_mod._route_log_line({"dex": None, "priceImpactBps": 100}))
+
+
 class ClearHaltTests(unittest.TestCase):
     """GEMZ4US, Finding #26 (2026-09-17): the only documented way out of a
     Max Drawdown HALT was RESET LEDGER, which also wipes trade history,

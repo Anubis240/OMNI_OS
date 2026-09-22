@@ -91,6 +91,22 @@ def _gas_quote_log_line(result: dict) -> str | None:
     return f"Gas quote (RPC): {quote_gwei:.6f} Gwei → margin {pct}% applied → signing at {signed_gwei:.6f} Gwei"
 
 
+def _route_log_line(result: dict) -> str | None:
+    """Item E (GEMZ4US, 2026-09-21): a real sell routed through a $51-
+    liquidity V2 pool at ~15% worse than a $67K pool quoted at the same
+    time — only discoverable afterward on Etherscan, since neither the
+    DEX used nor the simulated price impact was ever surfaced anywhere.
+    Not a routing change, just visibility into the one that was made."""
+    dex = result.get("dex")
+    if dex is None:
+        return None
+    line = f"Routed via Uniswap {dex.upper()}"
+    impact_bps = result.get("priceImpactBps")
+    if impact_bps is not None:
+        line += f" — {impact_bps / 100:.2f}% simulated price impact"
+    return line
+
+
 def _base_dir() -> Path:
     return get_data_dir()
 
@@ -498,6 +514,9 @@ class TraderEngine:
             gas_quote_text = _gas_quote_log_line(result)
             if gas_quote_text:
                 self._emit({"type": "log", "text": gas_quote_text})
+            route_text = _route_log_line(result)
+            if route_text:
+                self._emit({"type": "log", "text": route_text})
             self._merge_position(self.state["livePositions"], {
                 "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
                 "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "costUsd": result["costUsd"],
@@ -547,6 +566,9 @@ class TraderEngine:
             gas_quote_text = _gas_quote_log_line(result)
             if gas_quote_text:
                 self._emit({"type": "log", "text": gas_quote_text})
+            route_text = _route_log_line(result)
+            if route_text:
+                self._emit({"type": "log", "text": route_text})
             pnl = result["proceedsUsd"] - cost_basis_usd
             self.state["liveRealizedPnlUsd"] += pnl
             if fraction >= 1:
