@@ -193,6 +193,19 @@ RECEIVE_IDLE_TIMEOUT = 900  # see _receive_audio()'s main loop — GEMZ4US 2026-
                             # not force a reconnect — session_resumption makes an unnecessary
                             # one cheap, but frequent ones are their own nuisance, so this errs
                             # generous. Flag for GEMZ4US to confirm the value in practice.
+PLAYBACK_TAIL_S = 0.3  # see _play_audio()'s speaking-flag clear — GEMZ4US, 2026-09-21
+                       # (Finding #45's newly-identified trigger): reproduced voice-input
+                       # garbling/merging under a controlled test, triggered by speaking
+                       # while Omni's own previous answer is still audibly playing. The mic
+                       # callback already refuses to capture while self._is_speaking is True
+                       # (see _listen_audio), but _play_audio cleared it the instant the
+                       # audio queue drained and turn_complete fired — sd.RawOutputStream.
+                       # write() only blocks long enough to buffer the data, not until it's
+                       # actually audible, so the OS can still be physically playing back
+                       # the last chunk(s) for a short tail after this code considers the
+                       # turn "done". Same fix already proven for the identical class of bug
+                       # on the phone dashboard's own playback path (dashboard/server.py's
+                       # `nextPlayTime + 0.3` guard) — same 0.3s margin, same reasoning.
 
 
 @contextlib.asynccontextmanager
@@ -1812,6 +1825,7 @@ class JarvisLive:
         )
         stream.start()
 
+        last_chunk_written_at = 0.0
         try:
             while True:
                 try:
@@ -1824,6 +1838,12 @@ class JarvisLive:
                         self._turn_done_event
                         and self._turn_done_event.is_set()
                         and self.audio_in_queue.empty()
+                        # PLAYBACK_TAIL_S: stream.write() below only blocks
+                        # long enough to buffer the data, not until it's
+                        # actually audible — give the OS a short margin to
+                        # finish physically playing the last chunk(s)
+                        # before letting the mic capture again.
+                        and time.monotonic() - last_chunk_written_at >= PLAYBACK_TAIL_S
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
@@ -1831,6 +1851,7 @@ class JarvisLive:
                 self.set_speaking(True)
                 if not self.ui.speech_muted:
                     await asyncio.to_thread(stream.write, chunk)
+                last_chunk_written_at = time.monotonic()
                 if self._dashboard:
                     asyncio.create_task(self._dashboard.broadcast_audio(chunk))
         except Exception as e:
