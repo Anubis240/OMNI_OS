@@ -472,6 +472,11 @@ class TraderEngine:
                 )
             self._emit({"type": "log", "text": f"LIVE: submitting buy for {token['symbol']} on {chains_mod.resolve(token.get('chain'))['name']}…"})
             try:
+                # bypass_gate skips ONLY live.py's pre-flight price-impact gate:
+                # this path already ran the token-level risk check above. It does
+                # not skip the Seraph transaction gate — since W3.P5 the executor
+                # only accepts a requestId from a gate that _execute_via_guardian
+                # always obtains, so every live buy is gated either way.
                 result = live_mod.live_buy(token=token, trade_size_usd=trade_size_usd,
                                             max_price_impact_bps=self.config["maxPriceImpactBps"], bypass_gate=True)
             except live_mod.BuyPendingError as err:
@@ -532,6 +537,9 @@ class TraderEngine:
         cost_basis_usd = position["costUsd"] * fraction
         if self.armed_live:
             self._emit({"type": "log", "text": f"LIVE: submitting {'' if fraction >= 1 else f'{round(fraction * 100)}% '}sell for {position['symbol']}…"})
+            # bypass_gate skips ONLY live.py's min-net-profit simulation (the
+            # "sell X force" override). The Seraph transaction gate is taken
+            # fresh inside _execute_via_guardian regardless.
             result = live_mod.live_sell(position=position, min_net_profit_usd=self.config["minNetProfitUsd"],
                                          qty=sell_qty, cost_basis_usd=cost_basis_usd, bypass_gate=bypass_gate)
             gas_quote_text = _gas_quote_log_line(result)
@@ -949,8 +957,11 @@ class TraderEngine:
         if self.armed_live:
             return {"ok": True, **self.status()}
         ws = (self.wallet_status() if self.wallet_status else None) or {"connected": False}
-        if not ws.get("connected"):
-            return {"ok": False, "error": "connect a wallet before arming live mode"}
+        # signerGranted is checked explicitly rather than trusting the provider's
+        # derived "connected": arming live is the one action that will spend real
+        # funds through the server-side signer, so it fails closed on its own.
+        if not ws.get("connected") or not ws.get("signerGranted"):
+            return {"ok": False, "error": "authorize your Seraph wallet in the console before arming live mode"}
         try:
             eth_price_usd = live_mod.eth_usd_price()
             eth_bal_usd = live_mod.wallet_equity_usd_across_chains(self._enabled_live_chains(), ws["address"], eth_price_usd)
@@ -1090,7 +1101,7 @@ class TraderEngine:
             self._execute_sell(pos, price_usd, "manual sell", 1, bypass_gate)
             self._persist()
             self._emit({"type": "state", **self.public_state()})
-            return {"ok": True, "message": f"sold {symbol} @ ${price_usd}" + (" — Seraph gate bypassed" if bypass_gate else "")}
+            return {"ok": True, "message": f"sold {symbol} @ ${price_usd}" + (" — local profit check bypassed (Seraph gate still enforced)" if bypass_gate else "")}
         except Exception as err:
             return {"ok": False, "message": f"sell {symbol} failed: {err}"}
 
@@ -1155,7 +1166,7 @@ class TraderEngine:
             if bypass_gate:
                 verdict = {"approved": True, "level": None, "score": None}
                 self._emit({"type": "gate", "symbol": symbol, "address": address, "chain": chain, "source": "manual",
-                             "approved": True, "bypassed": True, "reason": "BYPASSED — user explicitly overrode the Seraph gate for this buy"})
+                             "approved": True, "bypassed": True, "reason": "BYPASSED — user overrode the local token risk check; the Seraph transaction gate still applies"})
             else:
                 verdict = self._risk_check(token)
                 self._emit({"type": "gate", "symbol": symbol, "address": address, "chain": chain, "source": "manual", **verdict})
@@ -1173,7 +1184,7 @@ class TraderEngine:
             self._persist()
             self._emit({"type": "state", **self.public_state()})
             verb = "topped up" if already_held else "bought"
-            return {"ok": True, "message": f"{verb} {symbol} @ ${price_usd}" + (" — Seraph gate bypassed" if bypass_gate else "")}
+            return {"ok": True, "message": f"{verb} {symbol} @ ${price_usd}" + (" — local risk check bypassed (Seraph gate still enforced)" if bypass_gate else "")}
         except Exception as err:
             return {"ok": False, "message": f"buy {symbol} failed: {err}"}
 
@@ -1186,7 +1197,7 @@ class TraderEngine:
         symbol, chain, address, tx_hash = parsed["symbol"], parsed["chain"], parsed["address"], parsed["txHash"]
         ws = (self.wallet_status() if self.wallet_status else None) or {"connected": False}
         if not ws.get("connected"):
-            return {"ok": False, "message": "connect a wallet before adopting a position"}
+            return {"ok": False, "message": "authorize your Seraph wallet in the console before adopting a position"}
         # GEMZ4US, 2026-09-18 (Section A): 3/3 real attempts failed with a
         # generic web3 "is contract deployed correctly" error, confirmed
         # (against web3.py's own source) to mean the given address has no
