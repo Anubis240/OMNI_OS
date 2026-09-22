@@ -1,7 +1,6 @@
 """Live execution — real swaps built directly against Uniswap V3
-(Quoter + SwapRouter02), signed and broadcast by the app-managed local
-wallet (trader/wallet/local_wallet.py — WalletConnect was dropped for
-this Python version, see the project plan), with Seraph's REAL pre-trade
+(Quoter + SwapRouter02), signed and broadcast server-side via Seraph's
+custodial executor, with no keys on this device and Seraph's REAL pre-trade
 firewall (guardian_pretrade_check) as the gate on the actual calldata
 before it's ever signed. Port of live.js — see that file's header comment
 for why Uniswap directly (not an aggregator): guardian_pretrade_check
@@ -9,12 +8,9 @@ only decodes plain Uniswap V3/V2 calldata, not 0x-aggregator or
 multicall-wrapped calls.
 
 Uses web3.py (the Python equivalent of ethers.js used here) for all
-RPC/contract interaction. Gas pricing uses plain legacy gasPrice
-(w3.eth.gas_price, buffered — see trader/wallet/local_wallet.py's
-send_transaction) rather than replicating ethers' EIP-1559 fee
-estimation; legacy gasPrice transactions are valid on every chain this
-app trades on. This used to be described here as "not a safety-relevant"
-simplification — a real FORCE BUY proved that wrong: it confirmed at an
+RPC/contract interaction. Gas pricing and signing are handled server-side
+by Seraph's custodial executor, with no keys on this device.
+Receipt timeouts remain safety-relevant: a real FORCE BUY confirmed at an
 unusually low 0.236 Gwei but slowly enough to blow past
 _wait_for_receipt's timeout below and get reported as a failed/fabricated
 transaction, when it had actually succeeded on-chain. BuyPendingError
@@ -33,7 +29,6 @@ import requests
 from web3 import Web3
 
 from . import chains as chains_mod
-from .wallet import local_wallet as wallet
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +110,33 @@ V2_ROUTER_ABI = [
 ]
 
 _mcp_call = None  # (name, args) -> {ok, text|error} — bound to the Seraph server by the caller (engine.py)
+
+# () -> {"connected": bool, "address": str | None, "signerGranted": bool}
+# Injected by trader_panel (which reads guardian_wallet_status over MCP).
+# ALWAYS the Seraph embedded wallet — the user's linked external wallet is
+# never reachable from here, and nothing in this module may sign locally.
+_wallet_status_provider = None
+
+
+def set_wallet_status_provider(fn) -> None:
+    global _wallet_status_provider
+    _wallet_status_provider = fn
+
+
+def wallet_status() -> dict:
+    """Never raises: an unavailable provider reads as 'not connected'."""
+    if _wallet_status_provider is None:
+        return {"connected": False, "address": None, "signerGranted": False}
+    try:
+        return _wallet_status_provider() or {"connected": False, "address": None, "signerGranted": False}
+    except Exception:
+        return {"connected": False, "address": None, "signerGranted": False}
+
+
+def wallet_address() -> str | None:
+    """The Seraph wallet address, or None when no wallet is authorized."""
+    address = wallet_status().get("address")
+    return address if isinstance(address, str) and address else None
 
 
 def init(mcp_call=None, server_id=None, zero_ex_api_key=None):
@@ -288,6 +310,7 @@ def _parse_pretrade_response(text: str) -> dict:
             decision = "block"
     return {
         "pending": False, "decision": decision, "raw": text[:1500],
+        "requestId": parsed.get("requestId") if parsed and isinstance(parsed.get("requestId"), str) else None,
         "explain": parsed.get("explain") if parsed and isinstance(parsed.get("explain"), str) else None,
         "expectedAmountOut": int(parsed["expectedAmountOut"]) if parsed and parsed.get("expectedAmountOut") else None,
         "priceImpactBps": parsed.get("priceImpactBps") if parsed and isinstance(parsed.get("priceImpactBps"), (int, float)) else None,
@@ -324,6 +347,53 @@ def require_allow(chain: str | None, tx: dict, from_address: str) -> dict:
         reason = gate["explain"] or gate["raw"]
         raise RuntimeError(f"Seraph pre-trade firewall {gate['decision'].upper()} — refusing to sign. {_short(reason)}")
     return gate
+
+
+# guardian_execute may answer execution_pending while a previous attempt for
+# the same requestId is still in flight at the signer. Retrying is safe by
+# construction (the backend is idempotent per requestId), and giving up too
+# early would strand a trade that is about to land.
+EXECUTION_PENDING_RETRIES = 5
+EXECUTION_PENDING_SLEEP_S = 2
+
+
+def _execute_via_guardian(chain: str | None, tx: dict, *, kind: str, gate: dict | None = None) -> str:
+    """Gate `tx`, then have the Seraph executor sign and broadcast it.
+
+    Nothing is signed on this device. The executor re-reads the payload it
+    recorded at gate time and signs THAT, so the transaction fields here are
+    only ever used to obtain the gate — guardian_execute takes the requestId
+    alone. Returns the transaction hash; raises RuntimeError with the stable
+    executor error code on any refusal."""
+    from_addr = wallet_address()
+    if not from_addr:
+        raise RuntimeError("Seraph wallet not authorized")
+    if gate is None:
+        gate = require_allow(chain, tx, from_addr)
+    request_id = gate.get("requestId")
+    if not request_id:
+        raise RuntimeError(f"Seraph gate returned no requestId for this {kind} — refusing to execute (fail-closed)")
+
+    for attempt in range(EXECUTION_PENDING_RETRIES):
+        res = _mcp_call("guardian_execute", {"requestId": request_id})
+        if not res.get("ok"):
+            raise RuntimeError(f"Seraph executor unavailable: {_short(res.get('error'))} (fail-closed)")
+        try:
+            payload = json.loads(res.get("text") or "")
+        except Exception:
+            raise RuntimeError("Seraph executor returned an unreadable response (fail-closed)") from None
+        if payload.get("ok"):
+            tx_hash = payload.get("txHash")
+            if not isinstance(tx_hash, str) or not tx_hash:
+                raise RuntimeError("Seraph executor reported success without a transaction hash (fail-closed)")
+            return tx_hash
+        code = str(payload.get("error") or "unknown")
+        if code != "execution_pending":
+            message = payload.get("message")
+            raise RuntimeError(f"Seraph executor refused this {kind}: {code}" + (f" — {_short(message)}" if message else ""))
+        if attempt < EXECUTION_PENDING_RETRIES - 1:
+            time.sleep(EXECUTION_PENDING_SLEEP_S)
+    raise RuntimeError(f"Seraph executor is still processing this {kind} (execution_pending) — try again shortly")
 
 
 class BuyPendingError(RuntimeError):
@@ -449,7 +519,7 @@ def _ensure_allowance(chain: str | None, token_address: str, owner: str, spender
         return
     contract = Web3().eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
     data = contract.encode_abi("approve", args=[Web3.to_checksum_address(spender), amount_wei])
-    tx_hash = wallet.send_transaction(token_address, data, "0x0", chain)
+    tx_hash = _execute_via_guardian(chain, {"to": token_address, "data": data, "value": "0"}, kind="approve")
     _wait_for_receipt(chain, tx_hash)
 
 
@@ -457,9 +527,9 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
     chain = token.get("chain") or chains_mod.DEFAULT_CHAIN
     live_cfg = _live_config(chain)["live"]
     weth, v3_router, v2_router = live_cfg["weth"], live_cfg["uniswapV3Router"], live_cfg.get("uniswapV2Router")
-    status = wallet.status()
+    status = wallet_status()
     if not status.get("connected"):
-        raise RuntimeError("wallet not connected")
+        raise RuntimeError("Seraph wallet not authorized — authorize it in the console before trading live")
 
     eth_price_usd = eth_usd_price()
     amount_in_wei = Web3.to_wei(round(trade_size_usd / eth_price_usd, 18), "ether")
@@ -482,6 +552,7 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
         )])
         tx = {"to": v3_router, "data": data, "value": amount_in_wei}
 
+    gate = None
     if not bypass_gate:
         gate = require_allow(chain, tx, status["address"])
         if max_price_impact_bps is not None and gate.get("priceImpactBps") is not None and gate["priceImpactBps"] > max_price_impact_bps:
@@ -490,9 +561,10 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
                 f"(max allowed {max_price_impact_bps / 100:.2f}%) — thin liquidity, skipping"
             )
 
-    gas_quote = {}
-    tx_hash = wallet.send_transaction(tx["to"], tx["data"], hex(amount_in_wei), chain,
-                                       on_gas_quote=lambda q, b: gas_quote.update(quotedWei=q, bufferedWei=b))
+    # The gate below is the one the executor will consume. When the price-impact
+    # gate above already ran, reuse it: it is seconds old and describes this exact
+    # payload, so re-gating would only burn a second requestId.
+    tx_hash = _execute_via_guardian(chain, tx, kind="swap", gate=gate if not bypass_gate else None)
     try:
         receipt = _wait_for_receipt(chain, tx_hash)
     except RuntimeError as err:
@@ -513,7 +585,7 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
     cost_usd = trade_size_usd + gas_usd
 
     return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd,
-            "gasQuoteWei": gas_quote.get("quotedWei"), "gasSignedWei": gas_quote.get("bufferedWei")}
+            "gasQuoteWei": None, "gasSignedWei": None}
 
 
 def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None = None, cost_basis_usd: float | None = None, bypass_gate: bool = False) -> dict:
@@ -523,9 +595,9 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
 
     live_cfg = _live_config(chain)["live"]
     weth, v3_router, v2_router = live_cfg["weth"], live_cfg["uniswapV3Router"], live_cfg.get("uniswapV2Router")
-    status = wallet.status()
+    status = wallet_status()
     if not status.get("connected"):
-        raise RuntimeError("wallet not connected")
+        raise RuntimeError("Seraph wallet not authorized — authorize it in the console before trading live")
 
     eth_price_usd = eth_usd_price()
     decimals = _with_rpc(chain, lambda w3: w3.eth.contract(address=Web3.to_checksum_address(position["address"]), abi=ERC20_ABI).functions.decimals().call())
@@ -566,6 +638,7 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
     # Gate + profit check BEFORE the approval tx below — approving costs
     # real gas/signature, so it must not fire unless the swap itself is
     # already known-good.
+    gate = None
     if not bypass_gate:
         gate = require_allow(chain, tx, status["address"])
         if gate.get("expectedAmountOut") is not None and min_net_profit_usd is not None:
@@ -583,9 +656,10 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
 
     _ensure_allowance(chain, position["address"], status["address"], spender, amount_in_wei)
 
-    gas_quote = {}
-    tx_hash = wallet.send_transaction(tx["to"], tx["data"], "0x0", chain,
-                                       on_gas_quote=lambda q, b: gas_quote.update(quotedWei=q, bufferedWei=b))
+    # Deliberately NOT reusing the profit-check gate above: the approval
+    # transaction between them waits for its own receipt, which can easily
+    # outlive the gate's 180s window. A fresh gate is taken here.
+    tx_hash = _execute_via_guardian(chain, tx, kind="swap")
     receipt = _wait_for_receipt(chain, tx_hash)
     try:
         gas_usd = _gas_cost_usd(receipt, eth_price_usd)
@@ -594,7 +668,7 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
 
     proceeds_usd = float(Web3.from_wei(amount_out, "ether")) * eth_price_usd - gas_usd
     return {"txHash": tx_hash, "proceedsUsd": proceeds_usd, "ethPriceUsd": eth_price_usd,
-            "gasQuoteWei": gas_quote.get("quotedWei"), "gasSignedWei": gas_quote.get("bufferedWei")}
+            "gasQuoteWei": None, "gasSignedWei": None}
 
 
 # Conservative gas estimate for WETH9's withdraw() — a single storage
@@ -618,9 +692,9 @@ def estimate_auto_unwrap(chain: str | None = None) -> dict:
     chain = chain or chains_mod.DEFAULT_CHAIN
     live_cfg = _live_config(chain)["live"]
     weth = live_cfg["weth"]
-    status = wallet.status()
+    status = wallet_status()
     if not status.get("connected"):
-        return {"worthIt": False, "reason": "wallet not connected"}
+        return {"worthIt": False, "reason": "Seraph wallet not authorized"}
     owner = Web3.to_checksum_address(status["address"])
     amount_wei = _with_rpc(chain, lambda w3: w3.eth.contract(address=Web3.to_checksum_address(weth), abi=WETH_ABI)
                             .functions.balanceOf(owner).call())
@@ -640,15 +714,15 @@ def estimate_auto_unwrap(chain: str | None = None) -> dict:
 
 def unwrap_weth(chain: str | None = None, amount_wei: int | None = None) -> dict:
     """Converts WETH back to native ETH via WETH9's own withdraw() — a
-    bare, non-swap, non-multicall call, so it needs no Seraph gate at all
-    (nothing here is a trade). Defaults to the wallet's entire WETH
+    bare, non-swap, non-multicall call that also goes through the Seraph gate
+    and executor because nothing is signed on this device. Defaults to the wallet's entire WETH
     balance on `chain` if amount_wei isn't given."""
     chain = chain or chains_mod.DEFAULT_CHAIN
     live_cfg = _live_config(chain)["live"]
     weth = live_cfg["weth"]
-    status = wallet.status()
+    status = wallet_status()
     if not status.get("connected"):
-        raise RuntimeError("wallet not connected")
+        raise RuntimeError("Seraph wallet not authorized")
     owner = Web3.to_checksum_address(status["address"])
 
     if amount_wei is None:
@@ -659,6 +733,6 @@ def unwrap_weth(chain: str | None = None, amount_wei: int | None = None) -> dict
 
     contract = Web3().eth.contract(abi=WETH_ABI)
     data = contract.encode_abi("withdraw", args=[amount_wei])
-    tx_hash = wallet.send_transaction(weth, data, "0x0", chain)
+    tx_hash = _execute_via_guardian(chain, {"to": weth, "data": data, "value": "0"}, kind="withdraw")
     _wait_for_receipt(chain, tx_hash)
     return {"txHash": tx_hash, "amountEth": float(Web3.from_wei(amount_wei, "ether"))}
