@@ -1062,6 +1062,18 @@ class JarvisLive:
         """Runs for the whole app lifetime — forwards phone mic PCM chunks into the
         live session, same input path as the PC mic. Drops chunks when there's no
         active session rather than buffering (this is a real-time stream)."""
+        # GEMZ4US, N30 (2026-09-21): a failed phone voice attempt left no
+        # trace anywhere — no [Phone]: line, no Listening/Listening
+        # stopped SYS line (the desktop mic's own failure at least leaves
+        # those), nothing on the phone screen. Traced to here: chunks
+        # were silently dropped whenever self.session wasn't established
+        # yet — exactly the two conditions this was reproduced under
+        # (right after a fresh pairing, and right after a QR re-pairing,
+        # both moments the voice session may not be up yet) — or when the
+        # outgoing queue was full. Logged once per episode (not per
+        # chunk, since this runs continuously while the phone mic
+        # streams), and cleared as soon as a chunk gets through again.
+        last_drop_reason = None
         while True:
             try:
                 chunk = await asyncio.wait_for(
@@ -1071,11 +1083,22 @@ class JarvisLive:
                 self._phone_active = False  # no audio for 1s — give the PC mic back
                 continue
             self._phone_active = True
-            if self.session and self.out_queue and not self.ui.muted:
+
+            if self.ui.muted:
+                continue  # expected, the user's own choice — nothing to warn about
+
+            if not self.session or not self.out_queue:
+                reason = "no active voice session yet"
+            else:
                 try:
                     self.out_queue.put_nowait({"data": chunk, "mime_type": "audio/pcm"})
+                    reason = None
                 except asyncio.QueueFull:
-                    pass
+                    reason = "outgoing queue full"
+
+            if reason and reason != last_drop_reason:
+                self.ui.write_log(f"SYS: Phone audio dropped — {reason}.")
+            last_drop_reason = reason
 
     def _on_always_listening_toggled(self, is_on: bool) -> None:
         if is_on:
