@@ -472,6 +472,17 @@ QA adversarial feito pelo orquestrador.
 
 ---
 
+### W3 — Wave 3 (desktop)
+
+QA adversarial conduzido pelo orquestrador; evidências fornecidas para esta atualização documental, não reexecutadas aqui.
+
+- **Verificado por AST:** as esperas longas de login e refresh não ocorrem sob o RLock de `SeraphAuth`: `login()` não segura o lock durante o `wait()` de até 300 s do listener loopback, e `_get_access_token` solta explicitamente o lock antes do POST de refresh (comentário no código: "Serialize refresh rotation, but release the auth lock during network I/O"). A exceção de rede sob lock está registrada abaixo.
+- **ACHADO SEV-3 — dívida, não corrigido:** `_ensure_client` segura `self._lock` durante `_probe_client()` (GET) e `_register_client()` (POST), somando até ~30 s de rede sob lock. Não congela a GUI porque `status()` deliberadamente não toma o lock; quem paga é uma thread de trabalho do MCP, uma única vez por dispositivo (o `client_id` do DCR é cacheado). Sem deadlock: RLock reentrante e ordem `SeraphAuth` → `_SETTINGS_LOCK` preservada. Correção sugerida: aplicar o mesmo padrão já usado em `_get_access_token`, soltando o lock antes da rede; o lock de `_ensure_client` é redundante para concorrência de login, já que `login()` tem lock próprio que impede dois logins simultâneos.
+- **ACHADO SEV-3 — dívida, não corrigido:** uma venda no caminho normal dispara **TRÊS `guardian_pretrade_check` e dois `guardian_execute`** — o gate da simulação de min-net-profit, o do approve e o do swap. O gate do swap é deliberadamente fresco porque a espera do receipt do approve pode estourar a janela de 180 s do gate. Como cada pretrade pode pollar até 120 s, o pior caso teórico de uma venda é **~6 minutos só de gating**. Travado por `test_sell_without_bypass_takes_three_gates_because_the_profit_check_gates_too`, de modo que qualquer consolidação futura fica visível.
+- **Invariantes de custódia travadas por teste:** `guardian_execute` recebe exclusivamente `requestId`, nunca campos de transação; gate `block`/`warn`/`unknown` nunca chega ao executor; `execution_pending` é retentado um número limitado de vezes; o painel expõe ao engine apenas o endereço embedded, nunca a carteira externa.
+
+---
+
 ## 9. Decisões aplicadas em execução
 
 | # | Decisão | Motivo |
@@ -502,6 +513,10 @@ QA adversarial feito pelo orquestrador.
 | E24 | `NEXT_PUBLIC_PRIVY_SIGNER_ID` e `NEXT_PUBLIC_PRIVY_GLOBAL_POLICY_ID` obrigatórias **apenas em produção**: default vazio no schema; `getPublicEnv()` só rejeita valores vazios quando `NODE_ENV === "production"` | Exigi-las sempre quebraria a suíte de testes, que não configura ambiente. O hook `useSeraphWalletSigner` valida ambas antes de tocar a Privy e falha com `signer_config_missing`, então o default vazio nunca chega a virar uma concessão de assinatura malformada |
 | E25 | `/wallet` é rota estática própria, fora do esquema de views do console; link em `pageNavigation`, sem acrescentar a `VALID_VIEWS` | Acrescentá-la a `VALID_VIEWS` criaria uma view que o renderizador não sabe desenhar. Navegação separada das views preserva o tipo `View` intacto |
 | E26 | O saque usa o owner path da Privy (`useSendTransaction` do módulo principal, com `options.address` da Carteira Seraph), **nunca o session signer** | `@privy-io/react-auth/tempo` exporta uma `useSendTransaction` homônima e experimental, com assinatura diferente (`{transaction, wallet}`); ela **NÃO** deve ser usada. Teste `never touches the session signer` fixa a invariante |
+| E27 | `bypass_gate` só pula checagens locais pré-voo (price impact na compra, min-net-profit na venda), **nunca o gate de transação** | Desde a reescrita de `live.py`, `_execute_via_guardian` toma o gate por conta própria quando não recebe um pronto. As mensagens de UI "Seraph gate bypassed" eram falsas e foram corrigidas para "local check bypassed (Seraph gate still enforced)" |
+| E28 | `arm_live` exige `signerGranted` explicitamente, além do `connected` derivado | Armar o modo live é a única ação que gasta fundos reais pelo signer do servidor; falha fechado por conta própria em vez de confiar no campo derivado pelo provider |
+| E29 | O segredo da carteira local antiga (`get_data_dir()/config/trader/wallet/local-wallet.enc`, JSON cifrado por Windows DPAPI) fica **INTOCADO**; nenhum código da 1.12.0 o lê, migra ou apaga | As release notes devem instruir o usuário a mover os fundos **ANTES de atualizar**, ou usando a **1.11.x** |
+| E30 | `_gas_quote_log_line` foi removida do engine junto com o módulo da carteira local | A margem de gas passou a ser aplicada pelo executor no servidor; o desktop não pode reportar um número que não computa mais |
 
 ---
 
@@ -528,8 +543,16 @@ QA adversarial feito pelo orquestrador.
 | W2.P3 | ✔ concluída + QA — ver §14 | baseline consolidado da W2 em §14 | `ebee028`, `d7b3604`, `090e371` |
 | W2.P4 | ✔ concluída + QA — ver §14 | console 858 / 45 arquivos → **1021 / 50 arquivos**, exit 0 | `b849938`, `07a9de3`, `a58e4b4`, `8baa74c` |
 | W2.P5 | ⏳ deploy do console deliberadamente adiado junto com W1c.P3 — decisão do usuário de deployar tudo junto após W3 fixar o `DESKTOP_CLIENT_ID` real | — | — |
-| W3.* | ⏳ próxima fase — desktop Omni-OS | — | — |
-| W4, W5 | pendentes | — | — |
+| W3.P1 | ✔ concluída + QA — ver §15 | baseline consolidado da W3 em §15 | relação consolidada em §15 |
+| W3.P2 | ✔ concluída + QA — ver §15 | baseline consolidado da W3 em §15 | relação consolidada em §15 |
+| W3.P3 | ✔ concluída + QA — ver §15 | baseline consolidado da W3 em §15 | relação consolidada em §15 |
+| W3.P4 | ✔ concluída + QA — ver §15 | baseline consolidado da W3 em §15 | relação consolidada em §15 |
+| W3.P5 | ✔ concluída + QA — ver §15 | baseline consolidado da W3 em §15 | relação consolidada em §15 |
+| W3.P6 | ✔ concluída + QA — ver §15 | desktop 201 → **337**, OK (3 skips pré-existentes) | relação consolidada em §15 |
+| W4 | ⏳ próxima fase — fakes e UAT | — | — |
+| W5 | pendente | — | — |
+
+**Sync point W3: S3.1 = `0264ef5`** (esqueleto `SeraphAuth`). W1c.P3 e W2.P5 (deploy) seguem **deliberadamente adiadas até que o `DESKTOP_CLIENT_ID` real seja fixado**.
 
 ### Baselines de teste corrigidos
 
@@ -797,3 +820,52 @@ O POST para `/authorize/privy` carrega `scope` e `resource` **exatamente como re
 ### Pendência de segurança que atravessa para W3
 
 **`DESKTOP_CLIENT_ID` continua sem valor no `wrangler.toml` do control-plane.** Enquanto estiver ausente, `desktop-api-keys.ts:75` trata qualquer client OAuth como autorizado a mintar chave de desktop — e é justamente essa chave que carrega `wallet:execute`. **Precisa ser fixado com o client_id real que o DCR do desktop gerar, antes de qualquer deploy.**
+
+---
+
+## 15. Checkpoint W3 — desktop Omni-OS
+
+**W3.P1–W3.P6 concluídas em código.** Sync point **S3.1 = `0264ef5`**; próxima fase: **W4 (fakes e UAT)**. W1c.P3 e W2.P5 (deploy) seguem **deliberadamente adiadas até que o `DESKTOP_CLIENT_ID` real seja fixado**. Este checkpoint registra as evidências fornecidas para a atualização documental; commits, testes, smoke de import e verificações de segurança não foram reexecutados nesta atualização do log. Conclusão em código não registra deploy/release.
+
+### Commits, em ordem
+
+O relato da wave informa **18 commits**, mas a relação fornecida contém **17 hashes**, todos registrados abaixo em ordem (descrições de escopo, não transcrições das mensagens). O hash restante não foi fornecido; nenhum commit foi inferido para completar a contagem.
+
+| Commit | Escopo / evidência registrada |
+|---|---|
+| `13087fb` | Settings + `update_settings` |
+| `0264ef5` | Esqueleto `SeraphAuth` — **S3.1** |
+| `800f786` | Estado, DCR, PKCE, listener loopback |
+| `7662e2c` | Login, mint, re-mint, disconnect |
+| `a74aed3` | 60 testes de `SeraphAuth` |
+| `f871066` | `McpClient`: path corrigido e resolução de credencial |
+| `9d4346a` | 28 testes de credencial |
+| `cfa2e2f` | Formatadores puros do painel |
+| `5f3e31a` | Remoção da UI de carteira local e bloco Carteira Seraph |
+| `6bf7f3e` | Gate de login, overlay, header, disconnect |
+| `4bdab15` | Testes do painel |
+| `870b3a0` | `live.py` via `guardian_execute` |
+| `aeccd75` | Engine lê wallet status do MCP |
+| `7c657ad` | Remoção do módulo de carteira local |
+| `f2b52f5` | Remoção do log de gas quote morto |
+| `575b1b6` | Testes de live adaptados |
+| `33f4208` | Testes de engine adaptados |
+
+### Baseline
+
+O desktop começou a wave com **201 testes** e terminou com **337**, **OK com os 3 skips pré-existentes**. Os skips vivem em `test_macos_package_diagnostics.py` e `test_native_bundle_regressions.py`, alheios a esta wave.
+
+### Correção de path
+
+`_APP_API_KEYS_PATH` apontava para o diretório do código-fonte, que em build frozen (PyInstaller) é temporário e read-only. Passou a resolver via `get_data_dir()`, como os outros **14 módulos** do app já faziam.
+
+### Aceitação verificada
+
+- Smoke de import dos **7 módulos OK**.
+- `rg "sign_transaction|from_key|local_wallet|eth_account"` sobre os `.py` do repo devolve apenas as strings literais da asserção negativa em `tests/test_trader_panel_format.py`.
+- **Zero `NotImplementedError` em `trader/`.**
+- **`requirements.txt` inalterado:** nenhuma dependência nova em toda a wave.
+
+### Pendência que bloqueia o release
+
+**`DESKTOP_CLIENT_ID` ainda não fixado no `wrangler.toml` do control-plane.** Enquanto estiver unset, a rota de mint trata qualquer cliente OAuth como autorizado, e a key de desktop é justamente a que carrega `wallet:execute`. O valor só existirá quando o desktop fizer seu **primeiro DCR real**. **Precisa ser fixado antes do release; W1c.P3 e W2.P5 permanecem adiadas.**
