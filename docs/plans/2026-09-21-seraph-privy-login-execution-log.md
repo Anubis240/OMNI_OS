@@ -419,10 +419,20 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 
 | Id | Item | Onde resolver |
 |---|---|---|
-| QA-P2-1 | `validate-key` não verifica se o `created_by` ainda é membro ativo da org nem se a conta está viva. Um ex-membro com key não revogada continua validando e agora carrega identidade. Fazer o join em `validate-key` mexeria num caminho de auth quente; o lugar barato e correto é o executor. | W1b.P3 — o executor deve checar membership ativa + conta viva antes de assinar |
+| QA-P2-1 — RESOLVIDO | `validate-key` não verifica se o `created_by` ainda é membro ativo da org nem se a conta está viva. Fazer o join em `validate-key` mexeria num caminho de auth quente; a checagem ficou no executor. | W1b.P3 — grant do signer, membership ativa e organização viva reconferidos imediatamente antes de assinar |
 | QA-P2-2 | `lookupFromControlPlane` devolve `null` tanto para "key desconhecida" quanto para "control-plane fora do ar", e ambos viram **401**. Pré-existente, mas o gate de versão o expõe por ~60 s no deploy. Fix: discriminar `{kind:"invalid"\|"unavailable"\|"ok"}` e mapear `unavailable` → 503 + `Retry-After`. | dívida (§7) |
 | QA-P2-3 | Sem singleflight por `keyHash` no isolate: N requisições concorrentes da mesma key = N chamadas a `validate-key`. Ruído na escala atual. | dívida (§7) |
 | QA-P2-4 | `TenantInfo.userId` é opcional em vez de ser uma união discriminada `{principal:"api_key"; userId:string} \| {principal:"oauth"; userId?:never}`. Hoje o invariante OAuth é comentário + teste, não tipo. | dívida (§7) |
+
+---
+
+### W1b.P3 (executor, idempotência e reconciliação)
+
+- **CORRIGIDO** — claim atômica de gate/reserva/execução; corpo persistido para reenvio byte-idêntico; lease e CAS de status; validação ABI integrada; conflito em 409; chainId int32; error boundary sem vazar SQL. Commits e arquitetura final em §11.
+- **QA-P2-1 RESOLVIDO** — grant do signer, membership ativa e organização viva reconferidos imediatamente antes da assinatura.
+- **CORRIGIDO em `6204e89`** — estorno apenas mediante negativa explícita da Privy; falha de transporte da claim e Privy inalcançável nunca autorizam estorno.
+- **ACHADO OPERACIONAL PRÉ-EXISTENTE** — cron declarado não correspondia ao dispatch; `044a1e0` adiciona cross-check. Schedules de billing ainda dependem do time de billing (§11).
+- **DÍVIDAS ACEITAS / ENDURECIMENTO OPCIONAL** — riscos de dreno econômico e de transação viva após falha de cache da Privy aceitos explicitamente; itens #9, F3–F5, F7–F8, F10, A5–A7, A9–A11 e C2 registrados em §11 para reavaliação antes do release.
 
 ---
 
@@ -442,6 +452,11 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 | E10 | Diretório de migração é **`migrations-pg/`**, não `drizzle/` | O plano (W1b.P1.T2) está errado. Última migração: `0008_breezy_lizard.sql` |
 | E11 | `userId` só é propagado para keys com o escopo `wallet:execute` | Endurecimento sobre o texto de W1b.P2.T2, exigido pelo SEV-1 do QA: `api_key.created_by` é proveniência, não o principal que age. Sem o gate de escopo, uma key de console mintada por um admin faria o portador assinar com a carteira do admin e ler o saldo dela |
 | E12 | Registros de tenant com `userId` são cacheados com `expirationTtl = 60` em vez de 300 | 60 s é o mínimo do Cloudflare KV. Revogação nesse caminho é só por TTL, e 5 min de janela para uma key capaz de assinar é inaceitável |
+| E13 | Retenção de idempotência Privy de **24h documentada** | A documentação oficial de idempotency keys substitui a premissa anterior de janela arbitrária de 10 minutos; mesma chave + mesmo corpo retorna a resposta armazenada, corpo diferente retorna 400; `/rpc` cacheia 4xx e 5xx por 24h |
+| E14 | Janela de reenvio reduzida de **10 para 5 minutos** | Um trade perde sentido depois disso; a reconciliação contábil continua por polling, exclusivamente pelo reconciliador após 5 min |
+| E15 | Prova negativa on-chain via nonce vale **apenas como veto negativo** | Nonce nunca é autoridade positiva de existência; o lookup da Privy por `reference_id` é a única autoridade |
+| E16 | Webhooks Privy **avaliados e descartados**; adotar polling | Produção exige plano Enterprise e a administração é exclusiva pelo dashboard; spec OpenAPI oficial com 159 paths e nenhum contendo `webhook` |
+| E17 | Estorno permitido **apenas mediante negativa explícita da Privy** | Falha de transporte pode ocorrer após commit; Privy inalcançável não prova ausência de envio e nunca autoriza estorno |
 
 ---
 
@@ -457,8 +472,9 @@ Commits `62f71a0`, `7c35ec4`, `a327172`. Testes: control-plane 1285 → **1289**
 | W1.P2b | ✔ concluída + QA | control-plane | `de7ed03`, `d7f5f27`, `8b0d161`, `622ee32`, `a56c4c7` |
 | W1b.P1 | ✔ concluída + QA | control-plane | `ddc594a`, `8002c85`, `fd3ac3f`, `c12410a`, `3f35001`, `8367df9` = **S1b.1** |
 | W1b.P2 | ✔ concluída + QA | CP 1285 → **1289**; GP 995 → **1004** | `62f71a0`, `7c35ec4`, `a327172` = **S1b.2** |
-| W1b.P3 | ⏳ em andamento / **BLOQUEADA** — QA completa não aprovada; ver §11 | DoD anterior: 117 arquivos / 1482 testes (não reexecutado agora); validator isolado: 55 testes + tsc + eslint | `56531f5`, `664a252`, `79f30ac`, `98adc35`, `d2dc775`, `c9ad764`, `da9a13b`, `864d3e7` |
-| W1b.P4, W1b.P5 | ⏳ aguardam S1b.3 / S1b.2 | — | — |
+| W1b.P3 | ✔ concluída em código / **DESBLOQUEADA** — ver §11 | Testes registrados nos commits de §11; não reexecutados nesta atualização documental | 18 commits desde `a327172`; `6204e89` = **S1b.3** |
+| W1b.P4 | ⏳ próxima — S1b.3 disponível | — | — |
+| W1b.P5 | ⏳ pendente — S1b.2 disponível | — | — |
 | W1c.* | ⏳ aguarda W1b | — | — |
 | W2.* | ⏳ desbloqueada (credenciais Privy obtidas) | — | — |
 | W3.* | ⏳ desbloqueada, pode começar | — | — |
@@ -472,56 +488,102 @@ O handover registrava 1301 (control-plane) e 1007 (guardian-proxy) ao fim de W1b
 
 ---
 
-## 11. Checkpoint W1b.P3 — em andamento / BLOQUEADA
+## 11. Checkpoint W1b.P3 — concluída em código / DESBLOQUEADA
 
-**P3 não concluída. QA completa da phase ainda não aprovada; não fazer deploy/release.** Este checkpoint registra as evidências fornecidas para a atualização documental; os commits, testes e consultas à documentação abaixo não foram reexecutados nesta atualização do log.
+**W1b.P3 com código COMPLETO. Bloqueio anterior REMOVIDO.** Sync point **S1b.3 = `6204e89`**; próxima phase: **W1b.P4**. Este checkpoint registra as evidências fornecidas para a atualização documental; commits, testes e consultas às fontes oficiais não foram reexecutados nesta atualização do log. Conclusão em código não registra deploy/release.
+
+### Contrato de idempotência Privy / D23 — premissa corrigida
+
+A documentação oficial de [idempotency keys](https://docs.privy.io/api-reference/idempotency-keys) é explícita: **“Privy processes a request with a given idempotency key only once within a 24-hour window”**. Mesma chave + mesmo corpo devolve a resposta armazenada; mesma chave + corpo diferente devolve **400**. Para o grupo RPC (`/rpc`), tanto **4xx quanto 5xx** ficam cacheados pela vida de **24h** da chave.
+
+A afirmação anterior de **“sem garantia documentada de retenção” era resultado de pesquisa insuficiente e está corrigida**. A janela operacional de reenvio é de 5 minutos, não a antiga janela arbitrária de 10 minutos (E13–E14). O lookup por `reference_id` é autoridade de existência para reconciliação, não o mecanismo de deduplicação do reenvio.
 
 ### Implementação e verificações registradas
 
-Commits em `D:\git\agent-guardian` (descrições de escopo, não transcrições das mensagens):
+**18 commits** em `D:\git\agent-guardian`, branch `feat/omni-os-desktop-oauth`, base `a327172` (descrições de escopo, não transcrições das mensagens):
 
 | Commit | Escopo / evidência registrada |
 |---|---|
-| `56531f5` | Assinatura Privy — 34 testes |
-| `664a252` | Wallet RPC — 28 testes |
-| `79f30ac` | Gas — 12 testes |
-| `98adc35` | Correção de tipagem de P2 |
-| `d2dc775` | Executor |
-| `c9ad764` | Rotas |
-| `da9a13b` | Testes do executor — 62 testes |
-| `864d3e7` | Testes das rotas — 57 testes |
-| `e7bbc92` | Validador ABI isolado e seletor V3 corrigido — 55 testes; ainda sem integracao ao executor |
+| `56531f5` | T1 módulo de assinatura de autorização Privy — 34 testes |
+| `664a252` | T2 cliente wallet RPC da Privy |
+| `79f30ac` | T3 limits/chains/gas |
+| `98adc35` | Fix de tipagem herdado da W1b.P2 |
+| `d2dc775` | T4 executor |
+| `c9ad764` | T5 rotas internas de wallet |
+| `da9a13b` | T6 testes do executor |
+| `864d3e7` | T6 testes das rotas internas |
+| `e7bbc92` | Validação ABI de calldata e destinatários |
+| `d8930f9` | Colunas de reconciliação em `wallet_execution` + migração `0009_mute_preak.sql` |
+| `9bced00` | Leitor de nonce pendente |
+| `ad37358` | Claim atômica + reenvio byte-idêntico |
+| `a787175` | 409 em conflito de gate + chainId int32 + error boundary sem vazar SQL |
+| `d579b74` | Testes da claim atômica e do reenvio |
+| `cd32d66` | Reconciliador de execuções pendentes em cron |
+| `d79f122` | Testes do reconciliador |
+| `044a1e0` | Cron declarado travado contra a tabela de dispatch do worker |
+| `6204e89` | Estorno apenas mediante negativa explícita da Privy (correções do QA) |
 
-- **Baseline DoD anterior:** 117 arquivos / 1482 testes. Não reexecutado agora; não representa aprovação da implementação atual nem da phase inteira.
-- **Novo calldata validator isolado:** 55 testes verificados, além de `tsc` e `eslint`. **NÃO integrado ao executor**; essa validação isolada não prova proteção no caminho de execução.
-- Seletor confirmado com `Web3.keccak`: `0x04e45aaf`; `0x414bf389` rejeitado. Validação ABI estrita, recipient igual à própria carteira, spender restrito aos routers permitidos e `withdraw` de WETH. Calldata preservado byte a byte.
+### Arquitetura final
 
-### Bloqueio — contrato de idempotência Privy / D23
+- `executeGate` roda **TODAS** as checagens puras e leituras de rede (parse, wallet match, chain, cap por tx, validação de calldata, estimativa de gas, snapshot de nonce) **ANTES** de consumir o gate. Um 429 de RPC pública nunca queima o gate do usuário.
+- Consumo do gate + reserva diária + criação da linha de execução acontecem em **UMA única statement SQL com CTEs que modificam dados**: neon-http não tem transação interativa. Esta é a implementação final, substituindo a proposta histórica de `db.batch` em §8.
+- Se essa statement lançar, **NADA é estornado**: o commit pode ter ocorrido antes da falha de transporte. Retorna `execution_pending`; o reconciliador resolve.
+- Corpo enviado à Privy persistido e reutilizado **byte a byte**, reconstruído só de colunas; **zero RPC no reenvio**. Linhas anteriores à migração `0009` nunca são reenviadas.
+- Reenvio entre **30s e 5min**, com lease no banco. Acima de 5min a linha pertence exclusivamente ao reconciliador.
+- Toda transição para `submitted`/`failed` inclui `AND status = 'pending'` no WHERE. Estorno só roda quando o UPDATE devolveu linha, tornando estorno duplo impossível; a dívida A5 abaixo permanece distinta.
+- Grant do signer reconferido **imediatamente antes de assinar**, incluindo membership ativa e organização viva (**QA-P2-1 fechada**).
+- Reconciliador em cron **a cada 5 minutos**: lookup da Privy por `reference_id` é a **única autoridade de existência**; nonce serve apenas como **VETO negativo**, nunca autoridade positiva. Privy inalcançável **nunca estorna**.
 
-A documentação de [`eth_sendTransaction`](https://docs.privy.io/api-reference/wallets/ethereum/eth-send-transaction) informa que respostas **4xx/5xx são cacheadas para a mesma chave**, com exceção relacionada à policy. **Não foi encontrada garantia de retenção** na documentação consultada. Uma janela local de **10 minutos**, inventada sem esse contrato, **não prova proteção contra duplicação** e não fundamenta reenvio seguro.
+**Contrato de erros:** adicionados `calldata_not_allowed` e `execution_abandoned`; a tupla `EXECUTOR_ERROR_CODES` passa a **19 códigos**.
 
-O lookup por `reference_id` em [transactions/external-id](https://docs.privy.io/api-reference/transactions/external-id) **não prova deduplicação**. Uma lista vazia tampouco prova ausência de broadcast; não autoriza reenviar uma operação de resultado incerto.
+### Achado operacional pré-existente — dispatch de cron
 
-**Para desbloquear, é necessária uma das alternativas, explicitamente confirmada:**
+O `wrangler.toml` do control-plane-api declarava apenas `crons = ["17 */6 * * *"]`, string **ausente** do `CRON_SCHEDULE_MAP` de `lib/workers/cron-handler.ts`. Consequência: `dunning.check`, `usage.reconcile`, `invite.expire`, `data.archive` e `audit.verify-chain` **NUNCA executaram em produção**; `handleCronTrigger` devolvia **“Unknown cron schedule”** a cada tick e só a reconciliação de sandbox rodava.
 
-1. Confirmação da Privy sobre o contrato de **atomicidade e retenção** que sustente reenvio seguro; **OU**
-2. Decisão explícita de alterar **D23** para manter a operação em `pending`, **sem replay automático**, com **reconciliação positiva**.
+**Não causado por W1b.P3; exige atenção do time.** `044a1e0` fecha a lacuna estrutural com cross-check no teste: todo cron declarado deve ser reivindicado pelo `CRON_SCHEDULE_MAP` ou pela constante `SANDBOX_RECONCILE_CRON`. Os schedules de billing **continuam não declarados**; habilitá-los é decisão do time de billing, fora do escopo desta phase.
 
-Nenhuma dessas alternativas está aprovada neste checkpoint. **Não implementar mudança silenciosa de requisito.** O plano original permanece intocado.
+### Chain 4663 — confirmação oficial e dívida de RPC
 
-### QA pendente antes de aprovar P3
+| Item | Valor / fonte oficial |
+|---|---|
+| Robinhood Chain | Chain ID **4663**, RPC `https://rpc.mainnet.chain.robinhood.com` — [conexão](https://docs.robinhood.com/chain/connecting/) |
+| SwapRouter02 | `0xcaf681a66d020601342297493863e78c959e5cb2` — `docs.uniswap.org`, deployments V3 da Robinhood Chain |
+| WETH | `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73` — [contratos](https://docs.robinhood.com/chain/contracts/) |
 
-- Atomicidade entre consumo do gate, reserva do cap e criação da execução (`consume/reserve/execution`).
-- Persistência do corpo da requisição, `walletId` e `priority` para preservar a operação exata.
-- CAS de lease/status para impedir disputas e transições indevidas.
-- Membership e organização ativas, além de nova checagem do signer antes de assinar.
-- Sanitização de erros de banco, sem expor SQL, parâmetros ou dados sensíveis.
-- Resposta **409** para conflito.
-- Validação de chain no intervalo **int32**.
-- Integração do calldata validator ao executor e verificação do caminho integrado.
+**Dívida operacional:** 4663 (Robinhood Chain) e 480 (World Chain) têm apenas **UM RPC público anônimo cada, sem fallback**.
+
+### Webhooks Privy — avaliados e descartados
+
+Administração exclusivamente pelo **dashboard**: a spec OpenAPI oficial tem **159 paths e ZERO contendo `webhook`**. A documentação oficial exige plano **Enterprise** para habilitar webhooks em produção. Caminho escolhido: **reconciliação por polling** (E16).
+
+### Endurecimento OPCIONAL — dívida técnica antes do release
+
+Reavaliar antes do release; não reabre o bloqueio removido de W1b.P3.
+
+| Id | Item |
+|---|---|
+| #9 | Asserção tautológica `expect([...]).toContain(outcome)` em `lib/privy/__tests__/authorization-signature.test.ts` deveria ser `toBe("fallback")` |
+| F3 | `gasLimit` sem teto e `baseFeePerGas` zero esvaziam o cap de custo de gas |
+| F4 | Priority fee forçado a zero quando o endpoint não suporta, com risco de transação presa |
+| F5 | Regex com flag `i` aceita prefixo `0X` |
+| F7 | Gas fora do orçamento diário |
+| F8 | `CAP_FEE_WEI` de 150 gwei na mainnet é inerte: cap de custo total já limita a ~45–55 gwei, indisponibilizando swaps na mainnet com base fee acima de ~25 gwei |
+| F10 | `capFeeWei ?? 0n` vira DoS silencioso para chain sem entrada em `limits.ts` |
+| A5 | Flip de status e estorno em duas statements, com estorno de zero linhas silencioso |
+| A6 | `gate_not_found` versus `gate_owner_mismatch` é oráculo de existência entre tenants; `POST /gate` devolve 409 para requestId de outro tenant, permitindo squatting |
+| A7 | Adoção por `reference_id` não compara `caip2` com o chainId |
+| A9 | Reenvio ignora `gate.expiresAt` e replica fees de até 5 minutos |
+| A10 | Dia do estorno recomputado em JavaScript em vez de persistir `utc_day` na linha |
+| A11 | Caixa do endereço passada a `checkCalldata` difere entre primeira tentativa e reenvio |
+| C2 | Quarentena da primeira tentativa de cerca de 100 segundos; ideal exigir duas leituras vazias consecutivas da Privy antes de abandonar |
+
+### Dívidas de segurança explicitamente ACEITAS
+
+1. **Dreno econômico:** `recipient == wallet` protege contra dreno trivial, mas `tokenOut` e `amountOutMin` são livres. Swap para pool hostil com saída próxima de zero passa.
+2. **Transação viva após falha de cache:** reconciliador só examina linhas `pending`. Se a Privy processar o envio original, mas falhar em cachear a idempotência, uma linha pode terminar `failed`/`privy_rejected` com a primeira transação viva na rede.
 
 **Recomendações incorretas de QA descartadas:** `withdraw` de WETH não é transferência externa; converter calldata para lowercase viola o contrato de preservação; caps nativos não garantem limite de notional de tokens.
 
 **Linear:** nenhuma issue identificada e variável Linear não localizada na inspeção anterior; nenhuma atualização da API efetuada. Não inferir ausência definitiva de integração.
 
-**Saída deste checkpoint:** registro documental de progresso e bloqueio, não aceite da phase, não autorização de deploy/release.
+**Saída deste checkpoint:** W1b.P3 concluída em código e desbloqueada; **S1b.3 = `6204e89`**, seguir para **W1b.P4**. Dívidas acima permanecem registradas; nenhum deploy/release efetuado nesta atualização documental.
