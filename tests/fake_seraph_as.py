@@ -11,6 +11,7 @@ consult that set in addition to JWT exp. Newly issued tokens remain valid.
 """
 
 import base64
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
@@ -28,7 +29,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 import requests
 import uvicorn
@@ -77,7 +78,11 @@ class FakeSeraph:
         self._latest_family: str | None = None
         self._access_jtis: set[str] = set()
         self.expired_access_jtis: set[str] = set()
+        self._api_keys: dict[str, dict] = {}
+        self._signer = {"address": None, "granted_at": None, "external": None}
+        self._mint_failure: int | None = None
         self._install_auth_routes()
+        self._install_control_plane_routes()
 
     @property
     def base_url(self) -> str:
@@ -96,6 +101,19 @@ class FakeSeraph:
 
     def stats(self) -> dict:
         return self._stats.copy()
+
+    def api_keys(self) -> list[dict]:
+        return [deepcopy({k: v for k, v in record.items() if k != "key"})
+                for record in self._api_keys.values()]
+
+    def active_key_count(self) -> int:
+        return sum(not record["revoked"] for record in self._api_keys.values())
+
+    def signer_state(self) -> dict:
+        return {"address": self._signer["address"],
+                "signerGranted": self._signer["granted_at"] is not None,
+                "signerGrantedAt": self._signer["granted_at"],
+                "linkedExternalAddress": self._signer["external"]}
 
     def start(self) -> str:
         if self._thread is not None and self._thread.is_alive():
@@ -302,11 +320,137 @@ class FakeSeraph:
         async def stats() -> dict:
             return self.stats()
 
+    def _require_oauth(self, request: Request, required_scope: str) -> dict:
+        try:
+            authorization = request.headers.get("authorization", "").split()
+            if len(authorization) != 2 or authorization[0].lower() != "bearer":
+                raise ValueError("invalid bearer header")
+            segments = authorization[1].split(".")
+            if len(segments) != 3 or not all(segments):
+                raise ValueError("invalid JWT shape")
+            payload = json.loads(base64.urlsafe_b64decode(segments[1] + "=" * (-len(segments[1]) % 4)))
+            if (not isinstance(payload, dict)
+                    or not isinstance(payload.get("exp"), (int, float))
+                    or not payload["exp"] > time.time()
+                    or payload.get("aud") != self.base_url + "/api"
+                    or not isinstance(payload.get("jti"), str)
+                    or payload["jti"] in self.expired_access_jtis
+                    or not isinstance(payload.get("scope"), str)
+                    or not isinstance(payload.get("sub"), str)
+                    or not isinstance(payload.get("orgId"), str)):
+                raise ValueError("invalid JWT claims")
+        except (ValueError, TypeError, UnicodeError) as exc:
+            raise HTTPException(401, detail={"error": "invalid_token"}) from exc
+        if required_scope not in payload["scope"].split():
+            raise HTTPException(403, detail={"error": "insufficient_scope", "scope": required_scope})
+        return payload
+
+    # PARTE B1: desktop API keys and signer state.
+    def _install_control_plane_routes(self) -> None:
+        @self.app.exception_handler(HTTPException)
+        async def oauth_error(request: Request, exc: HTTPException) -> JSONResponse:
+            # OAuth errors use a top-level error, not FastAPI's detail envelope.
+            return JSONResponse(exc.detail, status_code=exc.status_code)
+
         @self.app.post("/api/desktop/api-keys")
-        async def mint_placeholder() -> JSONResponse:
-            # PARTE B: substituir por mint real.
-            return self._error("not_implemented_part_b", 501)
+        async def mint(request: Request):
+            self._stats["mints"] += 1
+            payload = self._require_oauth(request, "api-keys:write")
+            if self._mint_failure is not None:
+                status, self._mint_failure = self._mint_failure, None
+                return self._error("mint_failed", status)
+            data = await request.json()
+            device_id = data.get("device_id") if isinstance(data, dict) else None
+            if not isinstance(device_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", device_id):
+                return self._error("invalid_request")
+            name = f"{data.get('name', '')} · {device_id[:8]}"
+            for record in self._api_keys.values():
+                if not record["revoked"] and record["org_id"] == payload["orgId"] and record["name"] == name:
+                    record["revoked"] = True
+            key = "mcfw_" + secrets.token_hex(32)
+            scopes = ["mcp"]
+            if "wallet:execute" in payload["scope"].split():
+                scopes.append("wallet:execute")
+            record = {"id": "key_" + secrets.token_urlsafe(16), "key": key,
+                      "key_prefix": key[:12], "name": name, "device_id": device_id,
+                      "org_id": payload["orgId"], "created_by": payload["sub"],
+                      "scopes": scopes, "created_at": datetime.now(timezone.utc).isoformat(),
+                      "revoked": False}
+            self._api_keys[key] = record
+            return JSONResponse({"id": record["id"], "key": key, "keyPrefix": key[:12],
+                                 "name": name, "scopes": scopes, "createdAt": record["created_at"],
+                                 "mcpUrl": self.base_url + "/mcp"}, status_code=201)
+
+        @self.app.delete("/api/desktop/api-keys/{key_id}")
+        async def delete_key(key_id: str, request: Request, device_id: str = ""):
+            self._stats["deletes"] += 1
+            payload = self._require_oauth(request, "api-keys:write")
+            record = next((item for item in self._api_keys.values() if item["id"] == key_id), None)
+            if (record is None or record["org_id"] != payload["orgId"]
+                    or record["created_by"] != payload["sub"]
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", device_id)
+                    or not record["name"].endswith(f"· {device_id[:8]}")):
+                return self._error("not_found", 404)
+            # Retain the record: revocation mirrors the backend's soft-delete.
+            record["revoked"] = True
+            return {"success": True}
+
+        @self.app.post("/api/wallet/signer-granted")
+        async def grant_signer() -> dict:
+            # Real route uses Privy auth, deliberately not the OAuth helper.
+            if self._signer["address"] is None:
+                self._signer["address"] = "0x1111111111111111111111111111111111111111"
+            self._signer["granted_at"] = datetime.now(timezone.utc).isoformat()
+            return {k: v for k, v in self.signer_state().items() if k != "linkedExternalAddress"}
+
+        @self.app.get("/api/wallet/signer-granted")
+        async def get_signer() -> dict:
+            return self.signer_state()
+
+        @self.app.delete("/api/wallet/signer-granted")
+        async def delete_signer() -> dict:
+            self._signer["granted_at"] = None
+            return {"signerGranted": False}
+
+        @self.app.post("/_test/grant_signer")
+        async def test_grant_signer(request: Request) -> dict:
+            data = await request.json()
+            self._signer["address"] = data["address"]
+            self._signer["granted_at"] = datetime.now(timezone.utc).isoformat()
+            return self.signer_state()
+
+        @self.app.post("/_test/revoke_signer")
+        async def test_revoke_signer() -> dict:
+            self._signer["granted_at"] = None
+            return self.signer_state()
+
+        @self.app.post("/_test/set_external_wallet")
+        async def set_external_wallet(request: Request) -> dict:
+            data = await request.json()
+            self._signer["external"] = data["address"]
+            return self.signer_state()
+
+        @self.app.post("/_test/revoke_api_key")
+        async def revoke_api_key(request: Request) -> dict:
+            data = await request.json()
+            revoked = False
+            for record in self._api_keys.values():
+                if (record["id"] == data.get("id") or
+                        (isinstance(data.get("prefix"), str) and data["prefix"]
+                         and record["key"].startswith(data["prefix"]))):
+                    record["revoked"] = True
+                    revoked = True
+            return {"revoked": revoked}
+
+        @self.app.post("/_test/mint_failure")
+        async def mint_failure(request: Request):
+            data = await request.json()
+            status = data.get("status")
+            if status is not None and (type(status) is not int or not 400 <= status <= 599):
+                return self._error("invalid_request")
+            self._mint_failure = status
+            return {"status": status}
 
 
-# PARTE B: control-plane + Privy (replace the mint placeholder above).
+# PARTE B2: wallet executor + fake Privy.
 # PARTE C: fake /mcp.
