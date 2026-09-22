@@ -1,15 +1,102 @@
 """Settings contracts using only disposable files, never user settings."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import threading
+import time
 from unittest.mock import patch
 
 from core import settings_store
 
 
 class SettingsStoreTests(unittest.TestCase):
+    def test_default_settings_has_seraph_auth_block_with_all_fields(self):
+        auth = settings_store.DEFAULT_SETTINGS["seraph_auth"]
+        self.assertEqual(set(auth), {
+            "api_key", "api_key_id", "api_key_prefix", "api_key_name",
+            "api_key_created_at", "api_key_source", "api_key_scopes",
+            "device_id", "client_id", "client_id_issued_at",
+            "registered_redirect_uri", "access_token", "access_expires_at",
+            "refresh_token", "refresh_issued_at", "scope", "subject", "org_id",
+            "issuer", "authorization_endpoint", "token_endpoint",
+            "registration_endpoint", "revocation_endpoint", "metadata_fetched_at",
+        })
+        self.assertIsInstance(auth["api_key_scopes"], list)
+        self.assertEqual(auth["api_key_scopes"], [])
+        for key, value in auth.items():
+            if key != "api_key_scopes":
+                self.assertIsNone(value, key)
+
+    def test_legacy_file_gains_defaults(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"dashboard_port": 9001}), encoding="utf-8")
+        loaded = settings_store.load_settings()
+        self.assertEqual(loaded["seraph_auth"], settings_store.DEFAULT_SETTINGS["seraph_auth"])
+        self.assertEqual(loaded["dashboard_port"], 9001)
+
+    def test_update_settings_applies_and_persists(self):
+        def mutate(settings):
+            settings["dashboard_port"] = 9123
+            return "ignored"
+
+        saved = settings_store.update_settings(mutate)
+        self.assertEqual(saved["dashboard_port"], 9123)
+        self.assertEqual(settings_store.load_settings(), saved)
+
+    def test_serializes_8_concurrent_writers(self):
+        settings_store.save_settings({"integrations": {}})
+        barrier = threading.Barrier(8)
+
+        def write(index):
+            barrier.wait(timeout=5)
+
+            def increment(settings):
+                counters = settings["integrations"]
+                key = str(index)
+                counters[key] = counters.get(key, 0) + 1
+                # Release the GIL while holding the settings lock: without
+                # serialization, concurrent snapshots lose other counters.
+                time.sleep(0.02)
+
+            settings_store.update_settings(increment)
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(write, range(8)))
+        self.assertEqual(settings_store.load_settings()["integrations"], {
+            str(index): 1 for index in range(8)
+        })
+
+    def test_mutator_exception_leaves_file_intact(self):
+        settings_store.save_settings({"dashboard_port": 9001})
+        before = self.path.read_bytes()
+        error = ValueError("mutation failed")
+
+        def mutate(settings):
+            settings["dashboard_port"] = 9123
+            raise error
+
+        with self.assertRaises(ValueError) as raised:
+            settings_store.update_settings(mutate)
+        self.assertIs(raised.exception, error)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_reentrant(self):
+        def mutate(settings):
+            # A bounded acquisition makes a regression to Lock fail rather
+            # than leaving a blocked thread behind in the test process.
+            acquired = settings_store._SETTINGS_LOCK.acquire(timeout=1)
+            self.assertTrue(acquired, "settings lock must be reentrant")
+            try:
+                settings["dashboard_port"] = 9123
+            finally:
+                settings_store._SETTINGS_LOCK.release()
+
+        settings_store.update_settings(mutate)
+        self.assertEqual(settings_store.load_settings()["dashboard_port"], 9123)
+
     def setUp(self):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

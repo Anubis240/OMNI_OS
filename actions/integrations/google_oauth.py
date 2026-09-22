@@ -42,9 +42,9 @@ def get_credentials() -> Credentials | None:
     )
     if not creds.valid:
         creds.refresh(Request())
-        settings = settings_store.load_settings()
-        settings["integrations"]["google"]["access_token"] = creds.token
-        settings_store.save_settings(settings)
+        settings_store.update_settings(
+            lambda s: s["integrations"]["google"].update(access_token=creds.token)
+        )
     return creds
 
 
@@ -73,9 +73,10 @@ def connect(player=None) -> str:
         log("Google", msg, player)
         return msg
 
-    settings = settings_store.load_settings()
-    settings["integrations"]["google"]["refresh_token"] = creds.refresh_token
-    settings["integrations"]["google"]["access_token"] = creds.token
-    settings_store.save_settings(settings)
+    def persist_tokens(settings):
+        settings["integrations"]["google"]["refresh_token"] = creds.refresh_token
+        settings["integrations"]["google"]["access_token"] = creds.token
+
+    settings_store.update_settings(persist_tokens)
     log("Google", "Account connected.", player)
     return "Google account connected."

@@ -25,9 +25,9 @@ def _app(entry: dict) -> msal.PublicClientApplication:
 def _persist_cache(app: msal.PublicClientApplication) -> None:
     if not app.token_cache.has_state_changed:
         return
-    settings = settings_store.load_settings()
-    settings["integrations"]["microsoft"]["token_cache"] = app.token_cache.serialize()
-    settings_store.save_settings(settings)
+    settings_store.update_settings(
+        lambda s: s["integrations"]["microsoft"].update(token_cache=app.token_cache.serialize())
+    )
 
 
 def get_access_token() -> str | None:
