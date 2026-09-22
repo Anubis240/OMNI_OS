@@ -88,5 +88,29 @@ class DashboardCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, 1)
 
 
+class NewKeyRevocationTests(unittest.TestCase):
+    """GEMZ4US, Item G (2026-09-21): generating a new pairing key didn't
+    revoke the previous one -- key A, already superseded on screen by key
+    B, still successfully paired in a fresh browser session right up
+    until its own original 10-minute expiry. Multiple keys could be
+    simultaneously valid; only time-based expiry ever invalidated one.
+    This gates access to a real-funds LIVE app."""
+
+    def setUp(self):
+        self.server = DashboardServer()
+
+    def test_generating_a_new_key_revokes_the_previous_one(self):
+        key_a = self.server.new_key()
+        key_b = self.server.new_key()
+        self.assertNotEqual(key_a, key_b)
+        self.assertNotIn(key_a, self.server._pending_keys)
+        self.assertIn(key_b, self.server._pending_keys)
+
+    def test_only_the_most_recent_key_is_ever_pending(self):
+        for _ in range(5):
+            self.server.new_key()
+        self.assertEqual(len(self.server._pending_keys), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
