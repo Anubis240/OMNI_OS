@@ -534,6 +534,7 @@ Evidências fornecidas para esta atualização documental, não reexecutadas aqu
 | E32 | O parâmetro `on_unauthorized` do `McpClient` passou a ser honrado também no modo `api_key_oauth` (commit `36c65d0`) | Antes era ignorado no caminho principal, tornando o módulo intestável em integração sem mexer no singleton global que aponta para produção. O tipo `Callable[[], str \| None]` já era exatamente a assinatura de `remint_api_key()`, ou seja, o parâmetro foi projetado para isso e a implementação é que divergia |
 | E33 | `api-keys:write` é scope do GRANT OAuth, não da key mintada. A key recebe `["mcp","wallet:execute"]` | O texto do plano confundia os dois |
 | E34 | Família de refresh revogada faz `remint_api_key()` devolver `None`, mas a key local SOBREVIVE e `needs_login` continua False | Key e refresh token são credenciais independentes, e matar uma key funcional porque o refresh morreu seria destrutivo. `needs_login` só vira True quando o `McpClient` chama `invalidate_session()` após um 401 que sobreviveu ao re-mint |
+| **E35** | PyInstaller não está instalado neste ambiente, então W5.P2.T2 (build frozen e verificação do `dist/`) não foi executada. Os comentários do `.spec` foram atualizados e as três linhas funcionais exigidas por Q37 foram preservadas e verificadas por diff, mas a prova empírica de que o build empacotado ainda importa `web3` fica pendente do UAT ou de um ambiente com PyInstaller. | Documentar a lacuna é melhor do que declarar um build que ninguém rodou. Alternativa rejeitada: instalar PyInstaller só para este check (mudaria o ambiente do usuário sem pedido). |
 
 ---
 
@@ -576,7 +577,13 @@ Evidências fornecidas para esta atualização documental, não reexecutadas aqu
 | W4.P1 | ✔ concluída + QA — ver §16 | desktop 201 → **369 testes, OK (skipped=3)**; 14 testes OAuth + 18 de execução | `12b8b30`, `6e4af63`, `e6ca681`, `1f40e54`, `36c65d0`, `1675165`, `312b497`, `b92d5c2` |
 | W4.P2 | **BLOQUEADA** — exige W1c.P3 e W2.P5 (deploys adiados por decisão explícita do usuário), mais um humano com ≥0,005 ETH em Base | — | — |
 | W4.P3 | **BLOQUEADA** — exige W4.P2 e um humano | — | — |
-| W5 | **Próxima fase executável** — PRD, release notes, packaging, QA global | — | — |
+| W5 | **Parcialmente concluída** — documentação, comentários de packaging e suítes finais concluídos; build, QA global e release pendentes — ver §17 | contagens finais em §17 | `af0dc67`, `75c26db`, `84c23a7` |
+| W5.P1 | ✔ concluída — PRD e release notes | zero ocorrências das 11 strings proibidas, conforme verificação do orquestrador | `af0dc67`, `75c26db` |
+| W5.P2.T1 | ✔ concluída — apenas comentários de packaging alterados; Q37 preservada | diff inspecionado e `ast.parse` passa, conforme verificação do orquestrador | `84c23a7` |
+| W5.P2.T2 | **NÃO EXECUTÁVEL** — build PyInstaller: PyInstaller ausente no ambiente (`import PyInstaller` → `ModuleNotFoundError`) | checks de build e verificação do `dist/` pendentes | — |
+| W5.P3.T1 | **BLOQUEADO** — QA global da Seção 6 depende de W4.P2 fechada | W4.P2 não fechada | — |
+| W5.P3.T2 | ✔ concluído — suítes finais, medidas pelo orquestrador — ver §17 | Omni-OS 369 (3 skips); control-plane-api 1685 passed + 8 skipped (1693); guardian-proxy 1027; crypto-mcp 216; Seraph-Console 1021; todos exit 0 | — |
+| W5.P4 | **BLOQUEADO** — bump 1.12.0 + tag exige itens 1–10 da aceitação global verdes **E** UAT humano (W4.P3) aprovado; nenhum dos dois está satisfeito | aceitação global e UAT humano pendentes | — |
 
 **Sync point W3: S3.1 = `0264ef5`** (esqueleto `SeraphAuth`). W1c.P3 e W2.P5 (deploy) seguem **deliberadamente adiadas até que o `DESKTOP_CLIENT_ID` real seja fixado**.
 
@@ -928,3 +935,54 @@ O desktop começou a wave com **201 testes** e terminou com **337**, **OK com os
 DCR → authorize com PKCE → token com `aud` de `/api` → mint da key `mcfw_` → `/mcp` só com `Bearer mcfw_` → `guardian_wallet_status` → gate de pretrade → `guardian_execute` recebendo SÓ o `requestId` → fake Privy verificando a assinatura de autorização → 401 → re-mint → "Desconectar este dispositivo".
 
 As limitações de cobertura do fake e o achado de produção não corrigido estão registrados em §8; este checkpoint não os encerra.
+
+---
+
+## 17. Checkpoint W5 — documentação, packaging e suítes finais
+
+**W5 parcialmente concluída:** W5.P1, W5.P2.T1 e W5.P3.T2 concluídas; build, QA global e release permanecem pendentes. Este checkpoint registra evidências e contagens medidas pelo orquestrador na sessão reportada; commits, buscas, diff, `ast.parse` e testes não foram reexecutados nesta atualização documental. Conclusão documental não registra build frozen, deploy, bump ou tag.
+
+### Commits da W5
+
+Repo `D:\git\OMNI_OS`, branch `feat/omni-os-desktop-oauth`:
+
+| Hash | Mensagem |
+|---|---|
+| `af0dc67` | Update PRD for Seraph login, key and wallet |
+| `75c26db` | Add 1.12.0 release notes |
+| `84c23a7` | Update packaging comments after local wallet removal |
+
+### W5.P1 — PRD e release notes
+
+`prd/pages/05-trader-panel.md` foi de 73 para 105 linhas: a tabela "Wallet Row" (que documentava Create/Import/Export/Lock/Remove wallet, `_SecretRevealDialog`, `_looks_like_private_key` e a frase "I OWN THIS RISK") foi inteiramente substituída pela "Carteira Seraph (somente leitura)". Subseções novas: "Duas carteiras, uma opera" com a copy literal de D31, "Retirar" (owner path no console, fora do gate por design), "Login no Seraph" (OAuth+PKCE, key automática, os 6 estados do header, único botão de saída é "Desconectar este dispositivo"), "Execução de uma transação" (`guardian_execute` recebe apenas o `requestId`; limites 0.02 ETH/tx e 0.2 ETH + 20 tx/dia; uma venda normal dispara três gates e duas execuções) e "Precedência da credencial" (D6'). Verificado por busca pelo orquestrador: zero ocorrências das 11 strings proibidas.
+
+`prd/pages/07-onboarding-setup.md` ganhou 33 linhas documentando o terceiro overlay (`McpKeySetupOverlay` "Connect to Seraph"), incluindo a ausência de "Skip for now", os dois consentimentos, e a regra de que "Agora não" NÃO cancela o login (a sessão segue, a key é criada, o trader fica em paper).
+
+`docs/releases/1.12.0.md` criado (53 linhas, português): a mudança quebrada aparece nas linhas 6 e 8, com a ação obrigatória de mover fundos ou exportar a chave com a 1.11.x ANTES de atualizar, e o registro de que o arquivo `%LOCALAPPDATA%\Omni-OS\config\trader\wallet\local-wallet.enc` permanece intocado (nenhum código da 1.12.0 o lê, migra ou remove).
+
+### W5.P2.T1 — packaging
+
+`omni-os.spec` teve apenas comentários alterados; o diff completo foi inspecionado pelo orquestrador e toda linha adicionada ou removida começa com `#`. As três linhas funcionais exigidas por Q37 sobreviveram byte a byte: `datas += collect_data_files("eth_account")` (linha 68), `"eth_account"` (111) e `"eth_account.hdaccount"` (112). O motivo documentado mudou: `eth_account` permanece porque `web3` resolve seus backends em runtime, fora da análise estática do PyInstaller, e removê-lo quebraria as leituras on-chain — não mais por assinatura local, que deixou de existir. `ast.parse` do spec passa, conforme verificação do orquestrador.
+
+### W5.P3.T2 — suítes finais
+
+Todas verdes, medidas pelo orquestrador na sessão reportada:
+
+| Repositório / pacote | Resultado | Exit |
+|---|---|---|
+| Omni-OS (`unittest discover -s tests`) | 369 testes, OK (skipped=3) em 341 s | 0 |
+| control-plane-api (`vitest run`) | 122 arquivos, 1685 passed + 8 skipped (1693) | 0 |
+| guardian-proxy (`vitest run`) | 51 arquivos, 1027 testes | 0 |
+| crypto-mcp (`vitest run`) | 12 arquivos, 216 testes | 0 |
+| Seraph-Console (`vitest run`) | 50 arquivos, 1021 testes | 0 |
+
+Nota sobre os 8 skips do control-plane-api: são os testes de `lib/wallet/__tests__/gas.anvil.test.ts`, que exigem um nó Anvil em `127.0.0.1:8547`. Foram pulados porque o container havia parado. Com o container reativado (`docker run --rm -d --name omni-gas-anvil -p 127.0.0.1:8547:8545 --entrypoint anvil ghcr.io/foundry-rs/foundry:latest --host 0.0.0.0 --chain-id 8453`), o mesmo arquivo passa 8/8 — reconfirmado pelo orquestrador na sessão reportada. O skip condicional funcionando nos dois sentidos é a prova de que esses testes dependem mesmo do nó e não são teatro.
+
+Os 3 skips do Omni-OS são pré-existentes e alheios a este trabalho: 1 em `tests/test_macos_package_diagnostics.py` e 2 em `tests/test_native_bundle_regressions.py` (empacotamento macOS/Linux).
+
+### Pendências que impedem o fechamento da wave
+
+- PyInstaller ausente (`import PyInstaller` → `ModuleNotFoundError`) torna W5.P2.T2 **não executável** neste ambiente; build frozen e checks do `dist/` ficam pendentes (E35).
+- W4.P2 (smoke em produção) não fechada bloqueia W5.P3.T1 (QA global da Seção 6).
+- W5.P4 (bump 1.12.0 + tag) exige os itens 1–10 da aceitação global verdes **E** o UAT humano W4.P3 aprovado. Nenhum dos dois está satisfeito; W4.P2 e W4.P3 permanecem bloqueadores.
+- O bloqueador de release `DESKTOP_CLIENT_ID` continua aberto.
