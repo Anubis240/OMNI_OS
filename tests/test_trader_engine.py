@@ -549,6 +549,85 @@ class PositionMarkPriceTests(unittest.TestCase):
         self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected_equity, places=4)
 
 
+class EquityRefreshOnLowFrequencyActionsTests(unittest.TestCase):
+    """GEMZ4US, 2026-09-21 (Item C): "2 ARMs, one sync, one interrupted
+    scan" all still showed EQUITY = BALANCE + cost, even after the
+    2026-09-20 EQUITY-at-cost fix. Traced further: arm_live() had its OWN
+    separate, cost-only open_usd calculation that never went through
+    _equity()/_position_mark_price at all; sync_positions() only
+    refreshed EQUITY when a reconcile found something to change, leaving
+    the common "already matches" case exactly as stale as before; and
+    stop() never recomputed EQUITY either, so a scan interrupted by
+    stopping mid-cycle never reached _cycle()'s own end-of-scan refresh."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.engine.state["livePositions"] = [
+            {"symbol": "LIT", "address": TOKEN_ADDRESS, "chain": "ethereum",
+             "qty": 2.0, "entryPriceUsd": 10.0, "costUsd": 20.0, "openedAt": engine_mod._now_iso()},
+        ]
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_arm_live_values_open_positions_at_market_not_cost(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=7.0) as mock_price:
+            result = self.engine.arm_live()
+
+        self.assertTrue(result["ok"])
+        expected = 5.0 + 2.0 * 7.0  # balance + market value, not cost (2.0 * 10.0 = 20.0)
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected)
+        self.assertAlmostEqual(self.engine.state["liveStartingEquityUsd"], expected)
+        mock_price.assert_any_call(TOKEN_ADDRESS, "ethereum")
+
+    def test_sync_refreshes_equity_even_when_nothing_changed(self):
+        self.engine.armed_live = True
+        self.engine.state["lastLiveEquityUsd"] = 999.0  # stale, deliberately wrong
+        with patch.object(live_mod, "token_balance", return_value=2.0), \
+             patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=7.0):
+            result = self.engine.sync_positions()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["message"], "positions already match on-chain balances")
+        expected = 5.0 + 2.0 * 7.0
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected)
+
+    def test_stop_refreshes_live_equity(self):
+        self.engine.armed_live = True
+        self.engine.state["lastLiveEquityUsd"] = 999.0  # stale, deliberately wrong
+        self.engine.running = True
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=7.0):
+            self.engine.stop()
+
+        expected = 5.0 + 2.0 * 7.0
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected)
+
+    def test_stop_refreshes_paper_equity(self):
+        self.engine.armed_live = False
+        self.engine.running = True
+        self.engine.state["positions"] = [
+            {"symbol": "LIT", "address": TOKEN_ADDRESS, "chain": "ethereum",
+             "qty": 2.0, "entryPriceUsd": 10.0, "costUsd": 20.0, "openedAt": engine_mod._now_iso()},
+        ]
+        self.engine.state["balanceUsd"] = 5.0
+        self.engine.state["lastEquityUsd"] = 999.0  # stale, deliberately wrong
+        with patch.object(engine_mod.market, "current_price", return_value=7.0):
+            self.engine.stop()
+
+        expected = 5.0 + 2.0 * 7.0
+        self.assertAlmostEqual(self.engine.state["lastEquityUsd"], expected)
+
+
 class ScanCadenceTests(unittest.TestCase):
     """GEMZ4US, Item C (2026-09-20): confirmed by exact timestamps across
     three consecutive scans that the real period between scan starts was

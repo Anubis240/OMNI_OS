@@ -1018,6 +1018,15 @@ class TraderEngine:
             self.running = False
             self._wake_event.set()
             self._emit({"type": "log", "text": "trader stopped"})
+            # GEMZ4US, 2026-09-21 (Item C): a scan interrupted by stopping
+            # mid-cycle never reaches _cycle()'s own end-of-scan equity
+            # recompute, leaving EQUITY exactly as stale as it was before
+            # stop was pressed (at cost, if that's what was last cached).
+            # stop() is a deliberate, low-frequency action — refresh here too.
+            if self.armed_live:
+                self.state["lastLiveEquityUsd"] = self._equity([], fetch_missing_prices=True)
+            else:
+                self.state["lastEquityUsd"] = self._equity([], fetch_missing_prices=True)
             self._persist()
             return self.status()
 
@@ -1030,7 +1039,16 @@ class TraderEngine:
         try:
             eth_price_usd = live_mod.eth_usd_price()
             eth_bal_usd = live_mod.wallet_equity_usd_across_chains(self._enabled_live_chains(), ws["address"], eth_price_usd)
-            open_usd = sum(p["qty"] * p["entryPriceUsd"] for p in self.state["livePositions"])
+            # GEMZ4US, 2026-09-21 (Item C): this had its OWN separate,
+            # cost-only calculation here, entirely bypassing _equity()/
+            # _position_mark_price — the earlier EQUITY-at-cost fix never
+            # touched ARM at all, which is exactly why "2 ARMs" still
+            # showed EQUITY = BALANCE + Σ costs. One-off action, small
+            # position count: safe to fetch a live price for each.
+            open_usd = sum(
+                p["qty"] * self._position_mark_price(p, [], fetch_missing_prices=True)
+                for p in self.state["livePositions"]
+            )
             start_equity = eth_bal_usd + open_usd
         except Exception as err:
             return {"ok": False, "error": f"could not read wallet balance: {err}"}
@@ -1365,6 +1383,12 @@ class TraderEngine:
         pending_before = len(self.state["pendingLiveBuys"])
         self._reconcile_live_positions()  # emits its own state update if anything changed
         self._reconcile_pending_live_buys()  # same — resolves any buy still awaiting confirmation
+        # GEMZ4US, 2026-09-21 (Item C): both reconciles above only refresh
+        # lastLiveEquityUsd when something actually changed, so the common
+        # "already matches" case left EQUITY exactly as stale as before
+        # sync ran. sync is a deliberate, low-frequency user action —
+        # always give it a fresh, market-priced EQUITY regardless.
+        self.state["lastLiveEquityUsd"] = self._equity([], fetch_missing_prices=True)
         after = {p["symbol"]: p["qty"] for p in self.state["livePositions"]}
         closed = [sym for sym in before if sym not in after]
         changed = [sym for sym in after if sym in before and after[sym] != before[sym]]
