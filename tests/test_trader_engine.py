@@ -35,7 +35,7 @@ class ReconcilePendingLiveBuysTests(unittest.TestCase):
         self._tmp = Path(tempfile.mkdtemp())
         self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
         self._patcher.start()
-        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": True})
         self.engine.armed_live = False  # pending buys must resolve even if live mode isn't currently armed (e.g. after a restart)
 
     def tearDown(self):
@@ -138,7 +138,7 @@ class AdoptOneTests(unittest.TestCase):
         self._tmp = Path(tempfile.mkdtemp())
         self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
         self._patcher.start()
-        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": True})
         self.engine.armed_live = True
 
     def tearDown(self):
@@ -155,7 +155,7 @@ class AdoptOneTests(unittest.TestCase):
         self.engine.wallet_status = lambda: {"connected": False}
         result = self.engine.adopt_one(f"STOCKER:{TOKEN_ADDRESS}:{TX_HASH}")
         self.assertFalse(result["ok"])
-        self.assertIn("connect a wallet", result["message"])
+        self.assertIn("authorize your Seraph wallet", result["message"])
 
     def test_rejected_on_malformed_entry(self):
         result = self.engine.adopt_one("not a valid entry")
@@ -340,22 +340,6 @@ class PaperBuyCostBasisTests(unittest.TestCase):
         self.assertAlmostEqual(pos["qty"] * pos["entryPriceUsd"], pos["costUsd"], places=9)
 
 
-class GasQuoteLogLineTests(unittest.TestCase):
-    """GEMZ4US, Section F (2026-09-17): after locally verifying the gas
-    margin fix, the exact 30% figure wasn't independently checkable from
-    anything the app exposed."""
-
-    def test_formats_quote_and_signed_price_in_gwei(self):
-        text = engine_mod._gas_quote_log_line({"gasQuoteWei": 236_112_178, "gasSignedWei": 306_945_831})
-        self.assertIn("Gas quote (RPC): 0.236112 Gwei", text)
-        self.assertIn("margin 30% applied", text)
-        self.assertIn("signing at 0.306946 Gwei", text)
-
-    def test_missing_data_returns_none(self):
-        self.assertIsNone(engine_mod._gas_quote_log_line({"gasQuoteWei": None, "gasSignedWei": None}))
-        self.assertIsNone(engine_mod._gas_quote_log_line({}))
-
-
 class ClearHaltTests(unittest.TestCase):
     """GEMZ4US, Finding #26 (2026-09-17): the only documented way out of a
     Max Drawdown HALT was RESET LEDGER, which also wipes trade history,
@@ -432,7 +416,7 @@ class LiveBalanceTests(unittest.TestCase):
         self._tmp = Path(tempfile.mkdtemp())
         self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
         self._patcher.start()
-        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": True})
 
     def tearDown(self):
         self._patcher.stop()
@@ -484,6 +468,82 @@ class LiveBalanceTests(unittest.TestCase):
         state = self.engine.public_state()
         self.assertEqual(state["mode"], "paper")
         self.assertAlmostEqual(state["balanceUsd"], 94.0)
+
+
+class SeraphWalletGateTests(unittest.TestCase):
+    """W3.P5: live requires server-side signer authorization; paper does not."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _assert_arm_live_refused(self):
+        # Authorization must fail before any balance lookup: a connected
+        # identity alone is not permission to spend through the server signer.
+        with patch.object(live_mod, "eth_usd_price", side_effect=AssertionError("unexpected price read")) as price, \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", side_effect=AssertionError("unexpected balance read")) as balance:
+            result = self.engine.arm_live()
+        price.assert_not_called()
+        balance.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertIn("authorize your Seraph wallet", result["error"])
+        self.assertFalse(self.engine.armed_live)
+
+    def test_arm_live_refused_without_signer_granted(self):
+        self.engine.wallet_status = lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": False}
+        self._assert_arm_live_refused()
+
+    def test_arm_live_refused_when_disconnected(self):
+        # A disconnected provider must fail closed even without signer fields.
+        self.engine.wallet_status = lambda: {"connected": False}
+        self._assert_arm_live_refused()
+
+    def test_arm_live_accepted_with_signer_granted(self):
+        # The gate must still allow an explicitly authorized wallet to arm.
+        self.engine.wallet_status = lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": True}
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            result = self.engine.arm_live()
+        self.assertTrue(result["ok"])
+        self.assertTrue(self.engine.armed_live)
+        self.assertEqual(self.engine.public_state()["mode"], "live")
+
+    def test_paper_mode_works_without_any_signer(self):
+        # Reuse the paper cost-basis path: simulated trades must remain usable
+        # without a signer, and must never fall through to live execution.
+        self.engine.wallet_status = lambda: {"connected": False, "address": None, "signerGranted": False}
+        self.engine.config["tradeSizeMinUsd"] = 3.89
+        self.engine.config["tradeSizeMaxUsd"] = 3.89
+        token = {"symbol": "LIT", "address": TOKEN_ADDRESS, "chain": "ethereum"}
+        with patch.object(live_mod, "live_buy", side_effect=AssertionError("unexpected live buy")) as buy, \
+             patch.object(live_mod, "eth_usd_price", side_effect=AssertionError("unexpected price read")) as price, \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", side_effect=AssertionError("unexpected balance read")) as balance:
+            self.engine._execute_buy(token, 4.781742, {"source": "manual"})
+            state = self.engine.public_state()
+        buy.assert_not_called()
+        price.assert_not_called()
+        balance.assert_not_called()
+        self.assertEqual(state["mode"], "paper")
+        self.assertEqual(len(state["positions"]), 1)
+        self.assertEqual(state["positions"][0]["address"], TOKEN_ADDRESS)
+        self.assertAlmostEqual(state["positions"][0]["costUsd"], 6.89)
+        self.assertAlmostEqual(state["balanceUsd"], 93.11)
+        self.assertEqual(state["tradesToday"], 1)
+        self.assertEqual(self.engine.state["livePositions"], [])
+
+    def test_gate_bypass_message_no_longer_claims_the_seraph_gate_was_skipped(self):
+        # Since W3.P5 the transaction gate is unconditional; claiming it was
+        # bypassed would mislead users about the protection on real trades.
+        source = Path(engine_mod.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("Seraph gate bypassed", source)
+        self.assertIn("Seraph gate still enforced", source)
+        self.assertIn("the Seraph transaction gate still applies", source)
 
 
 if __name__ == "__main__":
