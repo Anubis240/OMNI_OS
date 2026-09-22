@@ -303,6 +303,19 @@ class TraderPanel(QWidget):
         self._refresh_watchlist()
         self._load_config_into_ui()
 
+        # GEMZ4US, Item D (2026-09-21): BALANCE only ever updated at ARM/
+        # sync/adopt/etc, or passively at the end of a scan cycle — a real
+        # on-chain deposit was invisible for 4.5+ minutes with the trader
+        # stopped, since nothing periodic ever re-reads it in that state.
+        # refresh_live_equity() is a no-op in PAPER mode and a single fast
+        # RPC call in LIVE (not the trending/price APIs' own rate-limited
+        # backoff), so a modest interval here is safe regardless of
+        # whether the trader is running — the phone dashboard already
+        # polls this same call every few seconds with no issue.
+        self._balance_refresh_tmr = QTimer(self)
+        self._balance_refresh_tmr.timeout.connect(self._periodic_balance_refresh)
+        self._balance_refresh_tmr.start(30_000)
+
         self._mcp_key_overlay: "McpKeySetupOverlay | None" = None
         if not mcp_client.get_default_client().api_key:
             self._show_mcp_key_setup()
@@ -404,6 +417,11 @@ class TraderPanel(QWidget):
             self._run_on_gui_sig.emit(lambda: then_fn(result))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _periodic_balance_refresh(self):
+        # See the QTimer set up in __init__ (Item D). Off the GUI thread
+        # like every other engine call that can touch the network.
+        self._background(self.engine.refresh_live_equity, lambda _result: self._refresh_stats())
 
     @staticmethod
     def _feed_timestamp() -> str:

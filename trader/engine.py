@@ -605,6 +605,7 @@ class TraderEngine:
         client (see the phone dashboard's get_trader_state)."""
         if not self.armed_live:
             return
+        old_balance = self.state.get("lastLiveBalanceUsd")
         try:
             # fetch_missing_prices deliberately left False (the default):
             # this is polled every few seconds by the phone dashboard, so a
@@ -614,7 +615,17 @@ class TraderEngine:
             # sync recomputes it with fetch_missing_prices=True instead.
             self.state["lastLiveEquityUsd"] = self._equity([])
         except Exception:
-            pass
+            return
+        # GEMZ4US, Item D (2026-09-21): BALANCE changes made outside any
+        # of the app's own actions (a deposit, an external transfer) were
+        # picked up here already, but silently — no sign anything had
+        # happened. Only log when it actually moved: this runs every few
+        # seconds from the phone dashboard poll, and every 30s from the
+        # desktop panel's own timer, so a "nothing changed" line every
+        # tick would drown the feed.
+        new_balance = self.state.get("lastLiveBalanceUsd")
+        if old_balance is not None and new_balance is not None and abs(new_balance - old_balance) >= 0.01:
+            self._emit({"type": "log", "text": f"BALANCE updated to ${new_balance:.2f} (was ${old_balance:.2f})"})
 
     def trending_suggestions(self, limit: int = 10, max_age_s: float = 60) -> list[dict]:
         """Top-movers across enabled chains, already excluding tokens

@@ -486,6 +486,73 @@ class LiveBalanceTests(unittest.TestCase):
         self.assertAlmostEqual(state["balanceUsd"], 94.0)
 
 
+class RefreshLiveEquityBalanceChangeLogTests(unittest.TestCase):
+    """GEMZ4US, Item D (2026-09-21): BALANCE changes made outside the
+    app's own actions (a deposit, an external transfer) were picked up
+    by refresh_live_equity() already, but silently -- no sign anything
+    had happened. Also verifies the new periodic desktop-panel timer's
+    target (refresh_live_equity itself is called every few seconds by
+    the phone dashboard already, and now every 30s by the desktop panel
+    regardless of running state -- see trader_panel.py)."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.events = []
+        self.engine = engine_mod.TraderEngine(
+            emit=self.events.append,
+            wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS},
+        )
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_logs_when_balance_actually_changes(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+        self.events.clear()
+
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=47.5):
+            self.engine.refresh_live_equity()
+
+        balance_logs = [e for e in self.events if e.get("type") == "log" and "BALANCE updated" in e.get("text", "")]
+        self.assertEqual(len(balance_logs), 1)
+        self.assertIn("$47.50", balance_logs[0]["text"])
+        self.assertIn("$42.50", balance_logs[0]["text"])
+
+    def test_does_not_log_when_balance_is_unchanged(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+        self.events.clear()
+
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.refresh_live_equity()
+
+        balance_logs = [e for e in self.events if e.get("type") == "log" and "BALANCE updated" in e.get("text", "")]
+        self.assertEqual(balance_logs, [])
+
+    def test_does_not_log_on_the_very_first_call(self):
+        # No previous balance cached yet -- nothing to compare against.
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.armed_live = True
+            self.engine.refresh_live_equity()
+
+        balance_logs = [e for e in self.events if e.get("type") == "log" and "BALANCE updated" in e.get("text", "")]
+        self.assertEqual(balance_logs, [])
+
+    def test_is_a_no_op_in_paper_mode(self):
+        self.engine.armed_live = False
+        self.engine.refresh_live_equity()
+        self.assertEqual(self.events, [])
+
+
 class PositionMarkPriceTests(unittest.TestCase):
     """Item J (GEMZ4US, 2026-09-20): EQUITY valued every adopted position
     at cost, never market, because _equity()'s per-position fallback
