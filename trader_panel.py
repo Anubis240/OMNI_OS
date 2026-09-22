@@ -1509,11 +1509,22 @@ class TraderPanel(QWidget):
         # previous value, with nothing in the Event Feed to say so — asked
         # directly whether a rejection notice was wanted; answer was yes.
         for key, raw in rejected:
+            # GEMZ4US, Item O (2026-09-21): asked for a hint of the expected
+            # format, since "1K" and "50,000" are both rejected outright
+            # (no K-suffix or thousands-separator parsing).
             self._append_feed_text(
-                f'SYS: {field_labels.get(key, key)} — could not read "{raw}", kept previous value {self.engine.config.get(key)}'
+                f'SYS: {field_labels.get(key, key)} — could not read "{raw}" (digits only, e.g. 50000), '
+                f'kept previous value {self.engine.config.get(key)}'
             )
         self._load_config_into_ui()
-        self._append_feed_text("SYS: config saved")
+        # GEMZ4US, Item O (2026-09-21): "config saved" logged unconditionally
+        # right after a rejection notice, reading as though every field
+        # (including the rejected one) had just been saved — it hadn't;
+        # only the rest of the config was.
+        if rejected:
+            self._append_feed_text(f"SYS: config saved (except the {len(rejected)} rejected field(s) above)")
+        else:
+            self._append_feed_text("SYS: config saved")
 
     def _on_reset(self):
         # Flagged 2026-09-07: this button sits directly next to SAVE CONFIG
