@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import re
 import threading
+import time
 import json
 import sys
 import traceback
@@ -215,7 +216,7 @@ async def _connect_with_timeout(connect_cm, timeout: float):
         await connect_cm.__aexit__(None, None, None)
 
 
-async def _iter_with_idle_timeout(aiter, timeout: float):
+async def _iter_with_idle_timeout(aiter, timeout):
     """Wraps an async iterable so each individual item wait is bounded by
     `timeout` — see RECEIVE_IDLE_TIMEOUT. `async for` has no per-iteration
     timeout hook of its own, and the underlying source here (the Gemini
@@ -223,11 +224,22 @@ async def _iter_with_idle_timeout(aiter, timeout: float):
     none either: if the server stops producing messages without actually
     closing the socket, iterating it blocks forever. Raises
     asyncio.TimeoutError if `timeout` elapses between items; ends normally
-    (StopAsyncIteration) exactly when the wrapped iterator does."""
+    (StopAsyncIteration) exactly when the wrapped iterator does.
+
+    `timeout` may be a plain float, or a zero-arg callable returning a
+    float or None, evaluated fresh before each individual wait. GEMZ4US,
+    2026-09-21: a flat timeout fired even during a normal ~15-minute gap
+    with nothing outstanding — "always listening" mode streams mic audio
+    continuously regardless of whether anyone is actually speaking, so
+    Gemini can go quiet at the message level during genuine silence with
+    nothing broken at all. A callable lets the caller gate the bound on
+    whether a reply is actually pending (None = wait indefinitely, no
+    false-positive reconnect during real idle time)."""
     it = aiter.__aiter__()
+    get_timeout = timeout if callable(timeout) else (lambda: timeout)
     while True:
         try:
-            yield await asyncio.wait_for(it.__anext__(), timeout=timeout)
+            yield await asyncio.wait_for(it.__anext__(), timeout=get_timeout())
         except StopAsyncIteration:
             return
 
@@ -897,6 +909,15 @@ class JarvisLive:
         self.ui.on_always_listening_toggled = self._on_always_listening_toggled
         self._reconnect_event = asyncio.Event()
         self._turn_done_event: asyncio.Event | None = None
+        # GEMZ4US, 2026-09-21: gates RECEIVE_IDLE_TIMEOUT so it only ever
+        # applies while an actual reply is outstanding — see
+        # _send_text_safe (sets it) and _receive_audio's turn_complete
+        # handling (clears it). Deliberately not armed by raw mic frames:
+        # "always listening" streams audio continuously regardless of
+        # whether anyone is actually speaking, so treating outbound audio
+        # as "awaiting a reply" would just reintroduce the same false-
+        # positive-during-genuine-silence bug this exists to fix.
+        self._pending_since: float | None = None
         self._session_log: list[str] = []  # "You: ..." / "Seraph: ..." lines for this connection,
                                             # summarized and saved to memory on disconnect/shutdown
         self._dashboard = None      # DashboardServer | None — remote/phone control, started once in run()
@@ -1066,6 +1087,11 @@ class JarvisLive:
         permanent."""
         if not self.session:
             return False
+        # GEMZ4US, 2026-09-21: marks a reply as outstanding so
+        # RECEIVE_IDLE_TIMEOUT (see _iter_with_idle_timeout) only ever
+        # fires while something is actually pending — cleared in
+        # _receive_audio when turn_complete comes back.
+        self._pending_since = time.monotonic()
         try:
             await asyncio.wait_for(
                 self.session.send_client_content(turns={"parts": [{"text": text}]}, turn_complete=True),
@@ -1636,9 +1662,15 @@ class JarvisLive:
                 # one each turn. Wrapped in _iter_with_idle_timeout so each
                 # individual message wait is bounded by RECEIVE_IDLE_TIMEOUT
                 # instead of the bare `async for` below, which has no
-                # per-iteration timeout hook of its own.
+                # per-iteration timeout hook of its own. A callable, not a
+                # flat value: only bounded while self._pending_since says a
+                # reply is actually outstanding (see its own comment) — a
+                # normal idle gap with nothing pending waits indefinitely.
                 try:
-                    async for response in _iter_with_idle_timeout(self.session.receive(), RECEIVE_IDLE_TIMEOUT):
+                    async for response in _iter_with_idle_timeout(
+                        self.session.receive(),
+                        lambda: RECEIVE_IDLE_TIMEOUT if self._pending_since is not None else None,
+                    ):
 
                         if response.data:
                             if self._turn_done_event and self._turn_done_event.is_set():
@@ -1676,6 +1708,9 @@ class JarvisLive:
                             if sc.turn_complete:
                                 if self._turn_done_event:
                                     self._turn_done_event.set()
+                                # A reply came back — nothing outstanding
+                                # for RECEIVE_IDLE_TIMEOUT to guard anymore.
+                                self._pending_since = None
 
                                 full_in = " ".join(in_buf).strip()
                                 if full_in:

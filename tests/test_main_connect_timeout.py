@@ -120,6 +120,40 @@ class IterWithIdleTimeoutTests(unittest.IsolatedAsyncioTestCase):
         out = [x async for x in main._iter_with_idle_timeout(source, timeout=5)]
         self.assertEqual(out, [1, 2])
 
+    async def test_callable_timeout_is_evaluated_before_each_wait(self):
+        source = _fake_source([1, 2, 3], delay_before_index=1, delay=0.02)
+        calls = []
+
+        def get_timeout():
+            calls.append(len(calls))
+            return 5
+
+        out = [x async for x in main._iter_with_idle_timeout(source, get_timeout)]
+        self.assertEqual(out, [1, 2, 3])
+        self.assertEqual(len(calls), 4)  # once per __anext__() call, including the final one that finds StopAsyncIteration
+
+    async def test_callable_returning_none_waits_indefinitely(self):
+        # GEMZ4US, 2026-09-21: "always listening" streams mic audio
+        # continuously regardless of whether anyone is actually speaking,
+        # so a flat timeout fired even during a normal, healthy idle gap
+        # with nothing outstanding. None means "nothing pending right
+        # now" — must not time out no matter how long the gap is.
+        source = _fake_source([1, 2], delay_before_index=1, delay=0.1)
+        out = [x async for x in main._iter_with_idle_timeout(source, lambda: None)]
+        self.assertEqual(out, [1, 2])
+
+    async def test_callable_can_switch_from_none_to_a_real_timeout_mid_stream(self):
+        # Models the real usage: nothing pending while idle (None), then a
+        # reply becomes outstanding (a real number) once something is sent.
+        pending = [None]
+        source = _fake_source([1, 2], delay_before_index=1, delay=10)
+        collected = []
+        with self.assertRaises(asyncio.TimeoutError):
+            async for item in main._iter_with_idle_timeout(source, lambda: pending[0]):
+                collected.append(item)
+                pending[0] = 0.05  # a "reply" is now expected — arm the bound
+        self.assertEqual(collected, [1])
+
 
 if __name__ == "__main__":
     unittest.main()
