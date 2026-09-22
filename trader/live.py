@@ -584,8 +584,7 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
     qty = amount_out / (10 ** decimals)
     cost_usd = trade_size_usd + gas_usd
 
-    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd,
-            "gasQuoteWei": None, "gasSignedWei": None}
+    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd}
 
 
 def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None = None, cost_basis_usd: float | None = None, bypass_gate: bool = False) -> dict:
@@ -667,8 +666,7 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
         gas_usd = 0
 
     proceeds_usd = float(Web3.from_wei(amount_out, "ether")) * eth_price_usd - gas_usd
-    return {"txHash": tx_hash, "proceedsUsd": proceeds_usd, "ethPriceUsd": eth_price_usd,
-            "gasQuoteWei": None, "gasSignedWei": None}
+    return {"txHash": tx_hash, "proceedsUsd": proceeds_usd, "ethPriceUsd": eth_price_usd}
 
 
 # Conservative gas estimate for WETH9's withdraw() — a single storage

@@ -78,19 +78,6 @@ _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 
-def _gas_quote_log_line(result: dict) -> str | None:
-    """GEMZ4US, Section F (2026-09-17): after locally verifying the gas
-    margin fix, the exact 30% figure wasn't independently checkable from
-    anything the app exposed. Surfaces both the RPC's bare quote and the
-    buffered price actually signed at, in his suggested format."""
-    quote_wei, signed_wei = result.get("gasQuoteWei"), result.get("gasSignedWei")
-    if quote_wei is None or signed_wei is None:
-        return None
-    quote_gwei, signed_gwei = quote_wei / 1e9, signed_wei / 1e9
-    pct = live_mod.wallet.GAS_PRICE_BUFFER_PCT
-    return f"Gas quote (RPC): {quote_gwei:.6f} Gwei → margin {pct}% applied → signing at {signed_gwei:.6f} Gwei"
-
-
 def _base_dir() -> Path:
     return get_data_dir()
 
@@ -490,9 +477,6 @@ class TraderEngine:
                     f"buy {token['symbol']} submitted but not yet confirmed (tx {err.tx_hash}) — "
                     f"tracking as pending, will finish automatically once it confirms or reverts"
                 ) from err
-            gas_quote_text = _gas_quote_log_line(result)
-            if gas_quote_text:
-                self._emit({"type": "log", "text": gas_quote_text})
             self._merge_position(self.state["livePositions"], {
                 "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
                 "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "costUsd": result["costUsd"],
@@ -542,9 +526,6 @@ class TraderEngine:
             # fresh inside _execute_via_guardian regardless.
             result = live_mod.live_sell(position=position, min_net_profit_usd=self.config["minNetProfitUsd"],
                                          qty=sell_qty, cost_basis_usd=cost_basis_usd, bypass_gate=bypass_gate)
-            gas_quote_text = _gas_quote_log_line(result)
-            if gas_quote_text:
-                self._emit({"type": "log", "text": gas_quote_text})
             pnl = result["proceedsUsd"] - cost_basis_usd
             self.state["liveRealizedPnlUsd"] += pnl
             if fraction >= 1:
