@@ -402,7 +402,6 @@ class FakeSeraph:
 
         @self.app.post("/api/desktop/api-keys")
         async def mint(request: Request):
-            self._stats["mints"] += 1
             payload = self._require_oauth(request, "api-keys:write")
             if self._mint_failure is not None:
                 status, self._mint_failure = self._mint_failure, None
@@ -415,6 +414,11 @@ class FakeSeraph:
             for record in self._api_keys.values():
                 if not record["revoked"] and record["org_id"] == payload["orgId"] and record["name"] == name:
                     record["revoked"] = True
+            # Counted here, not at the top of the handler: "mints" must mean
+            # "keys actually issued". A request rejected for an expired token or
+            # a missing scope is a refusal, not a mint, and counting it would
+            # make every test that asserts a mint count read the wrong number.
+            self._stats["mints"] += 1
             key = "mcfw_" + secrets.token_hex(32)
             scopes = ["mcp"]
             if "wallet:execute" in payload["scope"].split():
