@@ -927,7 +927,13 @@ class FakeSeraph:
                         "value": value, "from": args.get("from", self._signer["address"])}})
         if response.status_code != 204:
             raise ValueError("invalid gate")
-        result = {"decision": decision, "requestId": rid, "reasons": [], "gateRecorded": True}
         if decision == "pending":
-            result.update(status="pending", retryAfterMs=50)
-        return result
+            # The real wallet-fw-api pending envelope carries NO top-level "decision":
+            # it is {status, requestId, partial:{verdict,reasons}, retryAfterMs, instruction}.
+            # trader/live.py:303 only recognises a pending verdict when "decision" is
+            # absent, so emitting both fields here would make the fake accept a shape the
+            # production client rightly refuses — the fake must never be the lenient one.
+            return {"status": "pending", "requestId": rid, "retryAfterMs": 50,
+                    "partial": {"verdict": "unknown", "reasons": ["simulation_in_progress"]},
+                    "gateRecorded": True}
+        return {"decision": decision, "requestId": rid, "reasons": [], "gateRecorded": True}
