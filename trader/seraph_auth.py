@@ -189,6 +189,7 @@ class SeraphAuth:
         # Separate flow locks serialize operations without blocking status/UI waits.
         self._login_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
+        self._registration_lock = threading.RLock()
         self._remint_lock = threading.Lock()
         self._active_listener = None
         self._last_forced_refresh = None
@@ -555,10 +556,11 @@ class SeraphAuth:
             return True
 
     def _register_client(self, redirect_uri) -> str | None:
-        with self._lock:
-            if self._registrations_this_login >= MAX_REGISTRATIONS_PER_LOGIN:
-                return None
-            self._registrations_this_login += 1
+        with self._registration_lock:
+            with self._lock:
+                if self._registrations_this_login >= MAX_REGISTRATIONS_PER_LOGIN:
+                    return None
+                self._registrations_this_login += 1
             try:
                 endpoint = self._discover_metadata().get("registration_endpoint")
                 response = (self.session or requests).post(endpoint, json={
@@ -582,15 +584,17 @@ class SeraphAuth:
             return client_id
 
     def _ensure_client(self, redirect_uri) -> str | None:
-        with self._lock:
-            block = self._load()
+        # Serialize registration, but release the auth lock during network I/O.
+        with self._registration_lock:
+            with self._lock:
+                block = self._load()
+                client_id = block.get("client_id")
             current = urlsplit(redirect_uri)
             registered = urlsplit(block.get("registered_redirect_uri") or "")
             # RFC 8252 loopback redirects ignore the ephemeral port. Register the
             # portless URI; compare scheme, hostname and path, never the port.
             compatible = ((current.scheme, current.hostname, current.path)
                           == (registered.scheme, registered.hostname, registered.path))
-            client_id = block.get("client_id")
             if client_id and self._probe_client() and compatible:
                 return client_id
             return self._register_client(f"{current.scheme}://{current.hostname}{current.path}")
