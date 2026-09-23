@@ -517,6 +517,7 @@ _APP_HTML = """<!DOCTYPE html>
   // phone. Buffering here (bounded, and only while actively recording —
   // stopMic() clears it) instead of dropping preserves exactly that window.
   var pendingMicFrames = [];
+  var micDropReported = false;
   // GEMZ4US, Finding #45 (2026-09-16): fixed — this cap's own comment always
   // intended "~1-3s of audio... generous headroom over a real WSS handshake,
   // not 'buffer forever'", but 150 frames at 2048 samples/16kHz is
@@ -640,10 +641,26 @@ _APP_HTML = """<!DOCTYPE html>
       }
       if (audioWs && audioWs.readyState === WebSocket.OPEN) {
         audioWs.send(int16.buffer);
+        micDropReported = false;
       } else if (pendingMicFrames.length < MAX_PENDING_MIC_FRAMES) {
         // Socket still (re)connecting — hold the frame instead of dropping
         // it; onopen above flushes this in order the moment it's ready.
         pendingMicFrames.push(int16.buffer);
+      } else if (!micDropReported) {
+        // N30 (2026-09-23): frames past the buffer cap above were being
+        // dropped completely silently — no client-side error, and nothing
+        // for the server-side drop-reason logging (main.py's
+        // _relay_phone_audio, added 2026-09-21) to see either, since these
+        // frames never reach the server at all. That's the likely
+        // explanation for GEMZ4US's 3/3 repro showing "zero trace of the
+        // logging I added last time" — the loss was happening upstream of
+        // everything that logging could see. Reported once per drop
+        // episode (not per frame) over the main /ws, same as the
+        // server-side pattern, and cleared as soon as a frame gets through.
+        micDropReported = true;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({type: 'mic_dropped'})); } catch (_) {}
+        }
       }
     };
     // Route through a silent gain node rather than straight to destination —
@@ -663,6 +680,7 @@ _APP_HTML = """<!DOCTYPE html>
   function stopMic() {
     recording = false;
     pendingMicFrames = [];  // don't ship stale audio on some later, unrelated reconnect
+    micDropReported = false;
     if (micNode) { try { micNode.disconnect(); } catch (_) {} micNode = null; }
     if (micGain) { try { micGain.disconnect(); } catch (_) {} micGain = null; }
     if (micCtx)  { try { micCtx.close(); } catch (_) {} micCtx = null; }
@@ -1335,6 +1353,15 @@ class DashboardServer:
                         t = (data.get("text") or "").strip()
                         if t:
                             await self._command_queue.put(t)
+                    if data.get("type") == "mic_dropped" and self._warning_callback:
+                        # N30 — see the client JS's own micDropReported
+                        # comment: this is the client-side half of a
+                        # previously fully-silent frame-loss path, relayed
+                        # here since the phone has no visible SYS log of
+                        # its own to write to.
+                        self._warning_callback(
+                            "Phone mic buffer overflowed while reconnecting — some audio was dropped."
+                        )
             except WebSocketDisconnect:
                 pass
             except Exception:
@@ -1358,13 +1385,27 @@ class DashboardServer:
             await websocket.accept()
             self._audio_clients.add(websocket)
             await self.broadcast({"type": "sys", "text": "Phone audio connected."})
+            queue_full_reported = False
             try:
                 while True:
                     data = await websocket.receive_bytes()
                     try:
                         self._phone_audio_in_queue.put_nowait(data)
+                        queue_full_reported = False
                     except asyncio.QueueFull:
-                        pass  # drop frame rather than let a stall build unbounded latency
+                        # N30 — a second, server-side silent-drop path
+                        # alongside the client-side buffer-overflow one
+                        # (see the client JS's micDropReported): a frame
+                        # that DID leave the phone but arrived while
+                        # _relay_phone_audio's own consumer loop (main.py)
+                        # was behind was dropped here with no trace at
+                        # all. Once-per-episode, mirroring that function's
+                        # own logging style.
+                        if not queue_full_reported and self._warning_callback:
+                            self._warning_callback(
+                                "Phone audio queue full — dropping frames."
+                            )
+                        queue_full_reported = True
             except WebSocketDisconnect:
                 pass
             finally:
