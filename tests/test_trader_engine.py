@@ -573,6 +573,28 @@ class RefreshLiveEquityBalanceChangeLogTests(unittest.TestCase):
         self.engine.refresh_live_equity()
         self.assertEqual(self.events, [])
 
+    def test_sync_attributes_its_own_balance_change_immediately(self):
+        # GEMZ4US, 2026-09-22 (Part 5): the log used to live only in
+        # refresh_live_equity() -- a balance change made by sync_positions
+        # (which recomputes equity directly, via _equity()) only got logged
+        # whenever some LATER, unrelated refresh_live_equity() tick next
+        # happened to notice, reported as the log lagging the visible
+        # change by up to a minute. It's now logged inside _equity() itself,
+        # so sync's own change is attributed the instant it happens.
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+        self.events.clear()
+
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=50.0):
+            self.engine.sync_positions()
+
+        balance_logs = [e for e in self.events if e.get("type") == "log" and "BALANCE updated" in e.get("text", "")]
+        self.assertEqual(len(balance_logs), 1)
+        self.assertIn("$50.00", balance_logs[0]["text"])
+        self.assertIn("$42.50", balance_logs[0]["text"])
+
 
 class PositionMarkPriceTests(unittest.TestCase):
     """Item J (GEMZ4US, 2026-09-20): EQUITY valued every adopted position
@@ -619,6 +641,40 @@ class PositionMarkPriceTests(unittest.TestCase):
         with patch.object(engine_mod.market, "current_price", side_effect=RuntimeError("boom")):
             price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
         self.assertAlmostEqual(price, 10.0)
+
+    def test_repeat_calls_within_ttl_reuse_the_cached_price(self):
+        # GEMZ4US, 2026-09-22 (Part 4): passive EQUITY refresh is polled
+        # every few seconds by the phone dashboard -- an uncached live
+        # fetch per position on every single poll would hammer the price
+        # API. MARK_PRICE_CACHE_TTL_S absorbs repeat polls within its
+        # window down to one real network call.
+        with patch.object(engine_mod.market, "current_price", return_value=8.5) as mock_price:
+            first = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+            second = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        self.assertAlmostEqual(first, 8.5)
+        self.assertAlmostEqual(second, 8.5)
+        mock_price.assert_called_once_with(TOKEN_ADDRESS, "ethereum")
+
+    def test_cache_expires_after_the_ttl(self):
+        with patch.object(engine_mod.market, "current_price", return_value=8.5), \
+             patch.object(engine_mod.time, "monotonic", return_value=1000.0):
+            self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        with patch.object(engine_mod.market, "current_price", return_value=9.0) as mock_price, \
+             patch.object(engine_mod.time, "monotonic", return_value=1000.0 + engine_mod.MARK_PRICE_CACHE_TTL_S + 1):
+            price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        self.assertAlmostEqual(price, 9.0)
+        mock_price.assert_called_once_with(TOKEN_ADDRESS, "ethereum")
+
+    def test_execution_price_lookups_bypass_the_cache(self):
+        # market.current_price() is called directly by buy_one/sell_one/etc
+        # -- never through _position_mark_price -- so a real trade always
+        # gets a genuinely fresh quote regardless of this cache.
+        with patch.object(engine_mod.market, "current_price", return_value=8.5):
+            self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        with patch.object(engine_mod.market, "current_price", return_value=11.0) as mock_price:
+            fresh = engine_mod.market.current_price(self.pos["address"], self.pos["chain"])
+        self.assertAlmostEqual(fresh, 11.0)
+        mock_price.assert_called_once()
 
     def test_adopt_one_equity_reflects_market_not_cost(self):
         # Same scenario GEMZ4US reported: LINK adopted at market ($12.55),

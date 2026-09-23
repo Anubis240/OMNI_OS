@@ -1051,11 +1051,15 @@ class JarvisLive:
                     await self._send_text_safe(text)
                     self.ui.write_log(f"[Phone]: {text}")
                 else:
-                    print(f"[Dashboard] Dropped command (no session): {text}")
+                    # GEMZ4US, 2026-09-22: this printed to the console only —
+                    # a phone message sent with no session yet (or one that
+                    # never came back within the 8s wait above) vanished
+                    # with zero trace in the Event Feed or on the phone.
+                    self.ui.write_log(f"SYS: Phone message dropped (no active session): {text}")
             except asyncio.TimeoutError:
                 pass
             except Exception as e:
-                print(f"[Dashboard] Command error: {e}")
+                self.ui.write_log(f"SYS: Phone command failed ({e}).")
                 await asyncio.sleep(0.5)
 
     async def _relay_phone_audio(self) -> None:
@@ -1161,6 +1165,20 @@ class JarvisLive:
             return True
         except asyncio.TimeoutError:
             self.ui.write_log("SYS: Lost the connection sending a message — reconnecting.")
+            if self._loop:
+                self._loop.call_soon_threadsafe(self._reconnect_event.set)
+            return False
+        except Exception as e:
+            # GEMZ4US, 2026-09-22: this only caught TimeoutError — a
+            # connection that's already closed (rather than merely stalled)
+            # raises immediately instead of hanging, which fell straight
+            # through uncaught. Every caller here (_on_text_command,
+            # speak()) fires this via run_coroutine_threadsafe without ever
+            # checking the returned Future, so an uncaught exception was
+            # silently dropped — no log, no reconnect — leaving text input
+            # dead until the unrelated 900s idle-timeout eventually noticed
+            # (explaining the wide, inconsistent recovery times reported).
+            self.ui.write_log(f"SYS: Failed to send ({e}) — reconnecting.")
             if self._loop:
                 self._loop.call_soon_threadsafe(self._reconnect_event.set)
             return False
@@ -2012,6 +2030,17 @@ class JarvisLive:
                 else:
                     print(f"[JARVIS] ⚠️ {e}")
                     traceback.print_exc()
+                    # GEMZ4US, 2026-09-22: several stuck-session recoveries
+                    # showed "Reconnected" with no preceding diagnostic line
+                    # at all — every OTHER known reconnect trigger
+                    # (RECEIVE_IDLE_TIMEOUT, a stuck send/tool-response) logs
+                    # its own reason via self.ui.write_log before raising,
+                    # but a raw, unanticipated exception (e.g. the
+                    # websocket itself closing) fell through to here, which
+                    # only ever printed to the console — invisible in the
+                    # Event Feed the tester actually watches. This is the
+                    # catch-all net: whatever the cause, it's now visible.
+                    self.ui.write_log(f"SYS: Connection lost ({e}) — reconnecting.")
             self.session = None
             if len(self._session_log) >= 3:  # only worth summarizing if there was a real exchange
                 await self._save_session_summary()

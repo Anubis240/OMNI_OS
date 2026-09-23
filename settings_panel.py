@@ -15,6 +15,7 @@ module-load time since ui.py only imports this lazily, on first click.
 
 from __future__ import annotations
 
+import ipaddress
 import subprocess
 from urllib.parse import urlparse
 
@@ -26,6 +27,23 @@ from PyQt6.QtWidgets import (
 )
 
 from core import settings_store
+
+
+def _looks_like_valid_mcp_host(host: str) -> bool:
+    """GEMZ4US, 2026-09-22 (Part 6): "http://not-a-valid-url" passed the
+    schema-only check in _on_add_mcp_server despite having no dot/TLD and
+    no way to ever resolve. Allow localhost and raw IPs (legitimate for a
+    local dev MCP server) but otherwise require at least a dot, so an
+    obviously-unresolvable hostname is caught here instead of only failing
+    later, silently, at request time. A standalone function so it's
+    testable without constructing the QWidget it's used from."""
+    if host == "localhost" or "." in host:
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
 
 
 class SettingsPanel(QWidget):
@@ -1025,6 +1043,12 @@ class SettingsPanel(QWidget):
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             self._status_sig.emit(f'"{url}" doesn\'t look like a URL — it needs http:// or https:// and a host.', True)
+            return
+        # GEMZ4US, 2026-09-22 (Part 6): the check above only looked for a
+        # schema prefix — "http://not-a-valid-url" passed it despite having
+        # no dot/TLD and no way to ever resolve.
+        if not _looks_like_valid_mcp_host(parsed.hostname or ""):
+            self._status_sig.emit(f'"{parsed.hostname}" doesn\'t look like a real hostname — check for typos.', True)
             return
         self.settings["mcp_servers"].append({
             "id": settings_store.new_id(), "name": name, "url": url,

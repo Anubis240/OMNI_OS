@@ -38,6 +38,18 @@ from .analysis import analyze
 
 MIN_LIQUIDITY_FLOOR_USD = 100000
 
+# GEMZ4US, 2026-09-22 (Part 4): passive EQUITY refresh (phone dashboard
+# polling every few seconds, desktop panel every 30s) deliberately never
+# fetched a live price for off-watchlist positions — a real per-poll
+# network call would hammer the price API. That left EQUITY stuck at cost
+# between scans/adopts/syncs, silently missing real market moves. A short
+# cache lets the frequent poll get an occasionally-fresh price without
+# hammering anything: see _position_mark_price. Execution paths
+# (buy_one/sell_one/etc.) call marketdata.current_price() directly and
+# never touch this cache, so a real trade always uses a genuinely fresh
+# quote.
+MARK_PRICE_CACHE_TTL_S = 20.0
+
 DEFAULT_CONFIG = {
     "mode": "paper",
     "strategy": "swing",
@@ -181,6 +193,9 @@ class TraderEngine:
         # every phone-dashboard poll (see trending_suggestions()).
         self._suggestions_cache: dict = {"at": 0.0, "items": []}
         self._suggestions_refresh_lock = threading.Lock()
+
+        # Not persisted — see MARK_PRICE_CACHE_TTL_S and _position_mark_price.
+        self._mark_price_cache: dict[tuple, tuple[float, float]] = {}
 
         live_mod.init(mcp_call=mcp_call, server_id="seraph-kondux")
 
@@ -627,27 +642,19 @@ class TraderEngine:
         client (see the phone dashboard's get_trader_state)."""
         if not self.armed_live:
             return
-        old_balance = self.state.get("lastLiveBalanceUsd")
         try:
-            # fetch_missing_prices deliberately left False (the default):
-            # this is polled every few seconds by the phone dashboard, so a
-            # live per-position price fetch here would hammer the price API
-            # on every poll. An off-watchlist position's contribution to
-            # this figure stays at cost until the next scan cycle/adopt/
-            # sync recomputes it with fetch_missing_prices=True instead.
-            self.state["lastLiveEquityUsd"] = self._equity([])
+            # GEMZ4US, 2026-09-22 (Part 4): now safe to pass
+            # fetch_missing_prices=True even on this frequent polling path
+            # — _position_mark_price's own MARK_PRICE_CACHE_TTL_S cache
+            # absorbs the repeat polls, so this no longer hammers the price
+            # API the way an uncached live fetch here would have. The
+            # "BALANCE updated" log (Item D) now lives inside _equity()
+            # itself — see its own comment — since that's the one place
+            # lastLiveBalanceUsd actually changes, no matter which caller
+            # triggered the recompute.
+            self.state["lastLiveEquityUsd"] = self._equity([], fetch_missing_prices=True)
         except Exception:
             return
-        # GEMZ4US, Item D (2026-09-21): BALANCE changes made outside any
-        # of the app's own actions (a deposit, an external transfer) were
-        # picked up here already, but silently — no sign anything had
-        # happened. Only log when it actually moved: this runs every few
-        # seconds from the phone dashboard poll, and every 30s from the
-        # desktop panel's own timer, so a "nothing changed" line every
-        # tick would drown the feed.
-        new_balance = self.state.get("lastLiveBalanceUsd")
-        if old_balance is not None and new_balance is not None and abs(new_balance - old_balance) >= 0.01:
-            self._emit({"type": "log", "text": f"BALANCE updated to ${new_balance:.2f} (was ${old_balance:.2f})"})
 
     def trending_suggestions(self, limit: int = 10, max_age_s: float = 60) -> list[dict]:
         """Top-movers across enabled chains, already excluding tokens
@@ -722,8 +729,14 @@ class TraderEngine:
         if snap:
             return snap["priceUsd"]
         if fetch_missing_prices:
+            key = (pos["address"], pos.get("chain"))
+            cached = self._mark_price_cache.get(key)
+            if cached and time.monotonic() - cached[1] < MARK_PRICE_CACHE_TTL_S:
+                return cached[0]
             try:
-                return market.current_price(pos["address"], pos.get("chain"))
+                price = market.current_price(pos["address"], pos.get("chain"))
+                self._mark_price_cache[key] = (price, time.monotonic())
+                return price
             except Exception:
                 pass
         return pos["entryPriceUsd"]
@@ -745,7 +758,21 @@ class TraderEngine:
                 # (not looked up fresh in public_state(), which must stay
                 # network-call-free for UI polling) so it refreshes at the
                 # same cadence lastLiveEquityUsd already does.
+                # GEMZ4US, 2026-09-22 (Part 5): the "BALANCE updated" log
+                # used to live only in refresh_live_equity() — but every
+                # OTHER caller here (sync_positions, _cycle, the reconcile
+                # methods) also recomputes lastLiveBalanceUsd via this same
+                # method, so a change made by one of THOSE callers only got
+                # logged whenever some later, unrelated refresh_live_equity()
+                # tick next happened to notice — reported as the log lagging
+                # the visible change by up to a minute. Logging right here,
+                # the one place lastLiveBalanceUsd is actually recomputed,
+                # attributes the log to whichever action actually caused it,
+                # with no lag.
+                old_balance = self.state.get("lastLiveBalanceUsd")
                 self.state["lastLiveBalanceUsd"] = eth_bal_usd
+                if old_balance is not None and abs(eth_bal_usd - old_balance) >= 0.01:
+                    self._emit({"type": "log", "text": f"BALANCE updated to ${eth_bal_usd:.2f} (was ${old_balance:.2f})"})
                 open_usd = sum(
                     pos["qty"] * self._position_mark_price(pos, snaps, fetch_missing_prices)
                     for pos in self.state["livePositions"]
