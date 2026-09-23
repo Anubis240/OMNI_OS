@@ -900,28 +900,48 @@ class TraderPanel(QWidget):
 
         def then_fn(result):
             error = None if result.get("ok") else (result.get("error") or "unknown error")
-            # GEMZ4US, 2026-09-24: a genuine "not logged in" (or a rejected
-            # session) correctly renders the existing not-available copy —
-            # but any OTHER failure (e.g. the Seraph MCP endpoint itself
-            # erroring) used to fall into that exact same empty-payload
-            # path, telling an already-signed-in user to sign in again.
-            # Confirmed via a clean disconnect/re-auth cycle that this is
-            # what was actually happening under v1.12.1: the card never
-            # picked up real state because the underlying call was failing,
-            # not because the refresh wasn't firing (that part is fixed).
-            # Distinguish the two so the card is honest about which one it is.
-            if error and error not in ("seraph_login_required", "seraph_unauthorized"):
+            # GEMZ4US, 2026-09-24 (v1.12.2 retest): my first cut of this fix
+            # (still) suppressed "seraph_login_required"/"seraph_unauthorized"
+            # as an always-legitimate not-logged-in state — wrong. Both codes
+            # are also what _call_with_auth_retry returns after a genuine
+            # 401 from THIS call fails to recover (remint attempted, retried,
+            # still rejected) and it calls auth.invalidate_session() as a
+            # side effect — which can happen even moments after a real,
+            # confirmed sign-in, exactly what GEMZ4US's clean disconnect/
+            # re-auth cycles kept reproducing. Trusting the error string
+            # alone can't distinguish "never logged in" from "was logged in,
+            # this specific call got rejected and gave up" — but a fresh
+            # has_credentials() check can: if a secret still exists locally,
+            # this isn't the ordinary empty/not-connected state.
+            has_local_credential = mcp_client.has_credentials()
+            rejected_despite_credential = (
+                error in ("seraph_login_required", "seraph_unauthorized") and has_local_credential
+            )
+            if error and (error not in ("seraph_login_required", "seraph_unauthorized")
+                          or rejected_despite_credential):
                 self._wallet_cache = {}
                 self._wallet_cache_at = time.time()
+                if rejected_despite_credential:
+                    # The call itself was rejected as unauthorized and gave up
+                    # recovering (see the comment above) — this can invalidate
+                    # the local session as a side effect, so "sign in again"
+                    # is the actually-correct next step here, unlike the
+                    # generic network/backend-error case below.
+                    copy = (
+                        "Seraph rejected the wallet status check even though you have a device key "
+                        f"({error}) — your session may have just been invalidated. Try signing in again."
+                    )
+                else:
+                    copy = (
+                        f"Could not reach Seraph to check your wallet status ({error}). "
+                        "This is separate from being signed in — your sign-in may still be valid."
+                    )
                 self._wallet_embedded_lbl.setText(f"Seraph Wallet: could not check status — {error}")
                 self._wallet_signer_lbl.setText("Signer: unknown — status check failed")
                 self._wallet_signer_lbl.setStyleSheet(f"color: {self._C.TEXT_DIM}; background: transparent;")
                 self._wallet_external_lbl.setText("")
                 self._wallet_external_lbl.setVisible(False)
-                self._wallet_copy_lbl.setText(
-                    f"Could not reach Seraph to check your wallet status ({error}). "
-                    "This is separate from being signed in — your sign-in may still be valid."
-                )
+                self._wallet_copy_lbl.setText(copy)
                 if error != self._wallet_last_logged_error:
                     self._wallet_last_logged_error = error
                     self._append_feed_text(f"SYS: Seraph Wallet status check failed — {error}")
