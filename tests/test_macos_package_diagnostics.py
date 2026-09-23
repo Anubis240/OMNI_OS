@@ -34,6 +34,33 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
         self.commands = []
         self.workspace = None
 
+    @staticmethod
+    def own_thread_only(stack, module, name, replacement=None):
+        """Confine a patch on a shared stdlib module to the calling thread.
+
+        bundle.time/subprocess/shutil/tempfile are the process-wide modules, so
+        patch.object rebinds them for every live thread. unittest discover
+        imports every test module before running any test, and importing the
+        application starts ui._SysMetrics: a daemon that polls psutil and shells
+        out to nvidia-smi every 1.5 seconds. Without this guard that daemon
+        reaches these fixtures, recording its own calls into assertions that
+        compare exact command and event sequences, raising inside code that
+        swallows exceptions, spawning children whose working directory pins the
+        test temporary tree open on Windows, and busy-spinning once its sleep
+        becomes a no-op. Foreign threads therefore keep the real implementation.
+        """
+        owner = threading.get_ident()
+        original = getattr(module, name)
+        recorder = Mock(side_effect=replacement)
+
+        def dispatch(*args, **kwargs):
+            if threading.get_ident() != owner:
+                return original(*args, **kwargs)
+            return recorder(*args, **kwargs)
+
+        stack.enter_context(patch.object(module, name, dispatch))
+        return recorder
+
     @contextmanager
     def native_fixture(self, *, target="macos-arm64", failures=(), mutation=None,
                        malformed=False, cleanup_failure=False, detach_results=None):
@@ -127,20 +154,6 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
                 raise self.detach_error if stage.startswith("detach-") else self.native_error
             return subprocess.CompletedProcess(command, 0, stdout, "native stderr")
 
-        # patch.object(bundle.time, ...) rebinds the process-wide time module, so
-        # every live thread shares the mock. Importing the application starts a
-        # daemon metrics loop that sleeps forever, which would both record its
-        # own delays here and busy-spin once its sleep became a no-op. Record
-        # only this thread and let foreign threads keep sleeping for real.
-        owner = threading.get_ident()
-        real_sleep = bundle.time.sleep
-        recorder = Mock()
-
-        def scoped_sleep(seconds):
-            if threading.get_ident() != owner:
-                return real_sleep(seconds)
-            return recorder(seconds)
-
         def smoke(*args, **kwargs):
             self.events.append("smoke")
             self.assertIn(str(self.workspace / "readonly"), args[0][0])
@@ -155,13 +168,12 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
             stack.enter_context(patch.object(bundle.platform, "system", return_value="Darwin"))
             stack.enter_context(patch.object(bundle.platform, "machine",
                                 return_value="x86_64" if target == "macos-x64" else "arm64"))
-            stack.enter_context(patch.object(bundle.tempfile, "mkdtemp", side_effect=mkdtemp))
-            stack.enter_context(patch.object(bundle.shutil, "copytree", side_effect=copytree))
-            cleanup = stack.enter_context(patch.object(bundle.shutil, "rmtree", side_effect=rmtree))
-            stack.enter_context(patch.object(bundle.subprocess, "run", side_effect=native_run))
-            stack.enter_context(patch.object(bundle.time, "sleep", scoped_sleep))
-            self.sleep = recorder
-            stack.enter_context(patch.object(bundle.subprocess, "Popen", side_effect=smoke))
+            self.own_thread_only(stack, bundle.tempfile, "mkdtemp", mkdtemp)
+            self.own_thread_only(stack, bundle.shutil, "copytree", copytree)
+            cleanup = self.own_thread_only(stack, bundle.shutil, "rmtree", rmtree)
+            self.own_thread_only(stack, bundle.subprocess, "run", native_run)
+            self.sleep = self.own_thread_only(stack, bundle.time, "sleep")
+            self.own_thread_only(stack, bundle.subprocess, "Popen", smoke)
             stack.enter_context(patch.object(bundle, "verify_report"))
             archives = stack.enter_context(patch.object(bundle, "archive_members_safe"))
             yield cleanup
