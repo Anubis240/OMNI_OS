@@ -93,6 +93,7 @@ class IntegrationsPanel(QWidget):
         self._search = ""
         self._category = "All Categories"
         self._cards: list[tuple[dict, QWidget]] = []
+        self.on_integration_changed = None  # callable: () -> None — a save that needs the next reconnect to take effect (see _on_dialog_saved)
 
         self._status_sig.connect(self._show_status)
         self._build_ui()
@@ -260,10 +261,20 @@ class IntegrationsPanel(QWidget):
         dlg.saved.connect(self._on_dialog_saved)
         dlg.exec()
 
-    def _on_dialog_saved(self, message: str, is_error: bool):
+    def _on_dialog_saved(self, message: str, is_error: bool, needs_reconnect: bool):
         self.settings = settings_store.load_settings()
         self._populate_grid()
         self._status_sig.emit(message, is_error)
+        # GEMZ4US, Item M (2026-09-20): a freshly connected integration's
+        # tool declaration isn't visible to Gemini until the next reconnect
+        # (see _ConnectDialog._on_save's comment), but there was no user-
+        # accessible way to trigger one short of a full app restart —
+        # clicking the listen toggle on/off did nothing. Wired to the same
+        # reconnect trigger World Panel/Settings already use for a
+        # companion change, so this now happens automatically instead of
+        # leaving the user stuck with a saved-but-unusable tool.
+        if needs_reconnect and self.on_integration_changed:
+            self.on_integration_changed()
 
     def _show_status(self, message: str, is_error: bool):
         C = self._C
@@ -272,7 +283,7 @@ class IntegrationsPanel(QWidget):
 
 
 class _ConnectDialog(QDialog):
-    saved = pyqtSignal(str, bool)
+    saved = pyqtSignal(str, bool, bool)  # (message, is_error, needs_reconnect)
 
     def __init__(self, entry: dict, settings: dict, C, parent=None):
         super().__init__(parent)
@@ -436,19 +447,28 @@ class _ConnectDialog(QDialog):
         settings.setdefault("integrations", {})[conn_id] = values
         settings_store.save_settings(settings)
         self._settings = settings
-        # "takes effect on next reconnect" wording added 2026-09-10 — found
-        # via GEMZ4US's report that main.py::_build_config() (which reads
+        # Background added 2026-09-10 — found via GEMZ4US's report that
+        # main.py::_build_config() (which reads
         # integration_registry.get_active_tool_declarations()) only runs
         # once per Gemini Live connection, same as the companion-switch
-        # confirmation already says below. Without this, connecting GitHub
-        # mid-session silently doesn't add its tools until the next
-        # reconnect — Omni fell back to delegating through claude_agent
-        # instead (which returned inaccurate data), with nothing telling
-        # the tester a reconnect was needed first.
-        self.saved.emit(f"{self._entry['name']} saved — takes effect on next reconnect.", False)
-        if not self._entry.get("connect_action"):
+        # confirmation already says below. Without a reconnect, connecting
+        # GitHub mid-session silently doesn't add its tools until whatever
+        # next triggers one naturally — Omni fell back to delegating
+        # through claude_agent instead (which returned inaccurate data).
+        # GEMZ4US, Item M (2026-09-20): the original fix here only told the
+        # user a reconnect was needed, with no way to actually trigger one
+        # short of a full app restart. Now triggers it automatically (via
+        # on_integration_changed, below) instead of just naming the gap —
+        # for an entry with its own connect_action (an OAuth flow like
+        # Gmail), this save is just persisting extra fields, not the real
+        # connection, so the reconnect belongs on _on_connect's success
+        # below instead, once credentials actually exist.
+        needs_reconnect = not self._entry.get("connect_action")
+        if needs_reconnect:
+            self.saved.emit(f"{self._entry['name']} saved — reconnecting Omni's voice session so it's available.", False, True)
             self.accept()
         else:
+            self.saved.emit(f"{self._entry['name']} saved.", False, False)
             self._status_lbl.setText("Saved. Click Connect to finish linking your account.")
             self._status_lbl.setStyleSheet(f"color: {self._C.GREEN}; background: transparent;")
 
@@ -468,7 +488,11 @@ class _ConnectDialog(QDialog):
 
         def _run():
             result = action()
-            self.saved.emit(result, "failed" in result.lower() or "error" in result.lower())
+            is_error = "failed" in result.lower() or "error" in result.lower()
+            # Reconnect only on a genuine success — a failed OAuth sign-in
+            # connected nothing, so there's no new tool declaration for the
+            # next session to pick up.
+            self.saved.emit(result, is_error, not is_error)
 
         threading.Thread(target=_run, daemon=True).start()
         self.accept()
@@ -491,7 +515,7 @@ class _ConnectDialog(QDialog):
         # tool's *declaration* genuinely isn't visible to Gemini until the
         # next reconnect, since _build_config() only runs once per
         # connection; that's the original bug this phrase exists for.)
-        self.saved.emit(f"{self._entry['name']} disconnected.", False)
+        self.saved.emit(f"{self._entry['name']} disconnected.", False, False)
         self.accept()
 
     def _open_family_dialog(self, family_entry: dict):

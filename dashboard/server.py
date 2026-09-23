@@ -1032,10 +1032,17 @@ class DashboardServer:
         self._trader_action_callback = fn
 
     def new_key(self, expiry_secs: int = 600) -> str:
-        now = time.time()
-        self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
+        # GEMZ4US, Item G (2026-09-21): generating a new key didn't revoke
+        # the previous one — clicking NEW KEY twice in a row still let the
+        # FIRST, already-superseded key successfully pair, right up until
+        # its own original expiry (multiple keys valid at once, only
+        # time-based expiry ever invalidating one). This gates access to
+        # a real-funds LIVE app: only the most recently generated pairing
+        # key should ever be usable, so any still-pending one is dropped
+        # outright here rather than just pruning the already-expired ones.
+        self._pending_keys = {}
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
-        self._pending_keys[key] = now + expiry_secs
+        self._pending_keys[key] = time.time() + expiry_secs
         return key
 
     def _resolve_port(self) -> int:

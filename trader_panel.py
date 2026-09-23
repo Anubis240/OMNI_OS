@@ -276,6 +276,19 @@ class TraderPanel(QWidget):
         self._refresh_watchlist()
         self._load_config_into_ui()
 
+        # GEMZ4US, Item D (2026-09-21): BALANCE only ever updated at ARM/
+        # sync/adopt/etc, or passively at the end of a scan cycle — a real
+        # on-chain deposit was invisible for 4.5+ minutes with the trader
+        # stopped, since nothing periodic ever re-reads it in that state.
+        # refresh_live_equity() is a no-op in PAPER mode and a single fast
+        # RPC call in LIVE (not the trending/price APIs' own rate-limited
+        # backoff), so a modest interval here is safe regardless of
+        # whether the trader is running — the phone dashboard already
+        # polls this same call every few seconds with no issue.
+        self._balance_refresh_tmr = QTimer(self)
+        self._balance_refresh_tmr.timeout.connect(self._periodic_balance_refresh)
+        self._balance_refresh_tmr.start(30_000)
+
         if not mcp_client.has_credentials():
             self._set_panel_enabled(False)
             self._show_mcp_key_setup()
@@ -447,6 +460,11 @@ class TraderPanel(QWidget):
             self._run_on_gui_sig.emit(lambda: then_fn(result))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _periodic_balance_refresh(self):
+        # See the QTimer set up in __init__ (Item D). Off the GUI thread
+        # like every other engine call that can touch the network.
+        self._background(self.engine.refresh_live_equity, lambda _result: self._refresh_stats())
 
     @staticmethod
     def _feed_timestamp() -> str:
@@ -712,7 +730,10 @@ class TraderPanel(QWidget):
         col.addWidget(chains_lbl)
         for key, info in chains_mod.CHAINS.items():
             cb = QCheckBox(info["name"])
-            cb.setFont(QFont("Segoe UI", 7))
+            # GEMZ4US, Item E (2026-09-20): still 7pt after the field-label
+            # contrast fix above (Part 4/C) was applied — same colour as
+            # the input values already, just smaller. Matched to 8pt.
+            cb.setFont(QFont("Segoe UI", 8))
             cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
             self._chain_checks[key] = cb
             col.addWidget(cb)
@@ -1516,8 +1537,13 @@ class TraderPanel(QWidget):
 
     def _handle_command_result(self, result: dict):
         if result.get("unrecognized"):
+            # GEMZ4US, Item F (2026-09-20): "ask Seraph directly" sent the
+            # user looking for a way to talk to Seraph, which has no chat
+            # interface at all — it's the backend risk/pricing service
+            # Omni itself consults, not a conversational partner. Omni, in
+            # the main chat, is who can actually answer a general question.
             self._append_feed_text(
-                "SYS: not a trade command — ask Seraph directly for general questions (this command bar can never place a trade)."
+                "SYS: not a trade command — ask Omni directly in the main chat for general questions (this command bar can never place a trade)."
             )
             return
         if result.get("sellPrompt"):
@@ -1562,6 +1588,8 @@ class TraderPanel(QWidget):
 
     def _on_save_config(self):
         partial = {}
+        rejected = []  # GEMZ4US, Item A (2026-09-20): see the notice below
+        field_labels = dict(_CONFIG_FIELDS)
         for key, inp in self._config_inputs.items():
             raw = inp.text().strip()
             if raw == "":
@@ -1569,7 +1597,7 @@ class TraderPanel(QWidget):
             try:
                 partial[key] = float(raw) if "." in raw else int(raw)
             except ValueError:
-                pass
+                rejected.append((key, raw))
         partial["chains"] = [k for k, cb in self._chain_checks.items() if cb.isChecked()] or ["ethereum"]
         self.engine.set_config(partial)
         # GEMZ4US, 2026-09-19 (Item C): the $100,000 Min liquidity $ floor
@@ -1580,12 +1608,36 @@ class TraderPanel(QWidget):
         # what will actually be applied.
         requested_liq = partial.get("minLiquidityUsd")
         if requested_liq is not None and self.engine.config["minLiquidityUsd"] != requested_liq:
+            # 2026-09-20 (Item B): a forced ",.0f" here printed "entered
+            # 50,000" for a typed "50000" with no comma at all — a reader
+            # could mistake it for the comma-input case just below, which
+            # is silently ignored rather than clamped. Plain formatting so
+            # the two cases can no longer look identical.
             self._append_feed_text(
                 f"SYS: Min liquidity $ raised to the ${self.engine.config['minLiquidityUsd']:,.0f} minimum "
-                f"(entered {requested_liq:,.0f})"
+                f"(entered {requested_liq:.0f})"
+            )
+        # GEMZ4US, Item A (2026-09-20): every Config field silently ignored
+        # unparseable input (a comma, a "K" suffix, ...) and kept its
+        # previous value, with nothing in the Event Feed to say so — asked
+        # directly whether a rejection notice was wanted; answer was yes.
+        for key, raw in rejected:
+            # GEMZ4US, Item O (2026-09-21): asked for a hint of the expected
+            # format, since "1K" and "50,000" are both rejected outright
+            # (no K-suffix or thousands-separator parsing).
+            self._append_feed_text(
+                f'SYS: {field_labels.get(key, key)} — could not read "{raw}" (digits only, e.g. 50000), '
+                f'kept previous value {self.engine.config.get(key)}'
             )
         self._load_config_into_ui()
-        self._append_feed_text("SYS: config saved")
+        # GEMZ4US, Item O (2026-09-21): "config saved" logged unconditionally
+        # right after a rejection notice, reading as though every field
+        # (including the rejected one) had just been saved — it hadn't;
+        # only the rest of the config was.
+        if rejected:
+            self._append_feed_text(f"SYS: config saved (except the {len(rejected)} rejected field(s) above)")
+        else:
+            self._append_feed_text("SYS: config saved")
 
     def _on_reset(self):
         # Flagged 2026-09-07: this button sits directly next to SAVE CONFIG

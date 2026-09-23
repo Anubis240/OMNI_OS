@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import re
 import threading
+import time
 import json
 import sys
 import traceback
@@ -166,16 +167,45 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 TOOL_CALL_TIMEOUT   = 200  # see the try/except around _execute_tool() in _receive_audio() —
                            # generous ceiling above claude_agent's own 180s internal timeout
-SEND_RESPONSE_TIMEOUT = 30  # see _receive_audio()'s send_tool_response wrap — much shorter
-                            # than TOOL_CALL_TIMEOUT since this is just a network send on an
-                            # already-open session, not arbitrary tool work; a hang here means
-                            # the connection is bad, so recovery is a reconnect, not a retry
+SEND_RESPONSE_TIMEOUT = 30  # see _receive_audio()'s send_tool_response wrap, and
+                            # _send_realtime()'s send_realtime_input wrap — much shorter than
+                            # TOOL_CALL_TIMEOUT since both are just a network send on an
+                            # already-open session, not arbitrary tool work; a hang in either
+                            # means the connection is bad, so recovery is a reconnect, not a retry
 CONNECT_TIMEOUT = 30  # see run()'s connection handshake wrap — GEMZ4US 2026-09-17 (Finding
                       # #48): no timeout existed on the initial client.aio.live.connect()
                       # handshake at all, so a stalled one left the app stuck in "THINKING"
                       # forever, with no exception ever raised to trigger the reconnect
                       # loop's own retry — only a full OS reboot cleared it. Same
                       # asyncio.wait_for pattern as TOOL_CALL_TIMEOUT/SEND_RESPONSE_TIMEOUT.
+RECEIVE_IDLE_TIMEOUT = 900  # see _receive_audio()'s main loop — GEMZ4US 2026-09-20: a voice
+                            # input got no transcript/reply, then even typed messages got no
+                            # reply (no THINKING pill, no SYS: line) until a full restart —
+                            # once, for ~48 minutes straight. Root cause: the SDK's own
+                            # receive() ultimately calls a plain websocket recv() with no
+                            # timeout at all (google/genai/live.py's _receive()) — if Gemini's
+                            # backend stops producing messages for this session without
+                            # actually closing the socket, nothing here ever notices. Every
+                            # other blocking call in this same function already has a ceiling
+                            # (TOOL_CALL_TIMEOUT, SEND_RESPONSE_TIMEOUT); this was the one gap.
+                            # Deliberately long: a real idle gap between messages (user reading
+                            # a reply, not talking for a while) is completely normal and must
+                            # not force a reconnect — session_resumption makes an unnecessary
+                            # one cheap, but frequent ones are their own nuisance, so this errs
+                            # generous. Flag for GEMZ4US to confirm the value in practice.
+PLAYBACK_TAIL_S = 0.3  # see _play_audio()'s speaking-flag clear — GEMZ4US, 2026-09-21
+                       # (Finding #45's newly-identified trigger): reproduced voice-input
+                       # garbling/merging under a controlled test, triggered by speaking
+                       # while Omni's own previous answer is still audibly playing. The mic
+                       # callback already refuses to capture while self._is_speaking is True
+                       # (see _listen_audio), but _play_audio cleared it the instant the
+                       # audio queue drained and turn_complete fired — sd.RawOutputStream.
+                       # write() only blocks long enough to buffer the data, not until it's
+                       # actually audible, so the OS can still be physically playing back
+                       # the last chunk(s) for a short tail after this code considers the
+                       # turn "done". Same fix already proven for the identical class of bug
+                       # on the phone dashboard's own playback path (dashboard/server.py's
+                       # `nextPlayTime + 0.3` guard) — same 0.3s margin, same reasoning.
 
 
 @contextlib.asynccontextmanager
@@ -197,6 +227,34 @@ async def _connect_with_timeout(connect_cm, timeout: float):
             raise
     else:
         await connect_cm.__aexit__(None, None, None)
+
+
+async def _iter_with_idle_timeout(aiter, timeout):
+    """Wraps an async iterable so each individual item wait is bounded by
+    `timeout` — see RECEIVE_IDLE_TIMEOUT. `async for` has no per-iteration
+    timeout hook of its own, and the underlying source here (the Gemini
+    Live SDK's session.receive(), ultimately a plain websocket recv()) has
+    none either: if the server stops producing messages without actually
+    closing the socket, iterating it blocks forever. Raises
+    asyncio.TimeoutError if `timeout` elapses between items; ends normally
+    (StopAsyncIteration) exactly when the wrapped iterator does.
+
+    `timeout` may be a plain float, or a zero-arg callable returning a
+    float or None, evaluated fresh before each individual wait. GEMZ4US,
+    2026-09-21: a flat timeout fired even during a normal ~15-minute gap
+    with nothing outstanding — "always listening" mode streams mic audio
+    continuously regardless of whether anyone is actually speaking, so
+    Gemini can go quiet at the message level during genuine silence with
+    nothing broken at all. A callable lets the caller gate the bound on
+    whether a reply is actually pending (None = wait indefinitely, no
+    false-positive reconnect during real idle time)."""
+    it = aiter.__aiter__()
+    get_timeout = timeout if callable(timeout) else (lambda: timeout)
+    while True:
+        try:
+            yield await asyncio.wait_for(it.__anext__(), timeout=get_timeout())
+        except StopAsyncIteration:
+            return
 
 
 def _load_vault_memory_index() -> str:
@@ -333,6 +391,31 @@ TOOL_DECLARATIONS = [
             },
             "required": ["city"]
         }
+    },
+    {
+        # GEMZ4US, 2026-09-21 (voice/session watchdog, item d): the date/
+        # time given by Omni was observed stale across several reconnects
+        # in a row — the same value repeated while the app clock moved on
+        # by nearly an hour. The [CURRENT DATE & TIME] block below is only
+        # sent as part of system_instruction, built fresh on every
+        # reconnect (see _build_config) — but session_resumption restores
+        # the model's own prior context, and it isn't verified whether a
+        # freshly-sent system_instruction actually overrides what the
+        # model already "knows" from before a resumed reconnect, versus a
+        # tool call, which always executes fresh regardless of resumption.
+        # A real tool sidesteps that uncertainty entirely: whenever the
+        # model needs the actual current time (a reminder, "what time is
+        # it"), it can call this instead of relying on carried-forward
+        # context.
+        "name": "get_current_time",
+        "description": (
+            "Returns the current real-world date and time. Call this whenever you need "
+            "to know or state what time or date it actually is right now — for a "
+            "reminder, a 'what time is it' question, or anything else time-sensitive — "
+            "instead of relying on whatever date/time you were told earlier in this "
+            "conversation, which can become stale after a reconnect."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
     },
     {
         "name": "send_message",
@@ -864,6 +947,15 @@ class JarvisLive:
         self.ui.on_always_listening_toggled = self._on_always_listening_toggled
         self._reconnect_event = asyncio.Event()
         self._turn_done_event: asyncio.Event | None = None
+        # GEMZ4US, 2026-09-21: gates RECEIVE_IDLE_TIMEOUT so it only ever
+        # applies while an actual reply is outstanding — see
+        # _send_text_safe (sets it) and _receive_audio's turn_complete
+        # handling (clears it). Deliberately not armed by raw mic frames:
+        # "always listening" streams audio continuously regardless of
+        # whether anyone is actually speaking, so treating outbound audio
+        # as "awaiting a reply" would just reintroduce the same false-
+        # positive-during-genuine-silence bug this exists to fix.
+        self._pending_since: float | None = None
         self._session_log: list[str] = []  # "You: ..." / "Seraph: ..." lines for this connection,
                                             # summarized and saved to memory on disconnect/shutdown
         self._dashboard = None      # DashboardServer | None — remote/phone control, started once in run()
@@ -970,6 +1062,18 @@ class JarvisLive:
         """Runs for the whole app lifetime — forwards phone mic PCM chunks into the
         live session, same input path as the PC mic. Drops chunks when there's no
         active session rather than buffering (this is a real-time stream)."""
+        # GEMZ4US, N30 (2026-09-21): a failed phone voice attempt left no
+        # trace anywhere — no [Phone]: line, no Listening/Listening
+        # stopped SYS line (the desktop mic's own failure at least leaves
+        # those), nothing on the phone screen. Traced to here: chunks
+        # were silently dropped whenever self.session wasn't established
+        # yet — exactly the two conditions this was reproduced under
+        # (right after a fresh pairing, and right after a QR re-pairing,
+        # both moments the voice session may not be up yet) — or when the
+        # outgoing queue was full. Logged once per episode (not per
+        # chunk, since this runs continuously while the phone mic
+        # streams), and cleared as soon as a chunk gets through again.
+        last_drop_reason = None
         while True:
             try:
                 chunk = await asyncio.wait_for(
@@ -979,11 +1083,22 @@ class JarvisLive:
                 self._phone_active = False  # no audio for 1s — give the PC mic back
                 continue
             self._phone_active = True
-            if self.session and self.out_queue and not self.ui.muted:
+
+            if self.ui.muted:
+                continue  # expected, the user's own choice — nothing to warn about
+
+            if not self.session or not self.out_queue:
+                reason = "no active voice session yet"
+            else:
                 try:
                     self.out_queue.put_nowait({"data": chunk, "mime_type": "audio/pcm"})
+                    reason = None
                 except asyncio.QueueFull:
-                    pass
+                    reason = "outgoing queue full"
+
+            if reason and reason != last_drop_reason:
+                self.ui.write_log(f"SYS: Phone audio dropped — {reason}.")
+            last_drop_reason = reason
 
     def _on_always_listening_toggled(self, is_on: bool) -> None:
         if is_on:
@@ -1033,6 +1148,11 @@ class JarvisLive:
         permanent."""
         if not self.session:
             return False
+        # GEMZ4US, 2026-09-21: marks a reply as outstanding so
+        # RECEIVE_IDLE_TIMEOUT (see _iter_with_idle_timeout) only ever
+        # fires while something is actually pending — cleared in
+        # _receive_audio when turn_complete comes back.
+        self._pending_since = time.monotonic()
         try:
             await asyncio.wait_for(
                 self.session.send_client_content(turns={"parts": [{"text": text}]}, turn_complete=True),
@@ -1354,6 +1474,15 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
                 result = r or f"Opened {args.get('app_name')}."
 
+            elif name == "get_current_time":
+                # Deliberately a fresh datetime.now() read, not the
+                # system_instruction's own [CURRENT DATE & TIME] block —
+                # see the tool declaration's own comment. Local import,
+                # matching _build_config's own (datetime isn't imported
+                # at module level in this file).
+                from datetime import datetime
+                result = datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
+
             elif name == "weather_report":
                 r = await loop.run_in_executor(None, lambda: weather_action(parameters=args, player=self.ui))
                 result = r or "Weather delivered."
@@ -1517,7 +1646,24 @@ class JarvisLive:
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
-            await self.session.send_realtime_input(media=msg)
+            # GEMZ4US, 2026-09-20: this send had no timeout — if it stalls
+            # (a degraded connection that hasn't actually closed yet), it
+            # blocks here forever. Since the mic callback's queue put is a
+            # non-blocking put_nowait() into a maxsize=10 queue, a stuck
+            # send here doesn't just delay this one message: every
+            # subsequent mic frame silently fails to queue (QueueFull,
+            # swallowed by asyncio's default callback-exception handling)
+            # until the queue drains again — voice input goes quiet with no
+            # error the user ever sees. _receive_audio()'s own
+            # RECEIVE_IDLE_TIMEOUT would eventually force a reconnect and
+            # cancel this stuck await too, but only after its own much
+            # longer ceiling — this gives the same recovery, much sooner,
+            # when the send side specifically is what's stuck.
+            try:
+                await asyncio.wait_for(self.session.send_realtime_input(media=msg), timeout=SEND_RESPONSE_TIMEOUT)
+            except asyncio.TimeoutError:
+                self.ui.write_log("SYS: Lost the connection sending voice input — reconnecting.")
+                raise _ReconnectRequested()
 
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
@@ -1580,124 +1726,146 @@ class JarvisLive:
 
         try:
             while True:
-                async for response in self.session.receive():
+                # session.receive() is itself a per-turn generator (it stops
+                # on its own once turn_complete fires — see google/genai/
+                # live.py's receive()), so the outer while True gets a fresh
+                # one each turn. Wrapped in _iter_with_idle_timeout so each
+                # individual message wait is bounded by RECEIVE_IDLE_TIMEOUT
+                # instead of the bare `async for` below, which has no
+                # per-iteration timeout hook of its own. A callable, not a
+                # flat value: only bounded while self._pending_since says a
+                # reply is actually outstanding (see its own comment) — a
+                # normal idle gap with nothing pending waits indefinitely.
+                try:
+                    async for response in _iter_with_idle_timeout(
+                        self.session.receive(),
+                        lambda: RECEIVE_IDLE_TIMEOUT if self._pending_since is not None else None,
+                    ):
 
-                    if response.data:
-                        if self._turn_done_event and self._turn_done_event.is_set():
-                            self._turn_done_event.clear()
-                        self.audio_in_queue.put_nowait(response.data)
+                        if response.data:
+                            if self._turn_done_event and self._turn_done_event.is_set():
+                                self._turn_done_event.clear()
+                            self.audio_in_queue.put_nowait(response.data)
 
-                    if response.session_resumption_update and response.session_resumption_update.resumable:
-                        # new_handle is only meaningful when resumable=True — a
-                        # non-resumable update (e.g. mid function-call) sends an
-                        # empty handle and must NOT overwrite the last good one.
-                        self._resumption_handle = response.session_resumption_update.new_handle
+                        if response.session_resumption_update and response.session_resumption_update.resumable:
+                            # new_handle is only meaningful when resumable=True — a
+                            # non-resumable update (e.g. mid function-call) sends an
+                            # empty handle and must NOT overwrite the last good one.
+                            self._resumption_handle = response.session_resumption_update.new_handle
 
-                    if response.server_content:
-                        sc = response.server_content
+                        if response.server_content:
+                            sc = response.server_content
 
-                        if sc.output_transcription and sc.output_transcription.text:
-                            txt = _clean_transcript(sc.output_transcription.text)
-                            if txt:
-                                out_buf.append(txt)
+                            if sc.output_transcription and sc.output_transcription.text:
+                                txt = _clean_transcript(sc.output_transcription.text)
+                                if txt:
+                                    out_buf.append(txt)
 
-                        if sc.input_transcription and sc.input_transcription.text:
-                            txt = _clean_transcript(sc.input_transcription.text)
-                            if txt:
-                                if not in_buf:
-                                    # Capture at the START of this turn's
-                                    # transcription, not at turn_complete —
-                                    # _phone_active can already have reset
-                                    # to False (no phone audio for 1s) by
-                                    # the time turn_complete fires, even
-                                    # though the turn itself came from the
-                                    # phone.
-                                    in_buf_is_phone = self._phone_active
-                                in_buf.append(txt)
+                            if sc.input_transcription and sc.input_transcription.text:
+                                txt = _clean_transcript(sc.input_transcription.text)
+                                if txt:
+                                    if not in_buf:
+                                        # Capture at the START of this turn's
+                                        # transcription, not at turn_complete —
+                                        # _phone_active can already have reset
+                                        # to False (no phone audio for 1s) by
+                                        # the time turn_complete fires, even
+                                        # though the turn itself came from the
+                                        # phone.
+                                        in_buf_is_phone = self._phone_active
+                                    in_buf.append(txt)
 
-                        if sc.turn_complete:
-                            if self._turn_done_event:
-                                self._turn_done_event.set()
+                            if sc.turn_complete:
+                                if self._turn_done_event:
+                                    self._turn_done_event.set()
+                                # A reply came back — nothing outstanding
+                                # for RECEIVE_IDLE_TIMEOUT to guard anymore.
+                                self._pending_since = None
 
-                            full_in = " ".join(in_buf).strip()
-                            if full_in:
-                                # A phone-relayed voice turn shares the
-                                # exact same input_transcription event as
-                                # the PC's own mic — nothing upstream
-                                # distinguishes them, so this always
-                                # attributed voice input to "You:"
-                                # (implicitly "the PC mic"), even when it
-                                # was genuinely the phone. Confirmed in
-                                # testing: a remote voice turn was
-                                # mislabeled "You:" in the desktop log
-                                # while every other phone-originated (but
-                                # typed) line correctly showed "[Phone]:".
-                                who = "[Phone]" if in_buf_is_phone else "You"
-                                self.ui.write_log(f"{who}: {full_in}")
-                                self._session_log.append(f"{who}: {full_in}")
-                                if self._dashboard:
-                                    asyncio.create_task(self._dashboard.broadcast({"type": "you", "text": full_in}))
-                            in_buf = []
-                            in_buf_is_phone = False
+                                full_in = " ".join(in_buf).strip()
+                                if full_in:
+                                    # A phone-relayed voice turn shares the
+                                    # exact same input_transcription event as
+                                    # the PC's own mic — nothing upstream
+                                    # distinguishes them, so this always
+                                    # attributed voice input to "You:"
+                                    # (implicitly "the PC mic"), even when it
+                                    # was genuinely the phone. Confirmed in
+                                    # testing: a remote voice turn was
+                                    # mislabeled "You:" in the desktop log
+                                    # while every other phone-originated (but
+                                    # typed) line correctly showed "[Phone]:".
+                                    who = "[Phone]" if in_buf_is_phone else "You"
+                                    self.ui.write_log(f"{who}: {full_in}")
+                                    self._session_log.append(f"{who}: {full_in}")
+                                    if self._dashboard:
+                                        asyncio.create_task(self._dashboard.broadcast({"type": "you", "text": full_in}))
+                                in_buf = []
+                                in_buf_is_phone = False
 
-                            full_out = " ".join(out_buf).strip()
-                            if full_out:
-                                self.ui.write_log(f"Omni: {full_out}")
-                                self._session_log.append(f"Omni: {full_out}")
-                                if self._dashboard:
-                                    asyncio.create_task(self._dashboard.broadcast({"type": "seraph", "text": full_out}))  # NOTE: "type" is a wire-protocol key matched by dashboard/server.py's JS — kept as "seraph" intentionally, do not rename without updating that JS too
-                            out_buf = []
+                                full_out = " ".join(out_buf).strip()
+                                if full_out:
+                                    self.ui.write_log(f"Omni: {full_out}")
+                                    self._session_log.append(f"Omni: {full_out}")
+                                    if self._dashboard:
+                                        asyncio.create_task(self._dashboard.broadcast({"type": "seraph", "text": full_out}))  # NOTE: "type" is a wire-protocol key matched by dashboard/server.py's JS — kept as "seraph" intentionally, do not rename without updating that JS too
+                                out_buf = []
 
-                    if response.tool_call:
-                        fn_responses = []
-                        for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
+                        if response.tool_call:
+                            fn_responses = []
+                            for fc in response.tool_call.function_calls:
+                                print(f"[JARVIS] 📞 {fc.name}")
+                                try:
+                                    # No call in this path (a network request inside
+                                    # a tool, an MCP call, a subprocess) previously
+                                    # had any timeout at all — a single genuinely
+                                    # stuck one blocked this entire receive loop
+                                    # forever, which meant every other channel too
+                                    # (typed/phone text goes through the same
+                                    # session object) with no error surfaced and no
+                                    # recovery short of force-restarting the app. A
+                                    # generous but finite ceiling — longer than
+                                    # claude_agent's own 180s internal timeout —
+                                    # can't force-kill a stuck synchronous call
+                                    # (thread-pool work can't be cancelled), but it
+                                    # unblocks the session either way.
+                                    fr = await asyncio.wait_for(self._execute_tool(fc), timeout=TOOL_CALL_TIMEOUT)
+                                except asyncio.TimeoutError:
+                                    print(f"[JARVIS] ⏱️ Tool call timed out: {fc.name}")
+                                    self._tool_running = False
+                                    if not self.ui.muted:
+                                        self.ui.set_state("LISTENING")
+                                    self.ui.write_log(f"SYS: '{fc.name}' didn't respond in time — cancelled, try again.")
+                                    fr = types.FunctionResponse(
+                                        id=fc.id, name=fc.name,
+                                        response={"error": "Tool call timed out"},
+                                    )
+                                fn_responses.append(fr)
                             try:
-                                # No call in this path (a network request inside
-                                # a tool, an MCP call, a subprocess) previously
-                                # had any timeout at all — a single genuinely
-                                # stuck one blocked this entire receive loop
-                                # forever, which meant every other channel too
-                                # (typed/phone text goes through the same
-                                # session object) with no error surfaced and no
-                                # recovery short of force-restarting the app. A
-                                # generous but finite ceiling — longer than
-                                # claude_agent's own 180s internal timeout —
-                                # can't force-kill a stuck synchronous call
-                                # (thread-pool work can't be cancelled), but it
-                                # unblocks the session either way.
-                                fr = await asyncio.wait_for(self._execute_tool(fc), timeout=TOOL_CALL_TIMEOUT)
-                            except asyncio.TimeoutError:
-                                print(f"[JARVIS] ⏱️ Tool call timed out: {fc.name}")
-                                self._tool_running = False
-                                if not self.ui.muted:
-                                    self.ui.set_state("LISTENING")
-                                self.ui.write_log(f"SYS: '{fc.name}' didn't respond in time — cancelled, try again.")
-                                fr = types.FunctionResponse(
-                                    id=fc.id, name=fc.name,
-                                    response={"error": "Tool call timed out"},
+                                # Found via GEMZ4US's 2026-09-08 report: Bug 11's
+                                # own 200s tool-execution ceiling above never
+                                # fired during an occurrence that ran ~12 minutes
+                                # — because this line, sending the result back to
+                                # Gemini, had no timeout of its own. A stuck
+                                # *tool* is recoverable locally (send a synthetic
+                                # error response, keep the session alive); a
+                                # stuck *send back to Gemini* means the
+                                # connection itself is almost certainly bad, so
+                                # the only real recovery is the reconnect this
+                                # exception triggers via run()'s outer TaskGroup
+                                # handler, not another local synthetic response.
+                                await asyncio.wait_for(
+                                    self.session.send_tool_response(function_responses=fn_responses),
+                                    timeout=SEND_RESPONSE_TIMEOUT,
                                 )
-                            fn_responses.append(fr)
-                        try:
-                            # Found via GEMZ4US's 2026-09-08 report: Bug 11's
-                            # own 200s tool-execution ceiling above never
-                            # fired during an occurrence that ran ~12 minutes
-                            # — because this line, sending the result back to
-                            # Gemini, had no timeout of its own. A stuck
-                            # *tool* is recoverable locally (send a synthetic
-                            # error response, keep the session alive); a
-                            # stuck *send back to Gemini* means the
-                            # connection itself is almost certainly bad, so
-                            # the only real recovery is the reconnect this
-                            # exception triggers via run()'s outer TaskGroup
-                            # handler, not another local synthetic response.
-                            await asyncio.wait_for(
-                                self.session.send_tool_response(function_responses=fn_responses),
-                                timeout=SEND_RESPONSE_TIMEOUT,
-                            )
-                        except asyncio.TimeoutError:
-                            self.ui.write_log("SYS: Lost the connection sending a tool result back — reconnecting.")
-                            raise _ReconnectRequested()
+                            except asyncio.TimeoutError:
+                                self.ui.write_log("SYS: Lost the connection sending a tool result back — reconnecting.")
+                                raise _ReconnectRequested()
+                except asyncio.TimeoutError:
+                    self.ui.write_log(
+                        f"SYS: no response from Gemini for {RECEIVE_IDLE_TIMEOUT}s — reconnecting."
+                    )
+                    raise _ReconnectRequested()
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
@@ -1714,6 +1882,7 @@ class JarvisLive:
         )
         stream.start()
 
+        last_chunk_written_at = 0.0
         try:
             while True:
                 try:
@@ -1726,6 +1895,12 @@ class JarvisLive:
                         self._turn_done_event
                         and self._turn_done_event.is_set()
                         and self.audio_in_queue.empty()
+                        # PLAYBACK_TAIL_S: stream.write() below only blocks
+                        # long enough to buffer the data, not until it's
+                        # actually audible — give the OS a short margin to
+                        # finish physically playing the last chunk(s)
+                        # before letting the mic capture again.
+                        and time.monotonic() - last_chunk_written_at >= PLAYBACK_TAIL_S
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
@@ -1733,6 +1908,7 @@ class JarvisLive:
                 self.set_speaking(True)
                 if not self.ui.speech_muted:
                     await asyncio.to_thread(stream.write, chunk)
+                last_chunk_written_at = time.monotonic()
                 if self._dashboard:
                     asyncio.create_task(self._dashboard.broadcast_audio(chunk))
         except Exception as e:

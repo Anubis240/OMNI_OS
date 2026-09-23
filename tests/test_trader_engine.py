@@ -340,6 +340,27 @@ class PaperBuyCostBasisTests(unittest.TestCase):
         self.assertAlmostEqual(pos["qty"] * pos["entryPriceUsd"], pos["costUsd"], places=9)
 
 
+class RouteLogLineTests(unittest.TestCase):
+    """Item E (GEMZ4US, 2026-09-21): a real sell routed through a $51-
+    liquidity V2 pool at ~15% worse than a $67K pool, only discoverable
+    afterward on Etherscan -- neither the DEX used nor the simulated
+    price impact was ever surfaced anywhere."""
+
+    def test_formats_dex_and_price_impact(self):
+        text = engine_mod._route_log_line({"dex": "v2", "priceImpactBps": 1450})
+        self.assertEqual(text, "Routed via Uniswap V2 — 14.50% simulated price impact")
+
+    def test_formats_dex_without_price_impact(self):
+        # bypass_gate=True (e.g. FORCE) never computes a gate, so no
+        # price-impact figure is available -- the DEX alone is still useful.
+        text = engine_mod._route_log_line({"dex": "v3", "priceImpactBps": None})
+        self.assertEqual(text, "Routed via Uniswap V3")
+
+    def test_missing_dex_returns_none(self):
+        self.assertIsNone(engine_mod._route_log_line({}))
+        self.assertIsNone(engine_mod._route_log_line({"dex": None, "priceImpactBps": 100}))
+
+
 class ClearHaltTests(unittest.TestCase):
     """GEMZ4US, Finding #26 (2026-09-17): the only documented way out of a
     Max Drawdown HALT was RESET LEDGER, which also wipes trade history,
@@ -468,6 +489,343 @@ class LiveBalanceTests(unittest.TestCase):
         state = self.engine.public_state()
         self.assertEqual(state["mode"], "paper")
         self.assertAlmostEqual(state["balanceUsd"], 94.0)
+
+
+class RefreshLiveEquityBalanceChangeLogTests(unittest.TestCase):
+    """GEMZ4US, Item D (2026-09-21): BALANCE changes made outside the
+    app's own actions (a deposit, an external transfer) were picked up
+    by refresh_live_equity() already, but silently -- no sign anything
+    had happened. Also verifies the new periodic desktop-panel timer's
+    target (refresh_live_equity itself is called every few seconds by
+    the phone dashboard already, and now every 30s by the desktop panel
+    regardless of running state -- see trader_panel.py)."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.events = []
+        self.engine = engine_mod.TraderEngine(
+            emit=self.events.append,
+            # signerGranted since 1.12.0: arm_live() refuses an unauthorized
+            # wallet, and this test arms live to reach refresh_live_equity().
+            wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": True},
+        )
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_logs_when_balance_actually_changes(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+        self.events.clear()
+
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=47.5):
+            self.engine.refresh_live_equity()
+
+        balance_logs = [e for e in self.events if e.get("type") == "log" and "BALANCE updated" in e.get("text", "")]
+        self.assertEqual(len(balance_logs), 1)
+        self.assertIn("$47.50", balance_logs[0]["text"])
+        self.assertIn("$42.50", balance_logs[0]["text"])
+
+    def test_does_not_log_when_balance_is_unchanged(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.arm_live()
+        self.events.clear()
+
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.refresh_live_equity()
+
+        balance_logs = [e for e in self.events if e.get("type") == "log" and "BALANCE updated" in e.get("text", "")]
+        self.assertEqual(balance_logs, [])
+
+    def test_does_not_log_on_the_very_first_call(self):
+        # No previous balance cached yet -- nothing to compare against.
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=42.5):
+            self.engine.armed_live = True
+            self.engine.refresh_live_equity()
+
+        balance_logs = [e for e in self.events if e.get("type") == "log" and "BALANCE updated" in e.get("text", "")]
+        self.assertEqual(balance_logs, [])
+
+    def test_is_a_no_op_in_paper_mode(self):
+        self.engine.armed_live = False
+        self.engine.refresh_live_equity()
+        self.assertEqual(self.events, [])
+
+
+class PositionMarkPriceTests(unittest.TestCase):
+    """Item J (GEMZ4US, 2026-09-20): EQUITY valued every adopted position
+    at cost, never market, because _equity()'s per-position fallback
+    always used entryPriceUsd whenever no scan snapshot existed for that
+    symbol -- true for every call except the scan loop itself. Fixed via
+    an opt-in fetch_missing_prices flag: on for the low-frequency,
+    deliberate call sites (end of a scan cycle, adopt, clear_halt, sync),
+    off for refresh_live_equity() (polled every few seconds by the phone
+    dashboard -- a live per-position fetch there would hammer the price
+    API on every poll)."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.pos = {"symbol": "LINK", "address": TOKEN_ADDRESS, "chain": "ethereum", "entryPriceUsd": 10.0}
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_uses_the_snap_price_when_available_regardless_of_the_flag(self):
+        snaps = [{"symbol": "LINK", "priceUsd": 12.0}]
+        with patch.object(engine_mod.market, "current_price") as mock_price:
+            price = self.engine._position_mark_price(self.pos, snaps, fetch_missing_prices=True)
+        self.assertAlmostEqual(price, 12.0)
+        mock_price.assert_not_called()  # a snap already answers it — no network call needed
+
+    def test_falls_back_to_cost_when_flag_is_off(self):
+        with patch.object(engine_mod.market, "current_price") as mock_price:
+            price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=False)
+        self.assertAlmostEqual(price, 10.0)
+        mock_price.assert_not_called()
+
+    def test_fetches_live_price_when_flag_is_on_and_no_snap(self):
+        with patch.object(engine_mod.market, "current_price", return_value=8.5) as mock_price:
+            price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        self.assertAlmostEqual(price, 8.5)
+        mock_price.assert_called_once_with(TOKEN_ADDRESS, "ethereum")
+
+    def test_falls_back_to_cost_if_the_live_fetch_itself_fails(self):
+        with patch.object(engine_mod.market, "current_price", side_effect=RuntimeError("boom")):
+            price = self.engine._position_mark_price(self.pos, [], fetch_missing_prices=True)
+        self.assertAlmostEqual(price, 10.0)
+
+    def test_adopt_one_equity_reflects_market_not_cost(self):
+        # Same scenario GEMZ4US reported: LINK adopted at market ($12.55),
+        # itself now worth less ($10) -- EQUITY must move with the market
+        # price, not silently freeze at the adopted cost basis.
+        self.engine.armed_live = True
+        info = {"qty": 0.259318, "priceUsd": 12.550213, "costUsd": 3.26, "txHash": TX_HASH}
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=2.19), \
+             patch.object(live_mod, "adopt_from_tx", return_value=info), \
+             patch.object(engine_mod.market, "current_price", return_value=10.0):
+            result = self.engine.adopt_one(f"LINK:{TOKEN_ADDRESS}:{TX_HASH}")
+
+        self.assertTrue(result["ok"])
+        expected_equity = 2.19 + 0.259318 * 10.0  # balance + market value, not cost ($3.26)
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected_equity, places=4)
+
+
+class EquityRefreshOnLowFrequencyActionsTests(unittest.TestCase):
+    """GEMZ4US, 2026-09-21 (Item C): "2 ARMs, one sync, one interrupted
+    scan" all still showed EQUITY = BALANCE + cost, even after the
+    2026-09-20 EQUITY-at-cost fix. Traced further: arm_live() had its OWN
+    separate, cost-only open_usd calculation that never went through
+    _equity()/_position_mark_price at all; sync_positions() only
+    refreshed EQUITY when a reconcile found something to change, leaving
+    the common "already matches" case exactly as stale as before; and
+    stop() never recomputed EQUITY either, so a scan interrupted by
+    stopping mid-cycle never reached _cycle()'s own end-of-scan refresh."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        # signerGranted since 1.12.0: this test calls arm_live(), which refuses
+        # a wallet whose server-side signer was never authorized.
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": True})
+        self.engine.state["livePositions"] = [
+            {"symbol": "LIT", "address": TOKEN_ADDRESS, "chain": "ethereum",
+             "qty": 2.0, "entryPriceUsd": 10.0, "costUsd": 20.0, "openedAt": engine_mod._now_iso()},
+        ]
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_arm_live_values_open_positions_at_market_not_cost(self):
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=7.0) as mock_price:
+            result = self.engine.arm_live()
+
+        self.assertTrue(result["ok"])
+        expected = 5.0 + 2.0 * 7.0  # balance + market value, not cost (2.0 * 10.0 = 20.0)
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected)
+        self.assertAlmostEqual(self.engine.state["liveStartingEquityUsd"], expected)
+        mock_price.assert_any_call(TOKEN_ADDRESS, "ethereum")
+
+    def test_sync_refreshes_equity_even_when_nothing_changed(self):
+        self.engine.armed_live = True
+        self.engine.state["lastLiveEquityUsd"] = 999.0  # stale, deliberately wrong
+        with patch.object(live_mod, "token_balance", return_value=2.0), \
+             patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=7.0):
+            result = self.engine.sync_positions()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["message"], "positions already match on-chain balances")
+        expected = 5.0 + 2.0 * 7.0
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected)
+
+    def test_stop_refreshes_live_equity(self):
+        self.engine.armed_live = True
+        self.engine.state["lastLiveEquityUsd"] = 999.0  # stale, deliberately wrong
+        self.engine.running = True
+        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=7.0):
+            self.engine.stop()
+
+        expected = 5.0 + 2.0 * 7.0
+        self.assertAlmostEqual(self.engine.state["lastLiveEquityUsd"], expected)
+
+    def test_stop_refreshes_paper_equity(self):
+        self.engine.armed_live = False
+        self.engine.running = True
+        self.engine.state["positions"] = [
+            {"symbol": "LIT", "address": TOKEN_ADDRESS, "chain": "ethereum",
+             "qty": 2.0, "entryPriceUsd": 10.0, "costUsd": 20.0, "openedAt": engine_mod._now_iso()},
+        ]
+        self.engine.state["balanceUsd"] = 5.0
+        self.engine.state["lastEquityUsd"] = 999.0  # stale, deliberately wrong
+        with patch.object(engine_mod.market, "current_price", return_value=7.0):
+            self.engine.stop()
+
+        expected = 5.0 + 2.0 * 7.0
+        self.assertAlmostEqual(self.engine.state["lastEquityUsd"], expected)
+
+
+class ScanCadenceTests(unittest.TestCase):
+    """GEMZ4US, Item C (2026-09-20): confirmed by exact timestamps across
+    three consecutive scans that the real period between scan starts was
+    cycle_duration + intervalMinutes, not just intervalMinutes -- _loop()
+    only started its wait after _cycle() had already finished. Subtracting
+    the cycle's own elapsed time makes scans start at the configured
+    cadence instead."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_wait_is_reduced_by_the_cycles_own_duration(self):
+        self.engine.config["intervalMinutes"] = 5  # 300s
+        self.engine.running = True
+        captured = {}
+
+        def fake_wait(seconds):
+            captured["seconds"] = seconds
+            self.engine.running = False  # stop after this one iteration
+
+        with patch.object(engine_mod.time, "monotonic", side_effect=[100.0, 145.0]), \
+             patch.object(self.engine, "_cycle", return_value=None), \
+             patch.object(self.engine._wake_event, "wait", side_effect=fake_wait):
+            self.engine._loop()
+
+        self.assertAlmostEqual(captured["seconds"], 300 - 45)
+
+    def test_wait_never_goes_negative_when_the_cycle_outruns_the_interval(self):
+        self.engine.config["intervalMinutes"] = 5  # 300s
+        self.engine.running = True
+        captured = {}
+
+        def fake_wait(seconds):
+            captured["seconds"] = seconds
+            self.engine.running = False
+
+        # Cycle took 400s -- longer than the configured 300s interval.
+        with patch.object(engine_mod.time, "monotonic", side_effect=[100.0, 500.0]), \
+             patch.object(self.engine, "_cycle", return_value=None), \
+             patch.object(self.engine._wake_event, "wait", side_effect=fake_wait):
+            self.engine._loop()
+
+        self.assertEqual(captured["seconds"], 0)
+
+
+class ExitsCoverOffWatchlistPositionsTests(unittest.TestCase):
+    """Investigating Item J (GEMZ4US, 2026-09-20): a position not on the
+    watchlist never appeared in a scan cycle's snaps, so _cycle()'s exits
+    loop silently `continue`d past it -- no stop-loss, no take-profit, no
+    max-hold, ever, for as long as it stayed off the watchlist. Every
+    position opened via `adopt` is in exactly this state, since
+    adopt_one() never adds one to the watchlist -- directly contradicting
+    its own warning that "starting the trader will sell this on the next
+    scan". Fixed by fetching the position's price directly instead of
+    skipping it. No real network calls: market.snapshot/current_price and
+    live_mod.token_balance are mocked; analyze() is mocked to never
+    propose a buy, since this test isn't exercising that path."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS})
+        self.engine.armed_live = True
+        self.engine.running = True
+        for flag in ("autoDiscoverTrending", "autoDiscoverVolumeSpikes", "autoDiscoverMemeCoins"):
+            self.engine.config[flag] = False
+        self.engine.config["watchlist"] = [{"symbol": "WATCHED", "chain": "ethereum", "address": "0x" + "11" * 20}]
+        self.engine.config["stopLossPct"] = 2
+        self.engine.config["takeProfitPct"] = 1000
+        self.engine.config["maxHoldHours"] = 999
+        self.engine.state["livePositions"] = [
+            {"symbol": "WATCHED", "address": "0x" + "11" * 20, "chain": "ethereum",
+             "qty": 10, "entryPriceUsd": 1.0, "costUsd": 10.0, "openedAt": engine_mod._now_iso()},
+            {"symbol": "ADOPTED", "address": "0x" + "22" * 20, "chain": "ethereum",
+             "qty": 5, "entryPriceUsd": 10.0, "costUsd": 50.0, "openedAt": engine_mod._now_iso()},
+        ]
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run_cycle_with(self, adopted_price_usd):
+        watched_snap = {"symbol": "WATCHED", "address": "0x" + "11" * 20, "chain": "ethereum", "priceUsd": 1.0, "candles": []}
+        sold = []
+
+        def fake_execute_sell(pos, price_usd, reason, *a, **kw):
+            sold.append((pos["symbol"], price_usd, reason))
+
+        with patch.object(live_mod, "token_balance", side_effect=lambda chain, addr, owner: (
+            10 if addr == "0x" + "11" * 20 else 5
+        )), \
+             patch.object(engine_mod.market, "snapshot", return_value=watched_snap), \
+             patch.object(engine_mod.market, "current_price", return_value=adopted_price_usd) as mock_price, \
+             patch.object(engine_mod, "analyze", return_value={"symbol": "WATCHED", "direction": "sell", "score": 0}), \
+             patch.object(self.engine, "_execute_sell", side_effect=fake_execute_sell):
+            self.engine._cycle()
+        return sold, mock_price
+
+    def test_off_watchlist_position_past_stop_loss_is_still_sold(self):
+        # Entry $10, now $5 -- -50%, well past the 2% configured stop-loss.
+        sold, mock_price = self._run_cycle_with(adopted_price_usd=5.0)
+
+        adopted_sales = [s for s in sold if s[0] == "ADOPTED"]
+        self.assertEqual(len(adopted_sales), 1, "adopt_one()'s own warning promises exactly this")
+        _, price_usd, reason = adopted_sales[0]
+        self.assertAlmostEqual(price_usd, 5.0)
+        self.assertIn("stop-loss", reason)
+        mock_price.assert_any_call("0x" + "22" * 20, "ethereum")
+
+    def test_off_watchlist_position_within_bounds_is_not_sold(self):
+        # Entry $10, now $9.90 -- -1%, inside the 2% configured stop-loss.
+        sold, _ = self._run_cycle_with(adopted_price_usd=9.90)
+
+        self.assertEqual([s for s in sold if s[0] == "ADOPTED"], [])
 
 
 class SeraphWalletGateTests(unittest.TestCase):

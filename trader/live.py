@@ -553,11 +553,13 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
         tx = {"to": v3_router, "data": data, "value": amount_in_wei}
 
     gate = None
+    price_impact_bps = None
     if not bypass_gate:
         gate = require_allow(chain, tx, status["address"])
-        if max_price_impact_bps is not None and gate.get("priceImpactBps") is not None and gate["priceImpactBps"] > max_price_impact_bps:
+        price_impact_bps = gate.get("priceImpactBps")
+        if max_price_impact_bps is not None and price_impact_bps is not None and price_impact_bps > max_price_impact_bps:
             raise RuntimeError(
-                f"Seraph simulation shows {gate['priceImpactBps'] / 100:.2f}% price impact "
+                f"Seraph simulation shows {price_impact_bps / 100:.2f}% price impact "
                 f"(max allowed {max_price_impact_bps / 100:.2f}%) — thin liquidity, skipping"
             )
 
@@ -584,7 +586,21 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
     qty = amount_out / (10 ** decimals)
     cost_usd = trade_size_usd + gas_usd
 
-    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd}
+    # GEMZ4US, Item E (2026-09-21): a real sell routed through a $51-
+    # liquidity V2 pool at ~15% worse than a $67K pool quoted at the same
+    # time, only discoverable afterward on Etherscan — neither the DEX
+    # actually used nor the simulated price impact was ever surfaced
+    # anywhere. Not adding an automatic block here (that's the risky,
+    # one-way call the buy side already makes for a *voluntary* entry —
+    # a real design question for a *protective* sell instead, since
+    # blocking it could leave a losing position stuck open); just making
+    # the routing decision visible instead of Etherscan-only.
+    #
+    # gasQuoteWei/gasSignedWei are deliberately NOT reported since 1.12.0:
+    # the desktop no longer quotes or signs gas locally (the Seraph wallet
+    # does, server-side), so there is no local quote to compare against.
+    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd,
+            "dex": quote["dex"], "priceImpactBps": price_impact_bps}
 
 
 def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None = None, cost_basis_usd: float | None = None, bypass_gate: bool = False) -> dict:
@@ -638,8 +654,10 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
     # real gas/signature, so it must not fire unless the swap itself is
     # already known-good.
     gate = None
+    price_impact_bps = None
     if not bypass_gate:
         gate = require_allow(chain, tx, status["address"])
+        price_impact_bps = gate.get("priceImpactBps")
         if gate.get("expectedAmountOut") is not None and min_net_profit_usd is not None:
             simulated_proceeds_usd = float(Web3.from_wei(gate["expectedAmountOut"], "ether")) * eth_price_usd
             gas_units = gas_estimate if gas_estimate is not None else 200000
@@ -666,7 +684,10 @@ def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None =
         gas_usd = 0
 
     proceeds_usd = float(Web3.from_wei(amount_out, "ether")) * eth_price_usd - gas_usd
-    return {"txHash": tx_hash, "proceedsUsd": proceeds_usd, "ethPriceUsd": eth_price_usd}
+    # Item E (2026-09-21): see live_buy's matching comment — routing
+    # decision made visible instead of Etherscan-only, no automatic block.
+    return {"txHash": tx_hash, "proceedsUsd": proceeds_usd, "ethPriceUsd": eth_price_usd,
+            "dex": quote["dex"], "priceImpactBps": price_impact_bps}
 
 
 # Conservative gas estimate for WETH9's withdraw() — a single storage
