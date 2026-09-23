@@ -908,11 +908,38 @@ class TraderPanel(QWidget):
             # it BEFORE the call, on this same worker thread, so then_fn can
             # tell "never had one" apart from "had one, this call wiped it."
             had_credential = mcp_client.has_credentials()
-            result = mcp_client.mcp_call(mcp_client.SERAPH_SERVER_ID, "guardian_wallet_status", {})
+            try:
+                result = mcp_client.mcp_call(mcp_client.SERAPH_SERVER_ID, "guardian_wallet_status", {})
+            except Exception as err:
+                # Defensive: _background's own except-branch would otherwise
+                # substitute a differently-shaped {"ok": False, "message": ...}
+                # dict here, which then_fn's tuple-unpack below would silently
+                # misinterpret (2 dict keys unpack as if they were the tuple's
+                # two elements) instead of erroring loudly. Keep the shape
+                # then_fn actually expects even on an unexpected exception.
+                result = {"ok": False, "error": f"unexpected: {err}"}
             return result, had_credential
 
         def then_fn(work_result):
             result, has_local_credential = work_result
+            # GEMZ4US, 2026-09-24 (v1.12.4 retest): four straight fixes to
+            # this method's error branch changed nothing, which — since
+            # every one of those fixes is gated on `error` being truthy —
+            # is only possible if `error` was never truthy to begin with.
+            # Stop guessing at the failure shape and log the raw response
+            # unconditionally, so the next retest shows ground truth instead
+            # of another blind hypothesis: either guardian_wallet_status is
+            # genuinely succeeding with an empty/no-wallet payload (a Seraph-
+            # side data question, not fixable here), or it's failing with an
+            # error string none of v1.12.2-v1.12.4 anticipated.
+            if result.get("ok"):
+                self._append_feed_text(
+                    f"SYS: [diag] guardian_wallet_status ok=True text={result.get('text', '')[:300]!r}"
+                )
+            else:
+                self._append_feed_text(
+                    f"SYS: [diag] guardian_wallet_status ok=False error={result.get('error')!r}"
+                )
             error = None if result.get("ok") else (result.get("error") or "unknown error")
             rejected_despite_credential = (
                 error in ("seraph_login_required", "seraph_unauthorized") and has_local_credential
