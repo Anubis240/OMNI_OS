@@ -575,7 +575,7 @@ Evidências fornecidas para esta atualização documental, não reexecutadas aqu
 | Phase | Status | Testes | Commits |
 |---|---|---|---|
 | W4.P1 | ✔ concluída + QA — ver §16 | desktop 201 → **369 testes, OK (skipped=3)**; 14 testes OAuth + 18 de execução | `12b8b30`, `6e4af63`, `e6ca681`, `1f40e54`, `36c65d0`, `1675165`, `312b497`, `b92d5c2` |
-| W4.P2 | **BLOQUEADA** — exige W1c.P3 e W2.P5 (deploys adiados por decisão explícita do usuário), mais um humano com ≥0,005 ETH em Base | — | — |
+| W4.P2 | **BLOQUEADA — somente por humano.** W1c.P3 e W2.P5 foram concluídas (backend e console em produção, smoke verde — ver §6); resta apenas um humano com ≥0,005 ETH em Base para rodar 1 swap real de 0,001 ETH | — | — |
 | W4.P3 | **BLOQUEADA** — exige W4.P2 e um humano | — | — |
 | W5 | **Parcialmente concluída** — documentação, comentários de packaging e suítes finais concluídos; build, QA global e release pendentes — ver §17 | contagens finais em §17 | `af0dc67`, `75c26db`, `84c23a7` |
 | W5.P1 | ✔ concluída — PRD e release notes | zero ocorrências das 11 strings proibidas, conforme verificação do orquestrador | `af0dc67`, `75c26db` |
@@ -985,4 +985,106 @@ Os 3 skips do Omni-OS são pré-existentes e alheios a este trabalho: 1 em `test
 - PyInstaller ausente (`import PyInstaller` → `ModuleNotFoundError`) torna W5.P2.T2 **não executável** neste ambiente; build frozen e checks do `dist/` ficam pendentes (E35).
 - W4.P2 (smoke em produção) não fechada bloqueia W5.P3.T1 (QA global da Seção 6).
 - W5.P4 (bump 1.12.0 + tag) exige os itens 1–10 da aceitação global verdes **E** o UAT humano W4.P3 aprovado. Nenhum dos dois está satisfeito; W4.P2 e W4.P3 permanecem bloqueadores.
-- O bloqueador de release `DESKTOP_CLIENT_ID` continua aberto.
+- ~~O bloqueador de release `DESKTOP_CLIENT_ID` continua aberto.~~ **RESOLVIDO** — `DESKTOP_CLIENT_ID = mcp_x9EaT99za5SqJARYgWGp5tTj` está fixado no `wrangler.toml` do control-plane (prod e preview) e deployado; ver §18.
+
+---
+
+## 18. Fechamento pós-W5 — CI destravado e merge de `origin/main`
+
+Duas tarefas de infraestrutura executadas depois da W5, ambas concluídas. Nenhuma toca a lógica de custódia; a segunda a atravessa e foi auditada linha por linha.
+
+### 18.1 CI do Omni-OS destravado (PR #1)
+
+O CI (`.github/workflows/ci.yml`) estava vermelho **desde antes deste trabalho**. Como `build: needs: test` e `release: needs: [test, build]`, isso bloqueou a publicação de **1.11.8 a 1.11.15** — o último release publicado é o **v1.11.7**.
+
+**Causa raiz do vermelho original:** o job `test` rodava `python -S -m unittest discover` sem instalar `requirements.txt`, e o `-S` remove `site-packages` do `sys.path`.
+
+Três commits pré-existentes no branch `fix/ci-test-dependencies` já atacavam isso: `736b598` (instala deps num venv e remove o `-S`), `76693c9` (`libegl1 libgl1` + as 5 libs xcb no Linux) e `c370938` (`xvfb` + `DISPLAY` no `$GITHUB_ENV`). Windows e macOS passaram; **Linux continuou falhando em 2 casos** de `tests/test_macos_package_diagnostics.py`, com o sintoma `AssertionError: Expected 'sleep' to not have been called. Called 11 times.`
+
+**A hipótese do handover estava errada.** O diagnóstico era "estender um skip de plataforma para o Linux". Não é um problema de plataforma: o arquivo tem **um único** skip (linha 377, `skipIf(sys.platform == "win32")`) e ele é de outro assunto. A causa real é contaminação de mock entre threads:
+
+1. `unittest discover` **importa todos** os módulos de teste antes de rodar qualquer teste.
+2. `tests/test_main_connect_timeout.py:15` faz `import main`.
+3. `ui.py:357` tem `_metrics = _SysMetrics()` em nível de módulo, e `_SysMetrics.__init__` sobe uma **thread daemon**.
+4. Essa daemon roda `while self._running: ...; time.sleep(1.5)` e, dentro do `_update()`, chama `subprocess.run(["nvidia-smi", ...])` (e `rocm-smi` no Linux).
+5. A fixture `native_fixture` fazia `patch.object(bundle.time, "sleep")`, `patch.object(bundle.subprocess, "run")` etc. — e `bundle.time` / `bundle.subprocess` **são os objetos de módulo da stdlib, compartilhados pelo processo inteiro**. O patch valia para toda thread viva.
+6. Consequências: os `sleep` da daemon entravam no mock e viravam no-op (busy-spin); o `nvidia-smi` dela era roteado para `native_run`, que registrava o comando e levantava `KeyError: 'check'` (engolido pelo `except Exception: pass` da daemon); e os processos filhos herdavam o CWD da fixture, prendendo a árvore temporária no Windows (`PermissionError: [WinError 32]`).
+
+O Windows **também** falhava (`Ran 232 tests`, `FAILED (errors=1, skipped=3)`), ao contrário do que o handover registrava.
+
+**Correção (2 commits, nenhuma asserção enfraquecida, nenhum teste deletado ou skipado):**
+
+| Commit | O que faz |
+|---|---|
+| `dad96d2` | Primeira versão do escopo por thread para o `sleep`, mais o endurecimento do Xvfb no workflow: adiciona `x11-utils`, sobe `Xvfb :99 -screen 0 1920x1080x24 -ac`, cria `~/.Xauthority` vazio, espera com `xdpyinfo` em loop de até 30s, tem um `xdpyinfo` final como gate fail-fast e exporta `XAUTHORITY` junto com `DISPLAY`. Sem isso o Linux dava `Xlib.error.XauthError: ~/.Xauthority: [Errno 2]`. |
+| `a6f57e3` | Generaliza para um helper único `own_thread_only(stack, module, name, replacement=None)`, aplicado a `tempfile.mkdtemp`, `shutil.copytree`, `shutil.rmtree`, `subprocess.run`, `time.sleep` e `subprocess.Popen`. Ele captura o original **antes** de patchar e despacha por `threading.get_ident()`: a thread que abriu a fixture vê o `Mock`, qualquer outra thread vê a função real. |
+
+`patch.object(bundle.sys, "platform", "darwin")` e os `patch.object(bundle.platform, ...)` ficaram como patches simples — **valores** não se escopam por thread. Exposição limitada, porque a única outra thread ativa é a de métricas.
+
+**Evidência coletada pelo orquestrador (não delegada):**
+
+- `actionlint` pinado (`rhysd/actionlint:1.7.11 -shellcheck=`) exit 0.
+- `discover -p test_macos_package_diagnostics.py` → 18 testes, `OK (skipped=1)`.
+- Suíte completa do branch → `Ran 232 tests`, `OK (skipped=3)`.
+- **Probe determinístico** (criado no repo, rodado, e apagado): entrou na `native_fixture()` e chamou `sleep`/`run`/`Popen` de uma thread estrangeira. **Sem** a correção: `sleep` retornava em 0,000s e poluía o mock com `call(0.4)`; `subprocess.run` caía em `native_run` e levantava `KeyError: 'check'`. **Com** a correção: `FOREIGN_SLEEP_REAL True (0.400s)`, `FOREIGN_RUN_REAL True`, `FOREIGN_POPEN_REAL True`, e poluição de SLEEP/COMMANDS/EVENTS/RMTREE toda `[]` → `VERDICT: ISOLATED`.
+- O mesmo probe confirmou que `threading.enumerate()` depois de `import main` contém `Thread-1 (_loop)`.
+- **CI run `35811567401` em `a6f57e3`: os quatro jobs `test` verdes** (ubuntu-22.04 3.12, macos-15 3.12, windows-2022 3.12, windows-2022 3.11). `build` e `release` `skipped` — são disparados por push de tag, por design.
+
+PR #1 mergeado (`gh pr merge 1 --merge`); `origin/main` avançou `0cbdc15..af1a215`. **Releases destravados.**
+
+**Dívida registrada, deliberadamente NÃO corrigida aqui** (um PR cujo objetivo é destravar o CI não é o lugar): `ui.py:357` subir uma thread daemon em tempo de import é um perigo latente para qualquer teste futuro que patche um global compartilhado. A correção certa é lazy-init das métricas, não mais escopo de mock.
+
+### 18.2 Merge dos 22 commits de `origin/main` (1.11.13 → 1.11.15)
+
+`origin/main` avançou de `a9a5901` (base do trabalho) até `0cbdc15`, 22 commits, tocando **exatamente** os arquivos que esta wave reescreveu: `trader/engine.py`, `trader/live.py`, `trader_panel.py`, `omni-os.spec`, `installer/installer.iss`, mais o novo `VERSION` e `core/app_paths.py`. 16 arquivos, +1121/−176.
+
+Resolvido num branch descartável (`tmp/merge-probe`) cortado de `feat/omni-os-desktop-oauth`, nunca no `main`. **6 arquivos em conflito, 13 conflitos.** Cada um resolvido lendo os dois lados.
+
+| Arquivo | Resolução |
+|---|---|
+| `installer/installer.iss` | Mantido `#define AppVersion "1.12.0"` dentro do `#ifndef`, para o CI poder sobrescrever. |
+| `VERSION` (novo) | Reescrito de `1.11.15` para `1.12.0`, bytes verificados `49,46,49,50,46,48,10` (LF, sem BOM). **É assim que o rebump de 1.11.15 para 1.12.0 foi feito.** |
+| `omni-os.spec` | Tomado o lado do `origin/main`: `APP_VERSION = os.environ.get("APP_VERSION") or (PROJECT_DIR / "VERSION").read_text(...)`, descartando o literal `"1.12.0"` do HEAD. O `origin/main` fez do arquivo `VERSION` a fonte única de verdade (lida por `core/app_paths.py::get_app_version()`), o que é o design melhor. Confirmado que o spec ainda levanta `RuntimeError("CI must supply validated APP_VERSION")` sob `CI`, ainda valida `X.Y.Z`, e ainda embarca o `VERSION` em `datas`. |
+| `trader/live.py` (4) | O `origin/main` referenciava `gas_quote`, que **não existe** na 1.12.0 (a assinatura local foi removida) — manter aquele lado daria `NameError`. Nos dois caminhos (`live_buy` e `live_sell`) emitidos **ambos** `gate = None` e `price_impact_bps = None`, porque o código já auto-mergeado abaixo lê os dois. Nos dois `return`, mantidos `"dex"` e `"priceImpactBps"` do `origin/main` e **descartados** `"gasQuoteWei"`/`"gasSignedWei"`: sob custódia server-side não existe fonte local desses números, e derivá-los do `maxFeePerGasWei` do gate seria enganoso. |
+| `trader/engine.py` (3) | `_gas_quote_log_line` do `origin/main` lê `live_mod.wallet.GAS_PRICE_BUFFER_PCT`. Verificado que `trader/wallet.py` **não existe mais** (deletado pela 1.12.0), que `live.py` não importa `wallet` e que `GAS_PRICE_BUFFER_PCT` não existe em lugar nenhum: a função já nasceria quebrada. **Não mergeada**, com comentário registrando o motivo. `_route_log_line` **foi** mantida (as chaves que ela consome sobrevivem). |
+| `trader_panel.py` (1) | **Os dois lados combinados**: o timer de 30s de BALANCE do `origin/main` (Item D) *e* o gate de credencial do HEAD (`has_credentials()` → desabilita o painel → mostra o overlay). Descartados o check redundante via `get_default_client().api_key` e um `self._mcp_key_overlay = None` duplicado. |
+| `tests/test_trader_engine.py` (3) | O driver de merge **sobrepôs** classes independentes, porque os esqueletos de `setUp`/`tearDown` coincidem parcialmente. Resolvido comparando os três estágios do índice (`git show :1: :2: :3:`) e **reconstruindo a cauda a partir deles** em vez de editar marcadores intercalados. Resultado: exatamente as 13 classes pretendidas, 0 marcadores, `ast.parse` OK. |
+
+**O achado mais importante desta resolução.** A comparação dos estágios provou que `GasQuoteLogLineTests` existe na **BASE** e foi **deletada pelo lado da 1.12.0**. Ou seja: descartá-la **preserva uma deleção deliberada da wave**, não é uma deleção nova de teste — e confirma independentemente a decisão tomada no `engine.py`.
+
+**O único choque semântico real.** A primeira suíte completa deu **400 testes, 2 falhas**, ambas em testes novos do `origin/main` que chamam `arm_live()` com `wallet_status` sem `signerGranted` — que a 1.12.0 **corretamente recusa**. Corrigido acrescentando `"signerGranted": True` **apenas nessas duas fixtures**, com comentário explicando que desde a 1.12.0 `arm_live()` recusa carteira não autorizada. **O gate não foi enfraquecido**; a intenção de cada teste foi preservada.
+
+**Invariantes de custódia — as quatro verificadas PASS depois do merge:**
+
+1. Zero ocorrências de `sign_transaction|from_key|local_wallet|eth_account` em `trader\*.py`, `actions\*.py` e `trader_panel.py`. O único hit no repo para `trader.wallet`/`local_wallet` é `tests/test_trader_panel_format.py:230` — o teste-guarda que **asserta a ausência** dessas strings.
+2. `trader/live.py:378` chama `_mcp_call("guardian_execute", {"requestId": request_id})` — só o `requestId`.
+3. `arm_live()` contém `if not ws.get("connected") or not ws.get("signerGranted"): return {"ok": False, ...}`.
+4. `_execute_via_guardian` tem `if gate is None: gate = require_allow(chain, tx, from_addr)` e depois recusa sem `requestId` — portanto `bypass_gate` pula **somente** as checagens locais de pré-voo, **nunca** o gate de transação.
+
+**Features do `origin/main` confirmadas sobreviventes:** roteamento de pool (Item E), BALANCE periódico (Item D), EQUITY a mercado para posições fora da watchlist, stop-loss/take-profit dessas posições, cadência de scan a partir do fim do ciclo anterior, versão do app na UI, aviso de rejeição do Config, tamanho do label do checkbox de chain, e as adições do `main.py` (`PLAYBACK_TAIL_S`, watchdog de voz/sessão, tool `get_current_time`). O `main.py` auto-mergeou sem conflito — o gate de OAuth vive em `trader/seraph_auth.py` e no overlay do painel, não nele.
+
+**Aceitação, medida pelo orquestrador:** suíte completa **num único processo** (de propósito: interação de ordem de import entre módulos foi exatamente a classe de bug de §18.1) → **`Ran 400 tests in 352.789s` / `OK (skipped=3)`**. Os 400 = 369 da baseline + 33 novos − 2 da deleção preservada de `GasQuoteLogLineTests`.
+
+**Dívida de tempo de suíte registrada, NÃO induzida pelo merge.** Medindo módulo a módulo: `test_wallet_execution_integration.py` 18 testes / **194s** e `test_seraph_oauth_integration.py` 14 testes / **138s** — 332s dos 353s totais. São testes da própria 1.12.0: sobem um servidor HTTPS local (`tests/fake_seraph_as.py`, versionado) e rodam um fluxo OAuth real mais assinatura P-256 contra o localhost, com `timeout=10` e `login(timeout_s=20)`. São herméticos (nada de internet) e as dependências estão no `requirements.txt` (`fastapi`, `uvicorn[standard]`, `cryptography`). Próximo mais lento: `test_trader_engine.py`, 62 testes / 16s.
+
+### 18.3 Estado final dos refs
+
+| Ref | Valor | Observação |
+|---|---|---|
+| `origin/main` | `7d181b1` | "Merge origin/main into the 1.12.0 Seraph-custody branch"; pushado como fast-forward de `af1a215` |
+| `origin/feat/omni-os-desktop-oauth` | `7d181b1` | branch criado no remoto |
+| tag `v1.12.0` | `7d181b1` | **somente local; deliberadamente NÃO pushada** |
+
+Provado antes de mexer no `main`: `git diff --stat 5ffa873 dd51b34` **vazio** (árvores idênticas) e `dd51b34` já era ancestral — logo resetar o `main` local obsoleto (`5ffa873`, nunca pushado) foi sem perda.
+
+**Por que a tag não foi pushada** (desvio consciente do "main + tag + push" do handover): o push da tag dispara o job `release` e publicaria instaladores **antes** de W4.P2 (smoke real em Base) e W4.P3 (UAT humano de 14 passos), que este próprio log registra como bloqueadores de W5.P4 e da DoD global. Além disso as release notes mandam o usuário **mover fundos da carteira local antiga antes de atualizar** — publicar antes do UAT arriscaria entregar um caminho de custódia quebrado. A tag já havia sido pushada por acidente e deletada do remoto uma vez.
+
+### 18.4 O que resta
+
+Somente trabalho que exige humano:
+
+- **W4.P2** — 1 swap real de 0,001 ETH em Base via `docs/plans/scripts/smoke-execute-base.py`. Precisa de um humano com ≥0,005 ETH. Nunca commitar o `settings.json`.
+- **W4.P3** — UAT humano de 14 passos (roteiro nas linhas 832-846 do plano). Bloqueia a DoD global e, por consequência, o push da tag.
+- **W5.P2.T2** — build PyInstaller, não executável neste ambiente (PyInstaller ausente).
+- **W5.P3.T1** — QA global da Seção 6, dependente de W4.P2.
+- **W5.P4** — bump + tag, dependente da aceitação global e do UAT.
