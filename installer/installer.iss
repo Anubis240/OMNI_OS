@@ -6,7 +6,7 @@
 
 #define AppName "Omni-OS"
 #ifndef AppVersion
-#define AppVersion "1.12.3"
+#define AppVersion "1.12.4"
 #endif
 #define AppPublisher "Kondux"
 #define AppURL "https://kondux.io"

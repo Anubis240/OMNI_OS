@@ -896,24 +896,24 @@ class TraderPanel(QWidget):
         """Refresh the wallet block from guardian_wallet_status, off the GUI
         thread. Never called synchronously from a paint or click path."""
         def work_fn():
-            return mcp_client.mcp_call(mcp_client.SERAPH_SERVER_ID, "guardian_wallet_status", {})
+            # GEMZ4US, 2026-09-24 (v1.12.3 retest): v1.12.3's has_credentials()
+            # check still never fired, because it ran in then_fn — AFTER the
+            # call already failed. On a 401 that fails to recover,
+            # _call_with_auth_retry calls auth.invalidate_session(), which
+            # wipes the persisted api_key field (_clear_session in
+            # seraph_auth.py) before returning. By the time then_fn checked
+            # has_credentials(), the credential the call itself had just
+            # deleted was already gone — so the check always saw "no
+            # credential" regardless of whether one existed going in. Capture
+            # it BEFORE the call, on this same worker thread, so then_fn can
+            # tell "never had one" apart from "had one, this call wiped it."
+            had_credential = mcp_client.has_credentials()
+            result = mcp_client.mcp_call(mcp_client.SERAPH_SERVER_ID, "guardian_wallet_status", {})
+            return result, had_credential
 
-        def then_fn(result):
+        def then_fn(work_result):
+            result, has_local_credential = work_result
             error = None if result.get("ok") else (result.get("error") or "unknown error")
-            # GEMZ4US, 2026-09-24 (v1.12.2 retest): my first cut of this fix
-            # (still) suppressed "seraph_login_required"/"seraph_unauthorized"
-            # as an always-legitimate not-logged-in state — wrong. Both codes
-            # are also what _call_with_auth_retry returns after a genuine
-            # 401 from THIS call fails to recover (remint attempted, retried,
-            # still rejected) and it calls auth.invalidate_session() as a
-            # side effect — which can happen even moments after a real,
-            # confirmed sign-in, exactly what GEMZ4US's clean disconnect/
-            # re-auth cycles kept reproducing. Trusting the error string
-            # alone can't distinguish "never logged in" from "was logged in,
-            # this specific call got rejected and gave up" — but a fresh
-            # has_credentials() check can: if a secret still exists locally,
-            # this isn't the ordinary empty/not-connected state.
-            has_local_credential = mcp_client.has_credentials()
             rejected_despite_credential = (
                 error in ("seraph_login_required", "seraph_unauthorized") and has_local_credential
             )
