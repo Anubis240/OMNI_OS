@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
@@ -126,6 +127,20 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
                 raise self.detach_error if stage.startswith("detach-") else self.native_error
             return subprocess.CompletedProcess(command, 0, stdout, "native stderr")
 
+        # patch.object(bundle.time, ...) rebinds the process-wide time module, so
+        # every live thread shares the mock. Importing the application starts a
+        # daemon metrics loop that sleeps forever, which would both record its
+        # own delays here and busy-spin once its sleep became a no-op. Record
+        # only this thread and let foreign threads keep sleeping for real.
+        owner = threading.get_ident()
+        real_sleep = bundle.time.sleep
+        recorder = Mock()
+
+        def scoped_sleep(seconds):
+            if threading.get_ident() != owner:
+                return real_sleep(seconds)
+            return recorder(seconds)
+
         def smoke(*args, **kwargs):
             self.events.append("smoke")
             self.assertIn(str(self.workspace / "readonly"), args[0][0])
@@ -144,7 +159,8 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
             stack.enter_context(patch.object(bundle.shutil, "copytree", side_effect=copytree))
             cleanup = stack.enter_context(patch.object(bundle.shutil, "rmtree", side_effect=rmtree))
             stack.enter_context(patch.object(bundle.subprocess, "run", side_effect=native_run))
-            self.sleep = stack.enter_context(patch.object(bundle.time, "sleep"))
+            stack.enter_context(patch.object(bundle.time, "sleep", scoped_sleep))
+            self.sleep = recorder
             stack.enter_context(patch.object(bundle.subprocess, "Popen", side_effect=smoke))
             stack.enter_context(patch.object(bundle, "verify_report"))
             archives = stack.enter_context(patch.object(bundle, "archive_members_safe"))
