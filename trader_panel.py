@@ -365,6 +365,7 @@ class TraderPanel(QWidget):
             self._append_feed_text("OK: connected to Seraph.")
             self._refresh_seraph_status()
             self._refresh_seraph_account_row()
+            self._refresh_wallet_block()
         else:
             message = TraderPanel._seraph_login_error_text(
                 getattr(result, "error", None), getattr(result, "error_description", None)
@@ -788,7 +789,7 @@ class TraderPanel(QWidget):
             identity = "Seraph account: —"
         self._seraph_identity_lbl.setText(identity)
         self._seraph_account_btn.setText(
-            "DESCONECTAR ESTE DISPOSITIVO" if mcp_client.has_credentials() else "SIGN IN"
+            "DISCONNECT THIS DEVICE" if mcp_client.has_credentials() else "SIGN IN"
         )
 
     def _on_seraph_account_button(self) -> None:
@@ -796,12 +797,12 @@ class TraderPanel(QWidget):
             self._show_mcp_key_setup()
             return
         if not self._confirm_warning(
-            "Desconectar este dispositivo?",
-            "Isto remove a key do Seraph deste dispositivo e a revoga no servidor.",
+            "Disconnect this device?",
+            "This removes the Seraph key from this device and revokes it on the server.",
         ):
             return
         self._background(self._disconnect_device_work, self._on_disconnect_device_done,
-                         pending_text="SYS: desconectando este dispositivo…")
+                         pending_text="SYS: disconnecting this device…")
 
     def _disconnect_device_work(self) -> dict:
         try:
@@ -815,7 +816,7 @@ class TraderPanel(QWidget):
         return {"ok": True}
 
     def _on_disconnect_device_done(self, _result) -> None:
-        self._append_feed_text("OK: dispositivo desconectado do Seraph.")
+        self._append_feed_text("OK: device disconnected from Seraph.")
         self._refresh_seraph_status()
         self._refresh_seraph_account_row()
         self._set_panel_enabled(False)
@@ -844,7 +845,7 @@ class TraderPanel(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
-        wallet_hdr = QLabel("▸ CARTEIRA SERAPH (custodial — assinatura no servidor, sem chaves neste dispositivo)")
+        wallet_hdr = QLabel("▸ SERAPH WALLET (custodial — server-side signing, no keys on this device)")
         wallet_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         wallet_hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
         outer.addWidget(wallet_hdr)
@@ -862,10 +863,10 @@ class TraderPanel(QWidget):
         self._wallet_copy_lbl.setWordWrap(True)
 
         row2 = QHBoxLayout()
-        row2.addWidget(self._make_button("COPIAR ENDEREÇO", self._on_copy_wallet_address))
-        row2.addWidget(self._make_button("DEPOSITAR", self._on_show_deposit))
-        row2.addWidget(self._make_button("RETIRAR ↗", lambda: webbrowser.open(SERAPH_WALLET_CONSOLE_URL)))
-        row2.addWidget(self._make_button("GERENCIAR NO CONSOLE ↗", lambda: webbrowser.open(SERAPH_WALLET_CONSOLE_URL)))
+        row2.addWidget(self._make_button("COPY ADDRESS", self._on_copy_wallet_address))
+        row2.addWidget(self._make_button("DEPOSIT", self._on_show_deposit))
+        row2.addWidget(self._make_button("WITHDRAW ↗", lambda: webbrowser.open(SERAPH_WALLET_CONSOLE_URL)))
+        row2.addWidget(self._make_button("MANAGE IN CONSOLE ↗", lambda: webbrowser.open(SERAPH_WALLET_CONSOLE_URL)))
         row2.addStretch()
         outer.addLayout(row2)
 
@@ -936,20 +937,20 @@ class TraderPanel(QWidget):
     def _on_copy_wallet_address(self) -> None:
         address = self._wallet_cache.get("address")
         if not address:
-            self._append_feed_text("SYS: sem endereço da Carteira Seraph — faça login")
+            self._append_feed_text("SYS: no Seraph Wallet address — sign in")
             return
         QApplication.clipboard().setText(address)
 
     def _on_show_deposit(self) -> None:
         address = self._wallet_cache.get("address")
         if not address:
-            self._append_feed_text("SYS: sem endereço da Carteira Seraph — faça login")
+            self._append_feed_text("SYS: no Seraph Wallet address — sign in")
             return
         names = {str(info["chainId"]): info["name"] for info in chains_mod.CHAINS.values()}
         networks = ", ".join(names.get(str(chain), str(chain))
                              for chain in (self._wallet_cache.get("chains") or []))
         self._append_feed_text(
-            f"SYS: deposite na Carteira Seraph: {address} — redes suportadas: {networks or 'não informadas'}"
+            f"SYS: deposit to the Seraph Wallet: {address} — supported networks: {networks or 'not reported'}"
         )
 
     def _confirm_warning(self, title: str, message: str) -> bool:
@@ -971,7 +972,7 @@ class TraderPanel(QWidget):
 
     def _on_arm_live(self):
         if not TraderPanel._wallet_block_text(self._wallet_cache)["live_allowed"]:
-            self._append_feed_text("SYS: autorize a Carteira Seraph no console antes de operar em live")
+            self._append_feed_text("SYS: authorize the Seraph Wallet in the console before trading live")
             return
         if self._live_confirm_input.text().strip() != "LIVE":
             self._append_feed_text('SYS: type "LIVE" in the field first to confirm arming real-money trading.')
@@ -1054,22 +1055,22 @@ class TraderPanel(QWidget):
         address = wallet.get("address")
         external = wallet.get("linkedExternalAddress")
         signer_granted = wallet.get("signerGranted")
-        embedded_line = "Carteira Seraph: não disponível — faça login"
+        embedded_line = "Seraph Wallet: not available — sign in"
         if isinstance(address, str) and address:
-            embedded_line = f"Carteira Seraph: {TraderPanel._abbreviate_address(address)}"
+            embedded_line = f"Seraph Wallet: {TraderPanel._abbreviate_address(address)}"
         external_line = None
         if isinstance(external, str) and external:
-            external_line = f"Carteira externa (login): {TraderPanel._abbreviate_address(external)}"
-        # Um endereço truncado numa instrução de depósito é inútil e perigoso: o usuário pode copiar o fragmento errado.
+            external_line = f"External wallet (login): {TraderPanel._abbreviate_address(external)}"
+        # A truncated address in a deposit instruction is useless and dangerous: the user could copy the wrong fragment.
         if not address:
-            copy = "Faça login no Seraph para ver sua Carteira Seraph."
+            copy = "Sign in to Seraph to see your Seraph Wallet."
         elif external:
-            copy = f"Seus trades usam a Carteira Seraph ({address}), não sua carteira externa ({external}). Deposite fundos na Carteira Seraph para operar."
+            copy = f"Your trades use the Seraph Wallet ({address}), not your external wallet ({external}). Deposit funds into the Seraph Wallet to trade."
         else:
-            copy = f"Seus trades usam a Carteira Seraph ({address}). Deposite fundos nela para operar."
+            copy = f"Your trades use the Seraph Wallet ({address}). Deposit funds into it to trade."
         return {
             "embedded_line": embedded_line,
-            "signer_line": "Signer: autorizado" if signer_granted else "Signer: não autorizado — autorize no console",
+            "signer_line": "Signer: authorized" if signer_granted else "Signer: not authorized — authorize in the console",
             "external_line": external_line,
             "copy": copy,
             "live_allowed": bool(signer_granted) and bool(address),

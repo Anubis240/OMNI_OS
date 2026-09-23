@@ -121,19 +121,20 @@ class WalletBlockTextTests(unittest.TestCase):
 
     def test_no_wallet_asks_for_login(self):
         result = TraderPanel._wallet_block_text({})
-        self.assertIn("não disponível", result["embedded_line"])
+        self.assertIn("not available", result["embedded_line"])
         self.assertIsNone(result["external_line"])
         self.assertIs(result["live_allowed"], False)
 
     def test_signer_granted_allows_live(self):
         result = TraderPanel._wallet_block_text({"address": self.address, "signerGranted": True})
         self.assertIs(result["live_allowed"], True)
-        self.assertIn("autorizado", result["signer_line"])
+        self.assertIn("authorized", result["signer_line"])
+        self.assertNotIn("not authorized", result["signer_line"])
 
     def test_signer_missing_blocks_live(self):
         result = TraderPanel._wallet_block_text({"address": self.address, "signerGranted": False})
         self.assertIs(result["live_allowed"], False)
-        self.assertIn("não autorizado", result["signer_line"])
+        self.assertIn("not authorized", result["signer_line"])
 
     def test_signer_granted_without_address_blocks_live(self):
         result = TraderPanel._wallet_block_text({"signerGranted": True, "address": None})
@@ -148,18 +149,18 @@ class WalletBlockTextTests(unittest.TestCase):
                 self.assertIn("…", result[key])
                 self.assertNotIn(address, result[key])
 
-    def test_copy_contains_both_addresses_and_the_word_nao_when_external_exists(self):
+    def test_copy_contains_both_addresses_and_distinguishes_them_when_external_exists(self):
         result = TraderPanel._wallet_block_text({
             "address": self.address, "linkedExternalAddress": self.external,
         })
         self.assertIn(self.address, result["copy"])
         self.assertIn(self.external, result["copy"])
-        self.assertRegex(result["copy"], r"\bnão\b")
+        self.assertRegex(result["copy"], r"\bnot\b")
 
     def test_copy_without_external_mentions_only_the_seraph_wallet(self):
         result = TraderPanel._wallet_block_text({"address": self.address})
         self.assertIn(self.address, result["copy"])
-        self.assertNotIn("externa", result["copy"])
+        self.assertNotIn("external", result["copy"])
         self.assertIsNone(result["external_line"])
 
     def test_returned_keys_are_exactly_the_contract(self):
@@ -237,7 +238,7 @@ class PanelSourceInvariantTests(unittest.TestCase):
                 self.assertNotIn(text, self.source.lower())
 
     def test_disconnect_button_label_present(self):
-        self.assertIn("DESCONECTAR ESTE DISPOSITIVO", self.source)
+        self.assertIn("DISCONNECT THIS DEVICE", self.source)
 
 
 if __name__ == "__main__":
