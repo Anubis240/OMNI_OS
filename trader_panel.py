@@ -250,6 +250,7 @@ class TraderPanel(QWidget):
         self._qcol = qcol
         self._wallet_cache: dict = {}
         self._wallet_cache_at: float = 0.0
+        self._wallet_last_logged_error: str | None = None
 
         self.engine = TraderEngine(
             emit=self._on_engine_event,
@@ -898,6 +899,34 @@ class TraderPanel(QWidget):
             return mcp_client.mcp_call(mcp_client.SERAPH_SERVER_ID, "guardian_wallet_status", {})
 
         def then_fn(result):
+            error = None if result.get("ok") else (result.get("error") or "unknown error")
+            # GEMZ4US, 2026-09-24: a genuine "not logged in" (or a rejected
+            # session) correctly renders the existing not-available copy —
+            # but any OTHER failure (e.g. the Seraph MCP endpoint itself
+            # erroring) used to fall into that exact same empty-payload
+            # path, telling an already-signed-in user to sign in again.
+            # Confirmed via a clean disconnect/re-auth cycle that this is
+            # what was actually happening under v1.12.1: the card never
+            # picked up real state because the underlying call was failing,
+            # not because the refresh wasn't firing (that part is fixed).
+            # Distinguish the two so the card is honest about which one it is.
+            if error and error not in ("seraph_login_required", "seraph_unauthorized"):
+                self._wallet_cache = {}
+                self._wallet_cache_at = time.time()
+                self._wallet_embedded_lbl.setText(f"Seraph Wallet: could not check status — {error}")
+                self._wallet_signer_lbl.setText("Signer: unknown — status check failed")
+                self._wallet_signer_lbl.setStyleSheet(f"color: {self._C.TEXT_DIM}; background: transparent;")
+                self._wallet_external_lbl.setText("")
+                self._wallet_external_lbl.setVisible(False)
+                self._wallet_copy_lbl.setText(
+                    f"Could not reach Seraph to check your wallet status ({error}). "
+                    "This is separate from being signed in — your sign-in may still be valid."
+                )
+                if error != self._wallet_last_logged_error:
+                    self._wallet_last_logged_error = error
+                    self._append_feed_text(f"SYS: Seraph Wallet status check failed — {error}")
+                return
+            self._wallet_last_logged_error = None
             payload = {}
             if result.get("ok"):
                 try:
