@@ -11,26 +11,28 @@ only imports TraderPanel lazily, on first click of the TRADER button.
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 import threading
+import time
 import webbrowser
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
-    QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
 from trader import chains as chains_mod
 from trader import mcp_client
 from trader.engine import TraderEngine
-from trader.wallet import local_wallet
+from trader.seraph_auth import SERAPH_WALLET_CONSOLE_URL, get_default_auth, format_identity
 
 _FEED_MAX_ITEMS = 300
-_PRIVATE_KEY_RE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
 _FORCE_SELL_HINT_RE = re.compile(r"sell\s+(\S+)\s+force", re.I)
 
 # Only chains with a well-established, unambiguous block explorer — no
@@ -50,98 +52,6 @@ def _full_tx_hash(tx_hash: str) -> str:
     return tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash
 
 
-def _looks_like_private_key(raw: str) -> bool:
-    return bool(_PRIVATE_KEY_RE.match(raw.strip()))
-
-
-class _SecretRevealDialog(QDialog):
-    """2026-09-12 security audit (GEMZ4US, Section A — safety-critical):
-    CREATE and EXPORT used to print a wallet's raw recovery phrase/private
-    key straight into the Event Feed (_append_feed_text) — permanent for
-    the rest of the session, unmasked, scrollable. Two real wallets were
-    retired after their seed phrase sat visible there. This shows the
-    secret exactly once, in a dialog the user must explicitly acknowledge
-    and close, and never touches the feed or any persisted log."""
-
-    def __init__(self, C, title: str, label: str, secret: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setMinimumWidth(440)
-        self.setStyleSheet(f"QDialog {{ background: {C.PANEL_BG}; }}")
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 20, 20, 20)
-        lay.setSpacing(12)
-
-        warn = QLabel(
-            "⚠ Shown once. Write it down and store it somewhere safe — the only "
-            "way to see it again after closing this window is to re-export."
-        )
-        warn.setWordWrap(True)
-        warn.setStyleSheet(f"color: {C.RED}; font-weight: bold; background: transparent;")
-        lay.addWidget(warn)
-
-        lbl = QLabel(label)
-        lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(lbl)
-
-        box = QTextEdit()
-        box.setPlainText(secret)
-        box.setReadOnly(True)
-        box.setFixedHeight(90)
-        box.setStyleSheet(
-            f"QTextEdit {{ color: {C.TEXT}; background: {C.PANEL2_BG}; "
-            f"border: 1px solid {C.BORDER_A}; border-radius: 4px; padding: 8px; "
-            f"font-family: Consolas, monospace; }}"
-        )
-        lay.addWidget(box)
-
-        self._ack = QCheckBox("I've saved this somewhere safe")
-        # 2026-09-14 report (GEMZ4US finding #30) + 2026-09-15 retest (A1):
-        # the first fix's border color (C.BORDER_A, #1c1c1f) was nearly
-        # indistinguishable from the indicator's own background (C.PANEL2_BG,
-        # #111114) — technically drawn, but effectively invisible at rest,
-        # which read as "no border in either state." And a plain solid-color
-        # fill on :checked with no glyph read as a toggle swap, not a
-        # checked checkbox. Fixed both: a clearly visible mid-gray border at
-        # rest (C.TEXT_MED, real contrast against near-black), unchanged on
-        # check, plus an explicit inline-SVG checkmark drawn on top of the
-        # green fill — QSS fully replaces the platform style's own indicator
-        # painting, so the default checkmark glyph never draws unless one is
-        # supplied explicitly.
-        self._ack.setStyleSheet(
-            f"QCheckBox {{ color: {C.TEXT}; background: transparent; spacing: 8px; }} "
-            f"QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {C.TEXT_MED}; "
-            f"border-radius: 3px; background: {C.PANEL2_BG}; }} "
-            f"QCheckBox::indicator:checked {{ background: {C.GREEN}; border: 1px solid {C.GREEN}; "
-            f"image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZD0iTTMgOC41TDYuNSAxMkwxMyA0IiBzdHJva2U9IiUyMzAwMDAwMCIgc3Ryb2tlLXdpZHRoPSIyLjQiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPg==); }}"
-        )
-        lay.addWidget(self._ack)
-
-        close_btn = QPushButton("Close")
-        close_btn.setEnabled(False)
-        close_btn.setStyleSheet(
-            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; "
-            f"border: 1px solid {C.BORDER_A}; border-radius: 4px; padding: 6px 16px; }} "
-            f"QPushButton:disabled {{ color: {C.TEXT_DIM}; }}"
-        )
-        self._ack.toggled.connect(close_btn.setEnabled)
-        close_btn.clicked.connect(self.accept)
-        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
-
-    def closeEvent(self, event):
-        # 2026-09-13 report (GEMZ4US finding G1): this used to call
-        # event.accept() unconditionally — the comment's stated intent
-        # (force the same acknowledgment the Close button requires) was
-        # never actually implemented, so the native [X] bypassed the gate
-        # completely regardless of checkbox state. Now genuinely blocks the
-        # close until the checkbox is checked, matching Close's own gate.
-        if self._ack.isChecked():
-            event.accept()
-        else:
-            event.ignore()
-
 _CONFIG_FIELDS = [
     ("tradeSizeMinUsd", "Trade size min $"),
     ("tradeSizeMaxUsd", "Trade size max $"),
@@ -159,12 +69,10 @@ _CONFIG_FIELDS = [
 
 
 class McpKeySetupOverlay(QWidget):
-    """First-use popup asking for the Seraph MCP API key, shown over the
-    trader panel when no key was found (neither in the Seraph Guardian
-    app's settings nor previously saved by save_seraph_api_key). Only
-    appears once — mcp_client.save_seraph_api_key persists the key so
-    later sessions never hit this again."""
+    """Connect to Seraph through browser login or a manually supplied key."""
 
+    sign_in_requested = pyqtSignal()
+    cancel_requested = pyqtSignal()
     done = pyqtSignal(str)
 
     def __init__(self, C, parent=None):
@@ -190,13 +98,74 @@ class McpKeySetupOverlay(QWidget):
             w.setStyleSheet(f"color: {color}; background: transparent;")
             return w
 
-        layout.addWidget(_lbl("◈  SERAPH MCP KEY REQUIRED", 12, True))
-        layout.addWidget(_lbl("The trader needs a Seraph API key to gate and execute trades.", 8, color=C.PRI_DIM))
+        layout.addWidget(_lbl("◈  CONNECT TO SERAPH", 12, True))
+        subtitle = _lbl("Sign in with your Seraph account to use the trader. We'll create your Seraph API key automatically — nothing to copy or paste.", 8, color=C.PRI_DIM)
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
         layout.addSpacing(6)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
         layout.addSpacing(4)
+
+        self._sign_in_btn = QPushButton("▸  SIGN IN WITH SERAPH")
+        self._sign_in_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._sign_in_btn.setFixedHeight(36)
+        self._sign_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sign_in_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 1px;
+            }}
+            QPushButton:hover {{
+                background: {C.PRI_GHO_BG}; border: 1px solid {C.PRI};
+            }}
+        """)
+        self._sign_in_btn.clicked.connect(self.sign_in_requested.emit)
+        layout.addWidget(self._sign_in_btn)
+
+        self._status_lbl = _lbl("", 8, color=C.TEXT_DIM)
+        self._status_lbl.setWordWrap(True)
+        layout.addWidget(self._status_lbl)
+        self._status_lbl.hide()
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setFont(QFont("Segoe UI", 8))
+        self._cancel_btn.setFixedHeight(20)
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_DIM}; border: none; }}
+            QPushButton:hover {{ color: {C.TEXT}; }}
+        """)
+        self._cancel_btn.clicked.connect(self.cancel_requested.emit)
+        layout.addWidget(self._cancel_btn)
+        self._cancel_btn.hide()
+
+        self._storage_warn_lbl = _lbl("⚠ Secure storage unavailable on this device — your key will be stored unencrypted.", 8, color=C.RED)
+        self._storage_warn_lbl.setWordWrap(True)
+        layout.addWidget(self._storage_warn_lbl)
+        self._storage_warn_lbl.hide()
+
+        self._manual_link = QPushButton("Use an API key instead")
+        self._manual_link.setFont(QFont("Segoe UI", 8))
+        self._manual_link.setFixedHeight(22)
+        self._manual_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manual_link.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.ACC2};
+                border: none; text-align: left; padding: 2px 0;
+            }}
+            QPushButton:hover {{ color: {C.PRI}; text-decoration: underline; }}
+        """)
+        self._manual_link.clicked.connect(
+            lambda: self._manual_widget.setVisible(self._manual_widget.isHidden())
+        )
+        layout.addWidget(self._manual_link)
+        self._manual_widget = QWidget()
+        manual_layout = QVBoxLayout(self._manual_widget)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._manual_widget)
+        self._manual_widget.hide()
 
         self._key_input = QLineEdit()
         self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -210,7 +179,7 @@ class McpKeySetupOverlay(QWidget):
             }}
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
         """)
-        layout.addWidget(self._key_input)
+        manual_layout.addWidget(self._key_input)
 
         get_key_btn = QPushButton("Get a Seraph API key ↗")
         get_key_btn.setFont(QFont("Segoe UI", 8))
@@ -224,8 +193,6 @@ class McpKeySetupOverlay(QWidget):
             QPushButton:hover {{ color: {C.PRI}; text-decoration: underline; }}
         """)
         get_key_btn.clicked.connect(lambda: webbrowser.open(mcp_client.SERAPH_KEY_SIGNUP_URL))
-        layout.addWidget(get_key_btn)
-        layout.addSpacing(10)
 
         submit_btn = QPushButton("▸  SAVE KEY")
         submit_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -241,18 +208,8 @@ class McpKeySetupOverlay(QWidget):
             }}
         """)
         submit_btn.clicked.connect(self._submit)
-        layout.addWidget(submit_btn)
-
-        skip_btn = QPushButton("Skip for now")
-        skip_btn.setFont(QFont("Segoe UI", 8))
-        skip_btn.setFixedHeight(20)
-        skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        skip_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.TEXT_DIM}; border: none; }}
-            QPushButton:hover {{ color: {C.TEXT}; }}
-        """)
-        skip_btn.clicked.connect(self.hide)
-        layout.addWidget(skip_btn)
+        manual_layout.addWidget(submit_btn)
+        manual_layout.addWidget(get_key_btn)
 
     def _submit(self):
         key = self._key_input.text().strip()
@@ -263,6 +220,17 @@ class McpKeySetupOverlay(QWidget):
             )
             return
         self.done.emit(key)
+
+    def set_status(self, text: str) -> None:
+        self._status_lbl.setText(text)
+        self._status_lbl.setVisible(bool(text))
+
+    def set_waiting(self, waiting: bool) -> None:
+        self._sign_in_btn.setEnabled(not waiting)
+        self._cancel_btn.setVisible(waiting)
+
+    def set_storage_warning(self, insecure: bool) -> None:
+        self._storage_warn_lbl.setVisible(insecure)
 
 
 class TraderPanel(QWidget):
@@ -280,6 +248,8 @@ class TraderPanel(QWidget):
         from ui import C, qcol  # deferred — see module docstring
         self._C = C
         self._qcol = qcol
+        self._wallet_cache: dict = {}
+        self._wallet_cache_at: float = 0.0
 
         self.engine = TraderEngine(
             emit=self._on_engine_event,
@@ -290,12 +260,15 @@ class TraderPanel(QWidget):
             # multi-server-capable function. Bind server_id here so the
             # arities actually match.
             mcp_call=lambda name, args: mcp_client.mcp_call(mcp_client.SERAPH_SERVER_ID, name, args),
-            wallet_status=local_wallet.status,
+            wallet_status=self._wallet_status_provider,
         )
         self._event_sig.connect(self._handle_event)
         self._run_on_gui_sig.connect(lambda fn: fn())
         self._config_inputs: dict[str, QLineEdit] = {}
         self._chain_checks: dict[str, QCheckBox] = {}
+        self._login_in_flight = False
+        self._needs_login_overlay_shown = False
+        self._mcp_key_overlay: "McpKeySetupOverlay | None" = None
 
         self._build_ui()
         self._refresh_stats()
@@ -316,14 +289,24 @@ class TraderPanel(QWidget):
         self._balance_refresh_tmr.timeout.connect(self._periodic_balance_refresh)
         self._balance_refresh_tmr.start(30_000)
 
-        self._mcp_key_overlay: "McpKeySetupOverlay | None" = None
-        if not mcp_client.get_default_client().api_key:
+        if not mcp_client.has_credentials():
+            self._set_panel_enabled(False)
             self._show_mcp_key_setup()
 
     # ---------- Seraph MCP key first-use setup ----------
 
     def _show_mcp_key_setup(self):
+        if self._mcp_key_overlay is not None:
+            self._mcp_key_overlay.show()
+            self._mcp_key_overlay.raise_()
+            return
         ov = McpKeySetupOverlay(self._C, self)
+        try:
+            ov.set_storage_warning(not mcp_client.credential_status().get("secure_storage", True))
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to read Seraph secure storage status")
+        ov.sign_in_requested.connect(self._start_seraph_login)
+        ov.cancel_requested.connect(self._cancel_seraph_login)
         ov.done.connect(self._on_mcp_key_submitted)
         self._position_mcp_key_overlay(ov)
         ov.show()
@@ -331,7 +314,7 @@ class TraderPanel(QWidget):
         self._mcp_key_overlay = ov
 
     def _position_mcp_key_overlay(self, ov: "McpKeySetupOverlay"):
-        ow, oh = 440, 260
+        ow, oh = 440, 380
         ov.setGeometry(
             (self.width()  - ow) // 2,
             (self.height() - oh) // 2,
@@ -345,6 +328,66 @@ class TraderPanel(QWidget):
             self._mcp_key_overlay = None
         if self._key_warn_lbl:
             self._key_warn_lbl.hide()
+        self._set_panel_enabled(True)
+        self._refresh_seraph_status()
+        self._refresh_seraph_account_row()
+
+    def _start_seraph_login(self) -> None:
+        if self._login_in_flight:
+            return
+        self._login_in_flight = True
+        if self._mcp_key_overlay is not None:
+            self._mcp_key_overlay.set_waiting(True)
+            self._mcp_key_overlay.set_status("Starting…")
+
+        def on_status(text):
+            self._run_on_gui_sig.emit(lambda t=text: self._mcp_key_overlay and self._mcp_key_overlay.set_status(t))
+
+        self._background(lambda: get_default_auth().login(on_status=on_status), self._on_seraph_login_done)
+
+    def _cancel_seraph_login(self) -> None:
+        try:
+            get_default_auth().cancel_login()
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to cancel Seraph login")
+        if self._mcp_key_overlay is not None:
+            self._mcp_key_overlay.set_status("Cancelling…")
+
+    def _on_seraph_login_done(self, result) -> None:
+        self._login_in_flight = False
+        if getattr(result, "ok", False):
+            if self._mcp_key_overlay is not None:
+                self._mcp_key_overlay.hide()
+                self._mcp_key_overlay = None
+            self._set_panel_enabled(True)
+            if self._key_warn_lbl:
+                self._key_warn_lbl.hide()
+            self._append_feed_text("OK: connected to Seraph.")
+            self._refresh_seraph_status()
+            self._refresh_seraph_account_row()
+        else:
+            message = TraderPanel._seraph_login_error_text(
+                getattr(result, "error", None), getattr(result, "error_description", None)
+            )
+            if self._mcp_key_overlay is not None:
+                self._mcp_key_overlay.set_waiting(False)
+                self._mcp_key_overlay.set_status(message)
+            self._append_feed_text("SYS: " + message)
+
+    def _set_panel_enabled(self, enabled: bool) -> None:
+        for widget in self._gated_widgets:
+            widget.setEnabled(enabled)
+
+    def _refresh_seraph_status(self) -> None:
+        try:
+            status = mcp_client.credential_status()
+        except Exception:
+            return
+        self._seraph_status_lbl.setText(TraderPanel._seraph_status_text(status))
+        if status.get("needs_login") and not self._needs_login_overlay_shown:
+            self._needs_login_overlay_shown = True
+            self._set_panel_enabled(False)
+            self._show_mcp_key_setup()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -481,6 +524,7 @@ class TraderPanel(QWidget):
     # ---------- UI ----------
 
     def _build_ui(self):
+        self._gated_widgets: list[QWidget] = []
         C = self._C
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -499,11 +543,16 @@ class TraderPanel(QWidget):
         header.addWidget(self._mode_lbl)
 
         self._key_warn_lbl = None
-        if not mcp_client.get_default_client().api_key:
+        if not mcp_client.has_credentials():
             self._key_warn_lbl = QLabel("⚠ no Seraph API key found — trades will fail closed")
             self._key_warn_lbl.setFont(QFont("Segoe UI", 8))
             self._key_warn_lbl.setStyleSheet(f"color: {C.RED}; background: transparent;")
             header.addWidget(self._key_warn_lbl)
+
+        self._seraph_status_lbl = QLabel("")
+        self._seraph_status_lbl.setFont(QFont("Segoe UI", 8))
+        self._seraph_status_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        header.addWidget(self._seraph_status_lbl)
 
         # Toggled via MainWindow, which owns the actual config panel widget
         # (a floating overlay over the orb/trader view — see
@@ -517,6 +566,7 @@ class TraderPanel(QWidget):
         header.addWidget(self._start_btn)
         scan_btn = self._make_button("⟳ SCAN NOW", lambda: self._run_command("/scan"))
         header.addWidget(scan_btn)
+        self._gated_widgets.extend([config_btn, self._start_btn, scan_btn])
         root.addLayout(header)
 
         # Stats row
@@ -616,6 +666,7 @@ class TraderPanel(QWidget):
         # Command bar
         cmd_row = QHBoxLayout()
         self._cmd_input = QLineEdit()
+        self._gated_widgets.append(self._cmd_input)
         self._cmd_input.setPlaceholderText("buy SYM:0x... · sell SYM · watch SYM:0x... · help")
         self._cmd_input.setFont(QFont("Segoe UI", 9))
         self._cmd_input.setStyleSheet(
@@ -630,6 +681,10 @@ class TraderPanel(QWidget):
         # empty stretch region below the sys-monitor bars), not down here —
         # see left_panel_widget() / MainWindow.set_left_panel_extra().
         self._left_config_widget = self._build_left_config_panel()
+        self._seraph_timer = QTimer(self)
+        self._seraph_timer.timeout.connect(self._refresh_seraph_status)
+        self._seraph_timer.start(30000)
+        self._refresh_seraph_status()
 
     def left_panel_widget(self) -> QWidget:
         """Mounted into the main window's left sidebar while this panel is
@@ -694,6 +749,13 @@ class TraderPanel(QWidget):
         # Settings had a key field at all. save_seraph_api_key() already
         # persists + live-applies with no restart needed (mcp_client.py);
         # this was purely a missing UI affordance to reach it again.
+        self._seraph_identity_lbl = QLabel("Seraph account: —")
+        self._seraph_identity_lbl.setFont(QFont("Segoe UI", 7))
+        self._seraph_identity_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        col.addWidget(self._seraph_identity_lbl)
+        self._seraph_account_btn = self._make_button("…", self._on_seraph_account_button)
+        col.addWidget(self._seraph_account_btn)
+
         key_lbl = QLabel("Seraph API key")
         key_lbl.setFont(QFont("Segoe UI", 7))
         key_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; margin-top: 4px;")
@@ -707,7 +769,58 @@ class TraderPanel(QWidget):
         key_save_btn = self._make_button("SAVE KEY", self._on_save_seraph_key)
         col.addWidget(key_save_btn)
 
+        self._refresh_seraph_account_row()
         return wrap
+
+    def _refresh_seraph_account_row(self) -> None:
+        # The left config panel is built lazily (left_panel_widget), so these
+        # widgets may not exist yet when a login/disconnect finishes. Refreshing
+        # is best-effort: _build_left_config_panel calls this itself on create.
+        if getattr(self, "_seraph_identity_lbl", None) is None:
+            return
+        try:
+            status = mcp_client.credential_status()
+        except Exception:
+            return
+        try:
+            identity = "Seraph account: " + format_identity(status)
+        except Exception:
+            identity = "Seraph account: —"
+        self._seraph_identity_lbl.setText(identity)
+        self._seraph_account_btn.setText(
+            "DESCONECTAR ESTE DISPOSITIVO" if mcp_client.has_credentials() else "SIGN IN"
+        )
+
+    def _on_seraph_account_button(self) -> None:
+        if not mcp_client.has_credentials():
+            self._show_mcp_key_setup()
+            return
+        if not self._confirm_warning(
+            "Desconectar este dispositivo?",
+            "Isto remove a key do Seraph deste dispositivo e a revoga no servidor.",
+        ):
+            return
+        self._background(self._disconnect_device_work, self._on_disconnect_device_done,
+                         pending_text="SYS: desconectando este dispositivo…")
+
+    def _disconnect_device_work(self) -> dict:
+        try:
+            get_default_auth().disconnect_device()
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to complete Seraph device disconnect")
+        try:
+            mcp_client.get_default_client().invalidate()
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to invalidate Seraph client")
+        return {"ok": True}
+
+    def _on_disconnect_device_done(self, _result) -> None:
+        self._append_feed_text("OK: dispositivo desconectado do Seraph.")
+        self._refresh_seraph_status()
+        self._refresh_seraph_account_row()
+        self._set_panel_enabled(False)
+        self._needs_login_overlay_shown = False
+        self._show_mcp_key_setup()
 
     def _on_save_seraph_key(self):
         key = self._seraph_key_input.text().strip()
@@ -720,13 +833,10 @@ class TraderPanel(QWidget):
         self._append_feed_text("SYS: Seraph API key updated — takes effect immediately, no restart needed.")
 
     def _build_wallet_row(self) -> QWidget:
-        """App-managed wallet dock + live-arm control. Local wallet only
-        (WalletConnect dropped for this Python version — see the project
-        plan). Two separate typed confirmations, matching the JS app's
-        safety UX: "I OWN THIS RISK" gates holding real key material on
-        this device at all (create/import/export); "LIVE" gates arming
-        live trading once a wallet is already connected. Neither is a
-        one-time toggle — both are re-checked at the moment of the click."""
+        """Seraph wallet block. Read-only by construction: this device never
+        holds key material, so there is nothing here to create, import,
+        export, lock or remove. Trades are signed server-side by the Seraph
+        wallet, gated by the signer grant the user makes in the console."""
         C = self._C
         wrap = QWidget()
         wrap.setStyleSheet(f"background: {C.PANEL_BG}; border: 1px solid {C.BORDER}; border-radius: 1px;")
@@ -734,44 +844,32 @@ class TraderPanel(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
-        row1 = QHBoxLayout()
-        wallet_hdr = QLabel("▸ WALLET (app-managed, local signing — real funds, no per-trade approval)")
+        wallet_hdr = QLabel("▸ CARTEIRA SERAPH (custodial — assinatura no servidor, sem chaves neste dispositivo)")
         wallet_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         wallet_hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
-        row1.addWidget(wallet_hdr)
-        row1.addStretch()
-        self._wallet_status_lbl = QLabel("not connected")
-        self._wallet_status_lbl.setFont(QFont("Segoe UI", 8))
-        self._wallet_status_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        row1.addWidget(self._wallet_status_lbl)
-        outer.addLayout(row1)
+        outer.addWidget(wallet_hdr)
+        text = TraderPanel._wallet_block_text(self._wallet_cache)
+        self._wallet_embedded_lbl = QLabel(text["embedded_line"])
+        self._wallet_signer_lbl = QLabel(text["signer_line"])
+        self._wallet_external_lbl = QLabel(text["external_line"] or "")
+        self._wallet_copy_lbl = QLabel(text["copy"])
+        for label in (self._wallet_embedded_lbl, self._wallet_signer_lbl,
+                      self._wallet_external_lbl, self._wallet_copy_lbl):
+            label.setFont(QFont("Segoe UI", 8))
+            label.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            outer.addWidget(label)
+        self._wallet_external_lbl.setVisible(text["external_line"] is not None)
+        self._wallet_copy_lbl.setWordWrap(True)
 
         row2 = QHBoxLayout()
-        self._risk_ack_input = QLineEdit()
-        self._risk_ack_input.setPlaceholderText('type "I OWN THIS RISK" to enable create/import/export below')
-        self._risk_ack_input.setFont(QFont("Segoe UI", 8))
-        self._risk_ack_input.setFixedWidth(260)
-        self._risk_ack_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 5px;")
-        row2.addWidget(self._risk_ack_input)
-        row2.addWidget(self._make_button("CREATE", self._on_wallet_create))
-        self._import_input = QLineEdit()
-        self._import_input.setPlaceholderText("private key or recovery phrase to import")
-        self._import_input.setFont(QFont("Segoe UI", 8))
-        # Masked (password-style) — this field holds real key material;
-        # never echo it in cleartext on screen.
-        self._import_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self._import_input.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 1px; padding: 3px 5px;")
-        row2.addWidget(self._import_input, stretch=1)
-        row2.addWidget(self._make_button("IMPORT", self._on_wallet_import))
-        row2.addWidget(self._make_button("EXPORT", self._on_wallet_export))
+        row2.addWidget(self._make_button("COPIAR ENDEREÇO", self._on_copy_wallet_address))
+        row2.addWidget(self._make_button("DEPOSITAR", self._on_show_deposit))
+        row2.addWidget(self._make_button("RETIRAR ↗", lambda: webbrowser.open(SERAPH_WALLET_CONSOLE_URL)))
+        row2.addWidget(self._make_button("GERENCIAR NO CONSOLE ↗", lambda: webbrowser.open(SERAPH_WALLET_CONSOLE_URL)))
+        row2.addStretch()
         outer.addLayout(row2)
 
         row3 = QHBoxLayout()
-        self._wallet_lock_btn = self._make_button("UNLOCK WALLET", self._on_wallet_lock_unlock)
-        row3.addWidget(self._wallet_lock_btn)
-        row3.addWidget(self._make_button("REMOVE", self._on_wallet_remove))
-        row3.addSpacing(20)
-
         live_hdr = QLabel("▸ LIVE MODE")
         live_hdr.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         live_hdr.setStyleSheet(f"color: {C.RED}; background: transparent;")
@@ -789,41 +887,73 @@ class TraderPanel(QWidget):
         row3.addStretch()
         outer.addLayout(row3)
 
-        self._refresh_wallet_status()
+        self._refresh_wallet_block()
         return wrap
 
-    def _refresh_wallet_status(self):
-        C = self._C
-        st = local_wallet.status()
-        if st["connected"]:
-            addr = st["address"]
-            short = addr[:6] + "…" + addr[-4:]
-            self._wallet_status_lbl.setText(f"UNLOCKED — {short}")
-            self._wallet_status_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
-            self._wallet_lock_btn.setText("LOCK WALLET")
-        elif st["exists"]:
-            self._wallet_status_lbl.setText("locked (stored wallet exists)")
-            self._wallet_status_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-            self._wallet_lock_btn.setText("UNLOCK WALLET")
-        else:
-            self._wallet_status_lbl.setText("not connected")
-            self._wallet_status_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-            self._wallet_lock_btn.setText("UNLOCK WALLET")
+    def _refresh_wallet_block(self) -> None:
+        """Refresh the wallet block from guardian_wallet_status, off the GUI
+        thread. Never called synchronously from a paint or click path."""
+        def work_fn():
+            return mcp_client.mcp_call(mcp_client.SERAPH_SERVER_ID, "guardian_wallet_status", {})
 
-    def _risk_acknowledged(self) -> bool:
-        ok = self._risk_ack_input.text().strip() == "I OWN THIS RISK"
-        if not ok:
-            self._append_feed_text('SYS: type "I OWN THIS RISK" in the field first — this stores real key material on this device.')
-        return ok
+        def then_fn(result):
+            payload = {}
+            if result.get("ok"):
+                try:
+                    payload = json.loads(result["text"])
+                except (ValueError, TypeError, KeyError):
+                    payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            self._wallet_cache = payload
+            self._wallet_cache_at = time.time()
+            text = TraderPanel._wallet_block_text(payload)
+            self._wallet_embedded_lbl.setText(text["embedded_line"])
+            self._wallet_signer_lbl.setText(text["signer_line"])
+            C = self._C
+            color = C.GREEN if payload.get("signerGranted") else C.TEXT_DIM
+            self._wallet_signer_lbl.setStyleSheet(f"color: {color}; background: transparent;")
+            self._wallet_external_lbl.setText(text["external_line"] or "")
+            self._wallet_external_lbl.setVisible(text["external_line"] is not None)
+            self._wallet_copy_lbl.setText(text["copy"])
+
+        self._background(work_fn, then_fn, pending_text=None)
+
+    def _wallet_status_provider(self) -> dict:
+        """What the engine sees. NON-BLOCKING by contract: it answers from the
+        30s cache and schedules a refresh when stale, never waiting on the
+        network. The engine calls this from paths that must not stall, and an
+        empty cache answers "not connected", which fails closed."""
+        cache = self._wallet_cache
+        if not cache or time.time() - self._wallet_cache_at >= 30:
+            self._refresh_wallet_block()
+        return {
+            "connected": bool(cache.get("signerGranted")) and bool(cache.get("address")),
+            "address": cache.get("address") or None,
+            "signerGranted": bool(cache.get("signerGranted")),
+        }
+
+    def _on_copy_wallet_address(self) -> None:
+        address = self._wallet_cache.get("address")
+        if not address:
+            self._append_feed_text("SYS: sem endereço da Carteira Seraph — faça login")
+            return
+        QApplication.clipboard().setText(address)
+
+    def _on_show_deposit(self) -> None:
+        address = self._wallet_cache.get("address")
+        if not address:
+            self._append_feed_text("SYS: sem endereço da Carteira Seraph — faça login")
+            return
+        names = {str(info["chainId"]): info["name"] for info in chains_mod.CHAINS.values()}
+        networks = ", ".join(names.get(str(chain), str(chain))
+                             for chain in (self._wallet_cache.get("chains") or []))
+        self._append_feed_text(
+            f"SYS: deposite na Carteira Seraph: {address} — redes suportadas: {networks or 'não informadas'}"
+        )
 
     def _confirm_warning(self, title: str, message: str) -> bool:
-        """2026-09-12 security audit, GEMZ4US Sections A3/B1: CREATE/EXPORT
-        (raw key material on screen) and REMOVE (permanent, no undo) each
-        get their own distinct confirmation, separate from the general
-        "I OWN THIS RISK" wallet-unlock phrase — that phrase is about
-        accepting the wallet feature's risk in general, not about this
-        specific action right now. Same styled-QMessageBox pattern as
-        _on_reset's ledger-wipe confirm."""
+        """Confirm an action using the styled warning dialog, defaulting to No."""
         C = self._C
         box = QMessageBox(self)
         box.setWindowTitle(title)
@@ -839,111 +969,10 @@ class TraderPanel(QWidget):
         )
         return box.exec() == QMessageBox.StandardButton.Yes
 
-    def _reveal_secret(self, title: str, label: str, secret: str) -> None:
-        """Shows `secret` exactly once in a modal dialog — see
-        _SecretRevealDialog's docstring for why this replaced writing it
-        into the Event Feed."""
-        _SecretRevealDialog(self._C, title, label, secret, parent=self).exec()
-
-    def _on_wallet_create(self):
-        if not self._risk_acknowledged():
-            return
-        if not self._confirm_warning(
-            "Show raw key material?",
-            "Creating a wallet will show its recovery phrase once, right after. Continue?"
-        ):
-            return
-        try:
-            result = local_wallet.create()
-        except Exception as err:
-            self._append_feed_text(f"SYS: could not create wallet: {err}")
-            return
-        self._risk_ack_input.clear()
-        self._refresh_wallet_status()
-        self._append_feed_text(f"OK: wallet created — {result['address']}")
-        self._reveal_secret(
-            "Recovery Phrase", "Your new wallet's recovery phrase:", result["mnemonic"]
-        )
-
-    def _on_wallet_import(self):
-        if not self._risk_acknowledged():
-            return
-        raw = self._import_input.text().strip()
-        if not raw:
-            self._append_feed_text("SYS: enter a private key or recovery phrase to import")
-            return
-        try:
-            if _looks_like_private_key(raw):
-                result = local_wallet.import_private_key(raw)
-            else:
-                result = local_wallet.import_mnemonic(raw)
-        except Exception as err:
-            self._append_feed_text(f"SYS: import failed: {err}")
-            return
-        self._import_input.clear()
-        self._risk_ack_input.clear()
-        self._refresh_wallet_status()
-        self._append_feed_text(f"OK: wallet imported — {result['address']}")
-
-    def _on_wallet_export(self):
-        if not self._risk_acknowledged():
-            return
-        if not self._confirm_warning(
-            "Show raw key material?",
-            "This will display your wallet's raw private key or recovery phrase on "
-            "screen. Continue?"
-        ):
-            return
-        try:
-            secret = local_wallet.export_secret()
-        except Exception as err:
-            self._append_feed_text(f"SYS: export failed: {err}")
-            return
-        self._risk_ack_input.clear()
-        self._append_feed_text(f"OK: wallet exported ({secret['type']})")
-        label = "Recovery Phrase" if secret["type"] == "mnemonic" else "Private Key"
-        self._reveal_secret(label, f"Your wallet's {label.lower()}:", secret["value"])
-
-    def _on_wallet_lock_unlock(self):
-        st = local_wallet.status()
-        try:
-            if st["connected"]:
-                local_wallet.lock()
-                if self.engine.armed_live:
-                    self.engine.disarm_live("wallet locked")
-                self._append_feed_text("SYS: wallet locked")
-            else:
-                result = local_wallet.unlock()
-                self._append_feed_text(f"OK: wallet unlocked — {result['address']}")
-        except Exception as err:
-            self._append_feed_text(f"SYS: {err}")
-        self._refresh_wallet_status()
-        self._refresh_stats()
-
-    def _on_wallet_remove(self):
-        if not self._risk_acknowledged():
-            return
-        # 2026-09-11 report (GEMZ4US, Section B1): the README/PRD claimed
-        # wallet removal gets "an explicit confirmation dialog" — it only
-        # ever had the same "I OWN THIS RISK" gate shared with create/
-        # import/export, no distinct dialog. That phrase is about accepting
-        # the wallet feature's risk in general; removal is the one action
-        # here with no undo at all, so it gets its own confirmation too.
-        if not self._confirm_warning(
-            "Remove wallet?",
-            "This permanently removes the stored wallet from this device — there's no "
-            "undo. You'll need its recovery phrase or private key to use it again. Continue?"
-        ):
-            return
-        if self.engine.armed_live:
-            self.engine.disarm_live("wallet removed")
-        local_wallet.remove()
-        self._risk_ack_input.clear()
-        self._refresh_wallet_status()
-        self._refresh_stats()
-        self._append_feed_text("SYS: wallet removed from this device")
-
     def _on_arm_live(self):
+        if not TraderPanel._wallet_block_text(self._wallet_cache)["live_allowed"]:
+            self._append_feed_text("SYS: autorize a Carteira Seraph no console antes de operar em live")
+            return
         if self._live_confirm_input.text().strip() != "LIVE":
             self._append_feed_text('SYS: type "LIVE" in the field first to confirm arming real-money trading.')
             return
@@ -961,6 +990,90 @@ class TraderPanel(QWidget):
         self.engine.disarm_live("user requested")
         self._refresh_stats()
         self._refresh_positions()
+
+    @staticmethod
+    def _abbreviate_address(address: str | None) -> str:
+        """0x-prefixed address shortened for display: first 6 chars, ellipsis,
+        last 4. Anything that is not a plausible address renders as an em dash
+        rather than a truncated fragment the user might mistake for real."""
+        if not isinstance(address, str) or len(address) < 12:
+            return "—"
+        return f"{address[:6]}…{address[-4:]}"
+
+    @staticmethod
+    def _seraph_status_text(status: dict) -> str:
+        """Header line describing the Seraph credential. Never renders the key
+        itself — only the 12-character prefix the backend already treats as
+        public."""
+        mode = status.get("mode")
+        if status.get("needs_login"):
+            base = "Seraph session expired — sign in again"
+        elif mode is None or mode == "none":
+            base = "not connected to Seraph — sign in to use the trader"
+        else:
+            prefix = status.get("api_key_prefix") or "—"
+            label = {
+                "api_key_oauth": "signed in",
+                "api_key_manual": "manual",
+                "api_key_legacy": "legacy",
+                "api_key_explicit": "configured",
+            }.get(mode, "unknown")
+            base = f"Seraph: key {prefix} ({label})"
+        if status.get("last_error") == "unauthorized":
+            base += " — key rejected"
+        return base
+
+    @staticmethod
+    def _seraph_login_error_text(error: str | None, error_description: str | None = None) -> str:
+        """Human-readable message for every AuthResult.error code. The raw code
+        is never shown on its own: an unmapped code still gets a sentence."""
+        message = {
+            "access_denied": "Sign-in was denied. Nothing was changed.",
+            "timeout": "Sign-in timed out. Try again.",
+            "cancelled": "Sign-in was cancelled.",
+            "state_mismatch": "Sign-in could not be verified. Try again.",
+            "network_error": "Could not reach Seraph. Check your connection and try again.",
+            "metadata_error": "Could not reach Seraph. Check your connection and try again.",
+            "invalid_client": "This device needs to register with Seraph again. Try signing in once more.",
+            "registration_failed": "This device needs to register with Seraph again. Try signing in once more.",
+            "token_exchange_failed": "Seraph refused the sign-in. Try again.",
+            "api_key_mint_failed": "Signed in, but the Seraph API key could not be created. Try again.",
+            "insufficient_scope": "Your Seraph account is missing permissions for this device. Contact support.",
+            "browser_open_failed": "Could not open your browser. Copy the sign-in link and open it manually.",
+        }.get(error, "Sign-in failed. Try again.")
+        if isinstance(error_description, str) and error_description:
+            return f"{message} ({error_description})"
+        return message
+
+    @staticmethod
+    def _wallet_block_text(wallet: dict) -> dict:
+        """Pure rendering of the Seraph wallet block from a guardian_wallet_status
+        payload. Kept free of Qt so the copy that tells the user WHICH wallet
+        actually trades can be asserted in a test — depositing into the wrong
+        one is a silent, unrecoverable user error."""
+        address = wallet.get("address")
+        external = wallet.get("linkedExternalAddress")
+        signer_granted = wallet.get("signerGranted")
+        embedded_line = "Carteira Seraph: não disponível — faça login"
+        if isinstance(address, str) and address:
+            embedded_line = f"Carteira Seraph: {TraderPanel._abbreviate_address(address)}"
+        external_line = None
+        if isinstance(external, str) and external:
+            external_line = f"Carteira externa (login): {TraderPanel._abbreviate_address(external)}"
+        # Um endereço truncado numa instrução de depósito é inútil e perigoso: o usuário pode copiar o fragmento errado.
+        if not address:
+            copy = "Faça login no Seraph para ver sua Carteira Seraph."
+        elif external:
+            copy = f"Seus trades usam a Carteira Seraph ({address}), não sua carteira externa ({external}). Deposite fundos na Carteira Seraph para operar."
+        else:
+            copy = f"Seus trades usam a Carteira Seraph ({address}). Deposite fundos nela para operar."
+        return {
+            "embedded_line": embedded_line,
+            "signer_line": "Signer: autorizado" if signer_granted else "Signer: não autorizado — autorize no console",
+            "external_line": external_line,
+            "copy": copy,
+            "live_allowed": bool(signer_granted) and bool(address),
+        }
 
     def _panel_style(self) -> str:
         C = self._C
@@ -1529,11 +1642,8 @@ class TraderPanel(QWidget):
     def _on_reset(self):
         # Flagged 2026-09-07: this button sits directly next to SAVE CONFIG
         # and used to fire on a single click, wiping the persisted trade
-        # ledger/P&L history with no way back. A confirmation dialog is the
-        # same weight of gate as this file already uses elsewhere for
-        # irreversible actions (see the wallet's "I OWN THIS RISK" typed
-        # ack) — a click confirmation is lighter since resetting the paper
-        # ledger risks no real funds, unlike wallet key material.
+        # ledger/P&L history with no way back. A confirmation dialog guards
+        # this irreversible action; resetting the paper ledger risks no funds.
         #
         # Bug found by GEMZ4US 2026-09-08 (shipped in v1.10.3, fixed here):
         # the plain QMessageBox.question() convenience call renders with

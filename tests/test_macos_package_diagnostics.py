@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
@@ -32,6 +33,33 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
         self.events = []
         self.commands = []
         self.workspace = None
+
+    @staticmethod
+    def own_thread_only(stack, module, name, replacement=None):
+        """Confine a patch on a shared stdlib module to the calling thread.
+
+        bundle.time/subprocess/shutil/tempfile are the process-wide modules, so
+        patch.object rebinds them for every live thread. unittest discover
+        imports every test module before running any test, and importing the
+        application starts ui._SysMetrics: a daemon that polls psutil and shells
+        out to nvidia-smi every 1.5 seconds. Without this guard that daemon
+        reaches these fixtures, recording its own calls into assertions that
+        compare exact command and event sequences, raising inside code that
+        swallows exceptions, spawning children whose working directory pins the
+        test temporary tree open on Windows, and busy-spinning once its sleep
+        becomes a no-op. Foreign threads therefore keep the real implementation.
+        """
+        owner = threading.get_ident()
+        original = getattr(module, name)
+        recorder = Mock(side_effect=replacement)
+
+        def dispatch(*args, **kwargs):
+            if threading.get_ident() != owner:
+                return original(*args, **kwargs)
+            return recorder(*args, **kwargs)
+
+        stack.enter_context(patch.object(module, name, dispatch))
+        return recorder
 
     @contextmanager
     def native_fixture(self, *, target="macos-arm64", failures=(), mutation=None,
@@ -140,12 +168,12 @@ class MacPackageDiagnosticsTests(unittest.TestCase):
             stack.enter_context(patch.object(bundle.platform, "system", return_value="Darwin"))
             stack.enter_context(patch.object(bundle.platform, "machine",
                                 return_value="x86_64" if target == "macos-x64" else "arm64"))
-            stack.enter_context(patch.object(bundle.tempfile, "mkdtemp", side_effect=mkdtemp))
-            stack.enter_context(patch.object(bundle.shutil, "copytree", side_effect=copytree))
-            cleanup = stack.enter_context(patch.object(bundle.shutil, "rmtree", side_effect=rmtree))
-            stack.enter_context(patch.object(bundle.subprocess, "run", side_effect=native_run))
-            self.sleep = stack.enter_context(patch.object(bundle.time, "sleep"))
-            stack.enter_context(patch.object(bundle.subprocess, "Popen", side_effect=smoke))
+            self.own_thread_only(stack, bundle.tempfile, "mkdtemp", mkdtemp)
+            self.own_thread_only(stack, bundle.shutil, "copytree", copytree)
+            cleanup = self.own_thread_only(stack, bundle.shutil, "rmtree", rmtree)
+            self.own_thread_only(stack, bundle.subprocess, "run", native_run)
+            self.sleep = self.own_thread_only(stack, bundle.time, "sleep")
+            self.own_thread_only(stack, bundle.subprocess, "Popen", smoke)
             stack.enter_context(patch.object(bundle, "verify_report"))
             archives = stack.enter_context(patch.object(bundle, "archive_members_safe"))
             yield cleanup

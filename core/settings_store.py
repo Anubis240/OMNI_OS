@@ -11,9 +11,16 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from core.app_paths import get_data_dir
 import uuid
 from pathlib import Path
+from typing import Callable
+
+
+# Serializes read-modify-write cycles on settings.json. Reentrant so a mutator
+# may itself call a helper that takes the same lock.
+_SETTINGS_LOCK = threading.RLock()
 
 
 def _base_dir() -> Path:
@@ -31,6 +38,36 @@ DEFAULT_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 DEFAULT_SETTINGS = {
     "mcp_servers": [],   # [{id, name, url, apiKey}]
     "api_keys": {"openai": "", "anthropic": ""},
+    # Seraph desktop OAuth. The primary credential is `api_key`; the tokens
+    # exist only to re-mint it and to disconnect this device. No wallet fields
+    # live here: the address and the signer state come from the Seraph backend.
+    # Invariant: never tokens without an api_key.
+    "seraph_auth": {
+        "api_key": None,
+        "api_key_id": None,
+        "api_key_prefix": None,
+        "api_key_name": None,
+        "api_key_created_at": None,
+        "api_key_source": None,
+        "api_key_scopes": [],
+        "device_id": None,
+        "client_id": None,
+        "client_id_issued_at": None,
+        "registered_redirect_uri": None,
+        "access_token": None,
+        "access_expires_at": None,
+        "refresh_token": None,
+        "refresh_issued_at": None,
+        "scope": None,
+        "subject": None,
+        "org_id": None,
+        "issuer": None,
+        "authorization_endpoint": None,
+        "token_endpoint": None,
+        "registration_endpoint": None,
+        "revocation_endpoint": None,
+        "metadata_fetched_at": None,
+    },
     "custom_api_keys": [],  # [{id, name, value}] — a plain named-key vault for
                             # whatever a hand-written skill or custom MCP server
                             # needs that isn't one of the fixed fields above.
@@ -215,10 +252,9 @@ INTEGRATION_CATALOG = [
 # 2026-09-12 security audit, High #4: settings.json holds every credential
 # this app is trusted with — the Gemini/OpenAI/Anthropic keys, all 30
 # integration tokens, MCP server keys, custom API keys — as plain JSON on
-# disk, unlike trader/wallet/local_wallet.py's private key, which is
-# already correctly DPAPI-encrypted. Reusing that exact pattern here:
+# disk. Protecting these credentials with the Windows DPAPI pattern here:
 # encrypted at rest via Windows DPAPI (win32crypt, tied to this OS user
-# account, same as the wallet), transparent to every one of the ~30+
+# account), transparent to every one of the ~30+
 # call sites across the codebase that already call load_settings()/
 # save_settings() — they keep getting/giving a plain dict either way, only
 # the on-disk bytes change.
@@ -323,6 +359,26 @@ def save_settings(settings: dict) -> None:
         print("[Settings] WARNING: Windows DPAPI unavailable — saving settings.json "
               "UNENCRYPTED. This should not happen on a real Omni-OS install.")
         SETTINGS_PATH.write_bytes(payload)
+
+
+def update_settings(mutator: Callable[[dict], None]) -> dict:
+    """Read-modify-write settings.json atomically with respect to other callers.
+
+    load_settings() + mutate + save_settings() done by hand is a lost-update bug:
+    a long operation that loads, blocks (an OAuth browser round trip takes
+    minutes), then saves will overwrite everything written while it waited.
+    This serializes the whole cycle instead.
+
+    The mutator receives the live settings dict and mutates it in place; its
+    return value is ignored. If it raises, nothing is written and the exception
+    propagates unchanged, so a failed mutation can never persist a half-applied
+    state. Returns the saved settings.
+    """
+    with _SETTINGS_LOCK:
+        settings = load_settings()
+        mutator(settings)
+        save_settings(settings)
+        return settings
 
 
 def new_id() -> str:
