@@ -1083,8 +1083,32 @@ Provado antes de mexer no `main`: `git diff --stat 5ffa873 dd51b34` **vazio** (�
 
 Somente trabalho que exige humano:
 
-- **W4.P2** — 1 swap real de 0,001 ETH em Base via `docs/plans/scripts/smoke-execute-base.py`. Precisa de um humano com ≥0,005 ETH. Nunca commitar o `settings.json`.
+- **W4.P2** — 1 swap real de 0,001 ETH em Base via `docs/plans/scripts/smoke-execute-base.py`. O script **não existia** (era um entregável planejado, W4.P2.T3, nunca escrito); foi escrito agora — ver §18.5. Resta apenas um humano com ≥0,005 ETH. Nunca commitar o `settings.json`.
 - **W4.P3** — UAT humano de 14 passos (roteiro nas linhas 832-846 do plano). Bloqueia a DoD global e, por consequência, o push da tag.
 - **W5.P2.T2** — build PyInstaller, não executável neste ambiente (PyInstaller ausente).
 - **W5.P3.T1** — QA global da Seção 6, dependente de W4.P2.
 - **W5.P4** — bump + tag, dependente da aceitação global e do UAT.
+
+### 18.5 W4.P2.T3 — o script de smoke, que não existia
+
+**Achado.** `docs/plans/scripts/` continha só `privy-policy-probe.ps1`. O `smoke-execute-base.py` referenciado pelo plano (linhas 404 e 820) e por este log **nunca foi escrito**, e uma varredura dos três repositórios não achou equivalente. Era o único bloqueador de W4.P2 que **não** era humano: sem o script, o humano não tinha o que rodar. Escrito em `d53057a`.
+
+**Contrato implementado, fase por fase, conforme a linha 820 do plano:**
+
+| Fase | O que prova |
+|---|---|
+| `status` | `guardian_wallet_status` → `address`, `signerGranted`, `linkedExternalAddress` |
+| `probe18` | `guardian_execute` com a device key **antes** de autorizar o signer → recusa com `signer_not_granted` |
+| `buy` | 0,001 ETH → USDC nativo em Base via V3, `kind swap`, 1 tx, receipt `status == 1` |
+| `sell` | venda de volta: `kind approve` + `kind swap` → **dois gates**, 2 receipts `status == 1` |
+| `idempotency` | replay do `guardian_execute` com o `requestId` **do próprio buy** → mesmo `txHash`, nenhuma tx nova |
+
+**Como as fases obtêm o que precisam sem tocar em código de produção.** O `_mcp_call` injetado em `live.init()` é um `RecordingMcp` que registra `(tool, args, result)` de toda chamada. Daí saem, sem instrumentar `trader/live.py`: o `requestId` do buy (dos `args` do `guardian_execute`, cf. invariante 2), a contagem exata de `guardian_execute` por fase (1 no buy, 2 no sell — é assim que os "dois gates" são verificados de fato, e não pela forma de retorno de `live_sell`), e os hashes públicos.
+
+**Grades de segurança, todas verificadas retornando exit 2 e sem escrever nada:** chain fixada em Base 8453 (com guarda contra o fallback de `chains_mod.resolve`, que cairia em Ethereum se a chave `base` fosse renomeada); notional com teto duro de 0,002 ETH e recusa de valor ≤ 0; qualquer fase que transmita exige `--i-understand-this-spends-real-money`; a credencial precisa morar **fora** da árvore de trabalho, e o relatório também; carteira precisa ter ≥ 0,0025 ETH (trade + gás de três transações). Nenhuma chave é lida de config real, impressa ou persistida; o relatório grava `args` de ferramenta, nunca `results` nem headers.
+
+**Duas decisões que merecem registro.** (1) `bypass_gate` **nunca** é passado — as duas chamadas usam o default `False`, então todas as três transações atravessam `guardian_pretrade_check` → `guardian_execute`. (2) O sell passa `min_net_profit_usd=None`, que desliga **somente** o piso local de lucro (`live.py:661` guarda o teste com `is not None`); um round-trip imediato dá prejuízo pequeno e previsível, e um piso de 0 recusaria a venda. Isso **não** afeta o gate: o teste do piso acontece depois de `require_allow`, usando a variável `gate`. Usar `bypass_gate=True` para o mesmo efeito seria violar a invariante 4 — por isso não foi usado.
+
+**`probe18` não finge.** Se o signer já estiver autorizado, a fase reporta `NOT_RUN` com a instrução de como rodá-la (antes de autorizar, ou revogando com `removeSessionSigners`), em vez de passar vazia. Se o signer estiver desautorizado e o `guardian_execute` **não** for recusado, a fase falha — é uma asserção de custódia, não um relatório.
+
+**CI do merge, confirmado depois de tudo:** run `35814416591` em `00b0ef2` → **os quatro jobs `test` verdes** (`ubuntu-22.04 3.12`, `macos-15 3.12`, `windows-2022 3.12`, `windows-2022 3.11`), `build` e `release` `skipped` por desenho. Foi a primeira exposição dos testes de integração da 1.12.0 (`fake_seraph_as`, OAuth + P-256) a Linux e macOS, e eles passaram. O run `35814010965` em `7d181b1` aparece `cancelled` apenas porque o push de documentação o superou (o workflow tem cancel-in-progress) e cobria código idêntico.
