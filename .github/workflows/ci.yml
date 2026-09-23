@@ -48,7 +48,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libportaudio2 libegl1 libgl1 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-xkb1 libxkbcommon-x11-0
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-xkb1 libxkbcommon-x11-0 xvfb
+      - name: Virtual display for headless Qt and input libraries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
       - name: Isolated test environment with application dependencies
         run: |
           python -m venv .venv-test
