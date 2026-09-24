@@ -145,6 +145,7 @@ HELP_TEXT = (
     "remove &lt;TICKER&gt; / unwatch &lt;TICKER&gt; &mdash; drop a token from the watchlist<br>"
     "unwrap [CHAIN] &mdash; live mode only: converts wallet WETH back to native ETH (sell proceeds land as WETH, see help on why). Runs automatically after every live sell whenever the WETH is worth clearly more than its own gas cost &mdash; this is only needed for WETH left over from before, or if an auto-unwrap got skipped as not worth it yet<br>"
     "sync / sync positions &mdash; live mode only: re-check on-chain balances now and close/adjust any position sold or moved outside the app (also runs automatically every scan cycle)<br>"
+    "forget &lt;TICKER&gt; &mdash; dismiss a HELD ELSEWHERE entry (a position whose tokens are in a different wallet than your current Seraph wallet) once you've dealt with it; nothing on-chain is touched<br>"
     "resume &mdash; clear a HALT (e.g. Max Drawdown hit) and rebase the drawdown baseline to current equity, without wiping trade history/P&amp;L/watchlist. RESET LEDGER remains the way to fully wipe everything and start over<br>"
     "adopt &lt;TICKER&gt;:0xTOKEN_ADDR[:0xTXHASH] &mdash; live mode only: record a real on-chain holding the ledger never tracked (a fill that fell through a timeout/RPC hiccup, or a trade made outside the app). 0xTOKEN_ADDR is the TOKEN's own contract address (same as in buy/watch) &mdash; NOT your wallet address, even though the point of this command is recognizing your wallet's holding. With a tx hash, cost basis is exact &mdash; read from that transaction's own ETH spent + gas. Without one, cost basis is approximate &mdash; today's market price, not the real entry price<br>"
     "scan / /scan &mdash; scan right now instead of waiting for the rest of the interval<br>"
@@ -246,6 +247,11 @@ class TraderEngine:
             "realizedPnlUsd": 0,
             "positions": [],
             "livePositions": [],
+            # Live positions whose tokens aren't in the current Seraph wallet
+            # (see _detach_unowned_live_positions) — kept out of livePositions
+            # so nothing trades, values, or auto-closes them, but never
+            # silently forgotten either.
+            "detachedLivePositions": [],
             "pendingLiveBuys": [],
             "liveRealizedPnlUsd": 0,
             "liveStartingEquityUsd": None,
@@ -290,8 +296,14 @@ class TraderEngine:
         ws = (self.wallet_status() if self.wallet_status else None) or {"connected": False}
         if not ws.get("connected"):
             return
-        changed = False
+        changed = self._detach_unowned_live_positions(ws)
         for pos in list(self.state["livePositions"]):
+            # Only positions confirmed to belong to this wallet — a zero
+            # balance here means nothing for one whose ownership check was
+            # skipped above (RPC error), and closing it would be exactly
+            # the silent loss _detach_unowned_live_positions exists to stop.
+            if (pos.get("wallet") or "").lower() != ws["address"].lower():
+                continue
             try:
                 real_qty = live_mod.token_balance(pos.get("chain"), pos["address"], ws["address"])
             except Exception as err:
@@ -318,6 +330,68 @@ class TraderEngine:
             self._emit({"type": "state", **self.public_state()})
         else:
             self._persist()
+
+    def _detach_unowned_live_positions(self, ws: dict) -> bool:
+        """GEMZ4US, 2026-09-24 (Item F): v1.12.0 replaced the on-device
+        wallet with the server-side Seraph wallet, a different address.
+        Live positions the old wallet opened stayed in the ledger while
+        their tokens stayed in the old wallet — so the zero-balance check
+        in _reconcile_live_positions would close them as "sold or moved
+        outside the app", which is false, and the holding would silently
+        vanish from the app.
+
+        Live positions are now stamped with the wallet that opened them. A
+        position stamped with a different wallet, or an unstamped (older)
+        one with no balance in the current wallet, is moved to
+        detachedLivePositions: out of trading, equity, and auto-close, but
+        still shown. An unstamped one that DOES have a balance here is
+        claimed by the current wallet. Returns whether anything changed."""
+        current = ws.get("address")
+        if not current:
+            return False
+        changed = False
+        for pos in list(self.state["livePositions"]):
+            owner = pos.get("wallet")
+            if owner and owner.lower() == current.lower():
+                continue
+            if owner:
+                reason = f"opened by wallet {owner}, not your current Seraph wallet {current}"
+            else:
+                try:
+                    real_qty = live_mod.token_balance(pos.get("chain"), pos["address"], current)
+                except Exception as err:
+                    self._emit({"type": "log", "text": f"wallet check for {pos['symbol']} skipped: {err}"})
+                    continue
+                if real_qty > 0:
+                    pos["wallet"] = current
+                    changed = True
+                    continue
+                reason = ("none of it is in your current Seraph wallet — most likely opened by the "
+                          "on-device wallet used before v1.12.0, which still holds the tokens")
+            self.state["livePositions"] = [p for p in self.state["livePositions"] if p is not pos]
+            self.state["detachedLivePositions"].append({**pos, "detachedAt": _now_iso(), "detachedReason": reason})
+            self._emit({"type": "log", "text": f"⚠ {pos['symbol']} moved to HELD ELSEWHERE — {reason}. Nothing was sold or "
+                                                f"moved; this app just can't trade it from the current wallet."})
+            changed = True
+        if changed:
+            self._persist()
+        return changed
+
+    def _detached_hint(self, symbol: str) -> str:
+        if any(p["symbol"] == symbol for p in self.state["detachedLivePositions"]):
+            return (f" — {symbol} is listed as HELD ELSEWHERE: its tokens are in a different wallet than your "
+                    f"current Seraph wallet, so this app can't trade it. \"forget {symbol}\" dismisses the entry.")
+        return ""
+
+    def forget_detached(self, symbol: str) -> dict:
+        before = len(self.state["detachedLivePositions"])
+        self.state["detachedLivePositions"] = [p for p in self.state["detachedLivePositions"] if p["symbol"] != symbol]
+        if len(self.state["detachedLivePositions"]) == before:
+            return {"ok": False, "message": f"no HELD ELSEWHERE entry for {symbol}"}
+        self._persist()
+        self._emit({"type": "log", "text": f"{symbol} HELD ELSEWHERE entry dismissed — nothing on-chain was touched"})
+        self._emit({"type": "state", **self.public_state()})
+        return {"ok": True, "message": f"dismissed the HELD ELSEWHERE entry for {symbol} (nothing on-chain was touched)"}
 
     def _reconcile_pending_live_buys(self):
         """A LIVE buy whose confirmation wait timed out (live.BuyPendingError,
@@ -355,7 +429,7 @@ class TraderEngine:
             self._merge_position(self.state["livePositions"], {
                 "symbol": pend["symbol"], "address": pend["address"], "chain": pend.get("chain", chains_mod.DEFAULT_CHAIN),
                 "qty": outcome["qty"], "entryPriceUsd": outcome["priceUsd"], "costUsd": outcome["costUsd"],
-                "openedAt": pend["submittedAt"], "txHash": pend["txHash"],
+                "openedAt": pend["submittedAt"], "txHash": pend["txHash"], "wallet": ws["address"],
             })
             self.state["tradesToday"]["count"] += 1
             self._emit({"type": "buy", "symbol": pend["symbol"], "address": pend["address"], "priceUsd": outcome["priceUsd"],
@@ -502,6 +576,8 @@ class TraderEngine:
         existing["costUsd"] += entry["costUsd"]
         if entry.get("txHash"):
             existing["txHash"] = entry["txHash"]
+        if entry.get("wallet") and not existing.get("wallet"):
+            existing["wallet"] = entry["wallet"]
 
     def _execute_buy(self, token: dict, price_usd: float, context: dict):
         trade_size_usd = self._pick_trade_size_usd()
@@ -537,7 +613,7 @@ class TraderEngine:
             self._merge_position(self.state["livePositions"], {
                 "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
                 "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "costUsd": result["costUsd"],
-                "openedAt": _now_iso(), "txHash": result["txHash"],
+                "openedAt": _now_iso(), "txHash": result["txHash"], "wallet": result.get("wallet"),
             })
             self.state["tradesToday"]["count"] += 1
             self._emit({"type": "buy", "symbol": token["symbol"], "address": token["address"], "priceUsd": result["priceUsd"],
@@ -1055,6 +1131,7 @@ class TraderEngine:
             "equityUsd": self.state["lastLiveEquityUsd"] if live else self.state["lastEquityUsd"],
             "realizedPnlUsd": self.state["liveRealizedPnlUsd"] if live else self.state["realizedPnlUsd"],
             "positions": self.state["livePositions"] if live else self.state["positions"],
+            "detachedPositions": self.state["detachedLivePositions"],
             "tradesToday": self.state["tradesToday"]["count"],
             "halted": self.state["halted"],
         }
@@ -1101,6 +1178,11 @@ class TraderEngine:
         # funds through the server-side signer, so it fails closed on its own.
         if not ws.get("connected") or not ws.get("signerGranted"):
             return {"ok": False, "error": "authorize your Seraph wallet in the console before arming live mode"}
+        # Item F (2026-09-24): before the starting equity below, not after —
+        # a position held by another wallet counted into the drawdown
+        # baseline would read as an instant loss once the first scan cycle
+        # detached it, and could trip MAX DRAWDOWN on its own.
+        self._detach_unowned_live_positions(ws)
         try:
             eth_price_usd = live_mod.eth_usd_price()
             eth_bal_usd = live_mod.wallet_equity_usd_across_chains(self._enabled_live_chains(), ws["address"], eth_price_usd)
@@ -1246,7 +1328,7 @@ class TraderEngine:
     def sell_one(self, symbol: str, bypass_gate: bool = False) -> dict:
         pos = next((p for p in self._positions() if p["symbol"].upper() == symbol), None)
         if not pos:
-            return {"ok": False, "message": f"no open position in {symbol}"}
+            return {"ok": False, "message": f"no open position in {symbol}" + self._detached_hint(symbol)}
         try:
             price_usd = market.current_price(pos["address"], pos.get("chain"))
             self._execute_sell(pos, price_usd, "manual sell", 1, bypass_gate)
@@ -1259,7 +1341,7 @@ class TraderEngine:
     def hold_one(self, symbol: str) -> dict:
         pos = next((p for p in self._positions() if p["symbol"] == symbol), None)
         if not pos:
-            return {"ok": False, "message": f"no open position in {symbol}"}
+            return {"ok": False, "message": f"no open position in {symbol}" + self._detached_hint(symbol)}
         if pos.get("held"):
             return {"ok": False, "message": f"{symbol} is already held"}
         pos["held"] = True
@@ -1270,7 +1352,7 @@ class TraderEngine:
     def unhold_one(self, symbol: str) -> dict:
         pos = next((p for p in self._positions() if p["symbol"] == symbol), None)
         if not pos:
-            return {"ok": False, "message": f"no open position in {symbol}"}
+            return {"ok": False, "message": f"no open position in {symbol}" + self._detached_hint(symbol)}
         if not pos.get("held"):
             return {"ok": False, "message": f"{symbol} is not held"}
         pos["held"] = False
@@ -1282,7 +1364,7 @@ class TraderEngine:
         symbol = (symbol_raw or "").upper()
         pos = next((p for p in self._positions() if p["symbol"] == symbol), None)
         if not pos:
-            return {"ok": False, "message": f"no open position in {symbol}"}
+            return {"ok": False, "message": f"no open position in {symbol}" + self._detached_hint(symbol)}
         try:
             fraction = float(pct) / 100
         except (TypeError, ValueError):
@@ -1362,6 +1444,7 @@ class TraderEngine:
             return {"ok": False, "message": f"adopt {symbol} failed: {address} is your wallet address, not a contract — "
                                              f'use the TOKEN\'s own contract address (the same kind you\'d use in "buy {symbol}:0xADDR")'}
 
+        detached = None
         if tx_hash:
             existing = next((p for p in self.state["livePositions"] if p["symbol"] == symbol), None)
             if existing and existing.get("txHash") == tx_hash:
@@ -1387,18 +1470,32 @@ class TraderEngine:
             new_qty = real_qty - already_qty
             if new_qty <= 0:
                 return {"ok": False, "message": f"adopt {symbol} failed: on-chain balance ({real_qty:g}) is already fully accounted for in the ledger"}
-            try:
-                entry_price_usd = market.current_price(address, chain)
-            except Exception as err:
-                return {"ok": False, "message": f"adopt {symbol} failed: could not fetch a market price for cost basis: {err}"}
+            # Item F (2026-09-24): tokens moved over from the wallet a HELD
+            # ELSEWHERE entry points at still have their real, recorded
+            # entry price — use it rather than today's market rate, as long
+            # as the amount arriving isn't more than that entry covered.
+            detached = next((p for p in self.state["detachedLivePositions"]
+                             if p["address"].lower() == address.lower() and (p.get("chain") or chains_mod.DEFAULT_CHAIN) == chain
+                             and new_qty <= p["qty"] * 1.01), None)
+            if detached:
+                entry_price_usd = detached["entryPriceUsd"]
+                basis_note = "original entry price, carried over from the HELD ELSEWHERE entry"
+            else:
+                try:
+                    entry_price_usd = market.current_price(address, chain)
+                except Exception as err:
+                    return {"ok": False, "message": f"adopt {symbol} failed: could not fetch a market price for cost basis: {err}"}
+                basis_note = "approximate — no tx hash given, priced at today's market rate, not the real entry price"
             cost_usd = new_qty * entry_price_usd
-            basis_note = "approximate — no tx hash given, priced at today's market rate, not the real entry price"
 
         self._merge_position(self.state["livePositions"], {
             "symbol": symbol, "address": address, "chain": chain,
             "qty": new_qty, "entryPriceUsd": entry_price_usd, "costUsd": cost_usd,
-            "openedAt": _now_iso(), "txHash": tx_hash or "",
+            "openedAt": _now_iso(), "txHash": tx_hash or "", "wallet": ws["address"],
         })
+        if detached:
+            self.state["detachedLivePositions"] = [p for p in self.state["detachedLivePositions"] if p is not detached]
+            self._emit({"type": "log", "text": f"{symbol} HELD ELSEWHERE entry cleared — now tracked in your current Seraph wallet"})
         # Item J (GEMZ4US, 2026-09-20): EQUITY was valuing this and every
         # other adopted position at cost, never market, since this call
         # always passed no snaps and previously always fell back to cost.
@@ -1567,8 +1664,12 @@ class TraderEngine:
             if m.group(2):
                 return self.sell_one(symbol, True)
             if not any(p["symbol"] == symbol for p in self._positions()):
-                return {"ok": False, "message": f"no open position in {symbol}"}
+                return {"ok": False, "message": f"no open position in {symbol}" + self._detached_hint(symbol)}
             return {"ok": True, "sellPrompt": True, "symbol": symbol, "message": f"pick how much of {symbol} to sell:"}
+
+        m = re.match(r"^forget\s+([a-z0-9]+)$", lower)
+        if m:
+            return self.forget_detached(m.group(1).upper())
 
         m = re.match(r"^hold\s+([a-z0-9]+)$", lower)
         if m:
@@ -1582,7 +1683,7 @@ class TraderEngine:
         if m:
             symbol = m.group(1).upper()
             if not any(p["symbol"] == symbol for p in self._positions()):
-                return {"ok": False, "message": f"no open position in {symbol}"}
+                return {"ok": False, "message": f"no open position in {symbol}" + self._detached_hint(symbol)}
             return {"ok": True, "takeProfitPrompt": True, "symbol": symbol, "message": f"pick a percentage of {symbol} to take profit on:"}
 
         m = re.match(r"^buy\s+(.+)$", raw, re.I)

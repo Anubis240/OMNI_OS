@@ -1444,7 +1444,8 @@ class TraderPanel(QWidget):
         # here too, badged and read-only, so a real position is never
         # invisible just because the mode toggle is elsewhere.
         live_elsewhere = [] if self.engine.armed_live else (self.engine.state.get("livePositions") or [])
-        if not positions and not live_elsewhere:
+        detached = self.engine.state.get("detachedLivePositions") or []
+        if not positions and not live_elsewhere and not detached:
             empty_lbl = QLabel("no open positions")
             empty_lbl.setFont(QFont("Segoe UI", 9))
             empty_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
@@ -1461,7 +1462,30 @@ class TraderPanel(QWidget):
             lbl.setFont(QFont("Segoe UI", 9))
             lbl.setStyleSheet(f"color: {C.ACC}; background: transparent;")
             lay.addWidget(lbl, stretch=1)
-            note = QLabel("switch to LIVE mode to manage")
+            # Item F (2026-09-24): a position with no wallet stamp predates
+            # stamping, so which wallet holds it is only checked once LIVE
+            # is armed — say so rather than implying it's ready to manage.
+            note = QLabel("switch to LIVE mode to manage" if p.get("wallet")
+                          else "wallet not verified yet — checked when LIVE is armed")
+            note.setFont(QFont("Segoe UI", 7))
+            note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(note)
+            self._positions_layout.insertWidget(self._positions_layout.count() - 1, row)
+
+        # Item F (2026-09-24): positions whose tokens are in a different
+        # wallet than the current Seraph wallet (see engine.py's
+        # _detach_unowned_live_positions) — shown read-only, never traded.
+        for p in detached:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(f"[HELD ELSEWHERE] {p['symbol']:<8} qty={p['qty']:.4f}  entry=${p['entryPriceUsd']:.6f}  cost=${p['costUsd']:.2f}")
+            lbl.setFont(QFont("Segoe UI", 9))
+            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            lbl.setToolTip(p.get("detachedReason") or "")
+            lay.addWidget(lbl, stretch=1)
+            note = QLabel(f"not in current wallet — \"forget {p['symbol']}\" to dismiss")
             note.setFont(QFont("Segoe UI", 7))
             note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             lay.addWidget(note)
@@ -1769,6 +1793,13 @@ class TraderPanel(QWidget):
                 "Resetting stops tracking them here — your funds stay exactly where they are "
                 "on-chain, nothing is sold or moved, but this app will no longer show them. "
                 "Use the \"adopt\" command afterward to bring each one back into the ledger."
+            )
+        detached = self.engine.state.get("detachedLivePositions") or []
+        if detached:
+            symbols = ", ".join(p["symbol"] for p in detached)
+            text += (
+                f"\n\n⚠ Your {len(detached)} HELD ELSEWHERE entr{'y' if len(detached) == 1 else 'ies'} ({symbols}) "
+                "will also be wiped — they're this app's only record that those tokens sit in a different wallet."
             )
         text += "\n\nReset the ledger?"
         box.setText(text)

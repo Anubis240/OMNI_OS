@@ -707,7 +707,10 @@ class EquityRefreshOnLowFrequencyActionsTests(unittest.TestCase):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_arm_live_values_open_positions_at_market_not_cost(self):
-        with patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+        # token_balance: arm_live() now verifies each unstamped position is
+        # really in this wallet before counting it (Item F, 2026-09-24).
+        with patch.object(live_mod, "token_balance", return_value=2.0), \
+             patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
              patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
              patch.object(engine_mod.market, "current_price", return_value=7.0) as mock_price:
             result = self.engine.arm_live()
@@ -758,6 +761,131 @@ class EquityRefreshOnLowFrequencyActionsTests(unittest.TestCase):
 
         expected = 5.0 + 2.0 * 7.0
         self.assertAlmostEqual(self.engine.state["lastEquityUsd"], expected)
+
+
+class DetachUnownedLivePositionsTests(unittest.TestCase):
+    """GEMZ4US, Item F (2026-09-24): v1.12.0 swapped the on-device wallet
+    for the server-side Seraph wallet (a different address). Two LIVE
+    positions (UNI, LINK) opened by the old wallet stayed in the ledger;
+    once the new wallet was authorized, the zero-balance reconcile would
+    have closed them as "sold or moved outside the app" — false, the
+    tokens never left the old wallet. They must be moved aside instead."""
+
+    OLD_WALLET = "0x3333333333333333333333333333333333333333"
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": True, "address": OWNER_ADDRESS, "signerGranted": True})
+        self.engine.armed_live = True
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _pos(self, symbol="UNI", **overrides):
+        pos = {"symbol": symbol, "address": TOKEN_ADDRESS, "chain": "ethereum",
+               "qty": 0.2, "entryPriceUsd": 10.0, "costUsd": 2.0, "openedAt": "2026-09-18T12:00:00+00:00", "txHash": TX_HASH}
+        pos.update(overrides)
+        return pos
+
+    def _reconcile(self, balance):
+        with patch.object(live_mod, "token_balance", return_value=balance), \
+             patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=10.0):
+            self.engine._reconcile_live_positions()
+
+    def test_unstamped_position_with_no_balance_is_detached_not_closed(self):
+        self.engine.state["livePositions"] = [self._pos()]
+        self._reconcile(balance=0)
+
+        self.assertEqual(self.engine.state["livePositions"], [])
+        detached = self.engine.state["detachedLivePositions"]
+        self.assertEqual(len(detached), 1)
+        self.assertEqual(detached[0]["symbol"], "UNI")
+        self.assertAlmostEqual(detached[0]["costUsd"], 2.0)  # record kept intact
+        self.assertIn("before v1.12.0", detached[0]["detachedReason"])
+        texts = [e.get("text", "") for e in self.engine.journal_tail(20)]
+        self.assertFalse(any("sold or moved outside the app" in t for t in texts))
+        self.assertTrue(any("HELD ELSEWHERE" in t for t in texts))
+
+    def test_unstamped_position_with_a_balance_is_claimed_by_current_wallet(self):
+        self.engine.state["livePositions"] = [self._pos()]
+        self._reconcile(balance=0.2)
+
+        self.assertEqual(self.engine.state["detachedLivePositions"], [])
+        self.assertEqual(self.engine.state["livePositions"][0]["wallet"], OWNER_ADDRESS)
+
+    def test_position_stamped_with_another_wallet_is_detached_without_rpc(self):
+        self.engine.state["livePositions"] = [self._pos(wallet=self.OLD_WALLET)]
+        with patch.object(live_mod, "token_balance") as mock_balance:
+            self.engine._detach_unowned_live_positions({"connected": True, "address": OWNER_ADDRESS})
+        mock_balance.assert_not_called()
+        self.assertEqual(self.engine.state["livePositions"], [])
+        self.assertIn(self.OLD_WALLET, self.engine.state["detachedLivePositions"][0]["detachedReason"])
+
+    def test_own_stamped_position_with_no_balance_still_closes_as_before(self):
+        self.engine.state["livePositions"] = [self._pos(wallet=OWNER_ADDRESS.upper().replace("0X", "0x"))]
+        self._reconcile(balance=0)
+
+        self.assertEqual(self.engine.state["livePositions"], [])
+        self.assertEqual(self.engine.state["detachedLivePositions"], [])
+        texts = [e.get("text", "") for e in self.engine.journal_tail(20)]
+        self.assertTrue(any("sold or moved outside the app" in t for t in texts))
+
+    def test_failed_ownership_check_neither_detaches_nor_closes(self):
+        self.engine.state["livePositions"] = [self._pos()]
+        with patch.object(live_mod, "token_balance", side_effect=RuntimeError("all RPC endpoints failed")):
+            self.engine._reconcile_live_positions()
+        self.assertEqual(len(self.engine.state["livePositions"]), 1)
+        self.assertEqual(self.engine.state["detachedLivePositions"], [])
+
+    def test_arm_live_detaches_before_computing_starting_equity(self):
+        self.engine.armed_live = False
+        self.engine.state["livePositions"] = [self._pos(qty=1.0, costUsd=10.0)]
+        with patch.object(live_mod, "token_balance", return_value=0), \
+             patch.object(live_mod, "eth_usd_price", return_value=3000.0), \
+             patch.object(live_mod, "wallet_equity_usd_across_chains", return_value=5.0), \
+             patch.object(engine_mod.market, "current_price", return_value=10.0):
+            result = self.engine.arm_live()
+        self.assertTrue(result["ok"])
+        # Only the wallet's own ETH — the other wallet's UNI must not inflate
+        # the drawdown baseline.
+        self.assertAlmostEqual(self.engine.state["liveStartingEquityUsd"], 5.0)
+        self.assertEqual(len(self.engine.state["detachedLivePositions"]), 1)
+
+    def test_sell_on_detached_symbol_explains_why(self):
+        self.engine.state["detachedLivePositions"] = [self._pos(detachedReason="x")]
+        result = self.engine.command("sell UNI")
+        self.assertFalse(result["ok"])
+        self.assertIn("HELD ELSEWHERE", result["message"])
+
+    def test_forget_dismisses_the_entry(self):
+        self.engine.state["detachedLivePositions"] = [self._pos(detachedReason="x")]
+        result = self.engine.command("forget uni")
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.engine.state["detachedLivePositions"], [])
+        self.assertFalse(self.engine.command("forget uni")["ok"])
+
+    def test_adopt_after_transfer_restores_original_entry_price(self):
+        self.engine.state["detachedLivePositions"] = [self._pos(detachedReason="x")]
+        with patch.object(live_mod, "token_balance", return_value=0.2), \
+             patch.object(engine_mod.market, "current_price", return_value=50.0) as mock_price:
+            result = self.engine.adopt_one(f"UNI:{TOKEN_ADDRESS}")
+        self.assertTrue(result["ok"])
+        self.assertIn("original entry price", result["message"])
+        pos = self.engine.state["livePositions"][0]
+        self.assertAlmostEqual(pos["entryPriceUsd"], 10.0)
+        self.assertAlmostEqual(pos["costUsd"], 2.0)
+        self.assertEqual(pos["wallet"], OWNER_ADDRESS)
+        self.assertEqual(self.engine.state["detachedLivePositions"], [])
+
+    def test_state_saved_before_this_change_loads_with_an_empty_detached_list(self):
+        self.engine._state_file().parent.mkdir(parents=True, exist_ok=True)
+        self.engine._state_file().write_text('{"livePositions": []}', encoding="utf-8")
+        self.assertEqual(self.engine._load_state()["detachedLivePositions"], [])
 
 
 class ScanCadenceTests(unittest.TestCase):

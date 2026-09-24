@@ -600,7 +600,7 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
     # the desktop no longer quotes or signs gas locally (the Seraph wallet
     # does, server-side), so there is no local quote to compare against.
     return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd,
-            "dex": quote["dex"], "priceImpactBps": price_impact_bps}
+            "dex": quote["dex"], "priceImpactBps": price_impact_bps, "wallet": status["address"]}
 
 
 def live_sell(position: dict, min_net_profit_usd: float = 0, qty: float | None = None, cost_basis_usd: float | None = None, bypass_gate: bool = False) -> dict:
