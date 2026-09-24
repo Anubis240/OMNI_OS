@@ -1,6 +1,6 @@
 # Trader Panel
 
-> **Source:** `trader_panel.py` (`TraderPanel`, `McpKeySetupOverlay`), authentication in `trader/seraph_auth.py`, engine in `trader/engine.py` (`TraderEngine`), chain registry in `trader/chains.py`
+> **Source:** `trader_panel.py` (`TraderPanel`, `McpKeyKeyPrompt`), authentication in `trader/seraph_auth.py`, engine in `trader/engine.py` (`TraderEngine`), chain registry in `trader/chains.py`
 > **Module:** Trader
 > **Generated:** 2026-09-11
 

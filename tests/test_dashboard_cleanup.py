@@ -1,16 +1,14 @@
-"""dashboard/server.py — centralized control-client removal and the
-disconnect callback. Uses fake WebSocket-shaped objects; never starts a
-real HTTP(S) listener."""
+"""dashboard/server.py — phone socket bookkeeping and pairing keys.
+Uses fake sockets; never starts a real listener."""
 
+import time
 import unittest
+from unittest.mock import patch
 
-from dashboard.server import DashboardServer
+from dashboard.server import DashboardServer, PairingKey
 
 
-class _FakeWebSocket:
-    """Just enough surface for _remove_client/broadcast: hashable (used in
-    a set) and an awaitable send_json that can be made to fail."""
-
+class _FakeSocket:
     def __init__(self, fails=False):
         self.fails = fails
         self.sent: list[dict] = []
@@ -21,95 +19,83 @@ class _FakeWebSocket:
         self.sent.append(msg)
 
 
-class DashboardCleanupTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.server = DashboardServer()
-        self.calls = 0
-        self.server.set_disconnect_callback(lambda: setattr(self, "calls", self.calls + 1))
-
-    def test_removing_the_last_client_fires_callback_once(self):
-        ws = _FakeWebSocket()
-        self.server._clients.add(ws)
-        self.server._remove_client(ws)
-        self.assertEqual(self.calls, 1)
-        self.assertNotIn(ws, self.server._clients)
-
-    def test_removing_one_of_several_clients_does_not_fire(self):
-        ws1, ws2 = _FakeWebSocket(), _FakeWebSocket()
-        self.server._clients.update({ws1, ws2})
-        self.server._remove_client(ws1)
-        self.assertEqual(self.calls, 0)
-        self.assertIn(ws2, self.server._clients)
-
-    def test_removing_an_already_absent_client_is_a_no_op(self):
-        ws = _FakeWebSocket()  # never added
-        self.server._remove_client(ws)
-        self.assertEqual(self.calls, 0)
-
-    def test_double_removal_of_the_same_client_fires_once(self):
-        """Mirrors the real /ws handler: the heartbeat's dead-path and the
-        main loop's own finally-block cleanup can both run for the same
-        disconnect. Only the one that actually empties the set should fire."""
-        ws = _FakeWebSocket()
-        self.server._clients.add(ws)
-        self.server._remove_client(ws)  # heartbeat path
-        self.server._remove_client(ws)  # finally-block path, same websocket
-        self.assertEqual(self.calls, 1)
-
-    async def test_broadcast_removing_the_final_client_fires_callback(self):
-        """The exact race a Codex review found: broadcast() used to remove
-        dead clients via `self._clients -= dead` directly, bypassing the
-        was-it-still-there check entirely, so the callback never fired when
-        broadcast() (not the heartbeat) was the one to notice the last
-        client was gone."""
-        ws = _FakeWebSocket(fails=True)
-        self.server._clients.add(ws)
-        await self.server.broadcast({"type": "sys", "text": "hello"})
-        self.assertEqual(self.calls, 1)
-        self.assertEqual(self.server._clients, set())
-
-    async def test_broadcast_removing_one_dead_client_among_live_ones_does_not_fire(self):
-        dead = _FakeWebSocket(fails=True)
-        alive = _FakeWebSocket()
-        self.server._clients.update({dead, alive})
-        await self.server.broadcast({"type": "sys", "text": "hello"})
-        self.assertEqual(self.calls, 0)
-        self.assertEqual(self.server._clients, {alive})
-        self.assertEqual(alive.sent, [{"type": "sys", "text": "hello"}])
-
-    async def test_broadcast_then_heartbeat_cleanup_on_same_client_fires_once(self):
-        """The full race: broadcast() sees the send fail and removes the
-        client first; the heartbeat's own cleanup for that same socket runs
-        after. Must not double-fire, and must not silently skip firing."""
-        ws = _FakeWebSocket(fails=True)
-        self.server._clients.add(ws)
-        await self.server.broadcast({"type": "sys", "text": "hello"})
-        self.server._remove_client(ws)  # heartbeat/finally cleanup, runs later
-        self.assertEqual(self.calls, 1)
-
-
-class NewKeyRevocationTests(unittest.TestCase):
-    """GEMZ4US, Item G (2026-09-21): generating a new pairing key didn't
-    revoke the previous one -- key A, already superseded on screen by key
-    B, still successfully paired in a fresh browser session right up
-    until its own original 10-minute expiry. Multiple keys could be
-    simultaneously valid; only time-based expiry ever invalidated one.
-    This gates access to a real-funds LIVE app."""
+class PhoneSocketTests(unittest.IsolatedAsyncioTestCase):
+    """The desktop's CONNECTED/DISCONNECTED badge depends on the 'last phone
+    left' callback firing exactly once per real disconnect, whichever of the
+    heartbeat, a failed send or the handler's own exit notices first."""
 
     def setUp(self):
         self.server = DashboardServer()
+        self.left = 0
+        self.server.set_disconnect_callback(lambda: setattr(self, "left", self.left + 1))
 
-    def test_generating_a_new_key_revokes_the_previous_one(self):
-        key_a = self.server.new_key()
-        key_b = self.server.new_key()
-        self.assertNotEqual(key_a, key_b)
-        self.assertNotIn(key_a, self.server._pending_keys)
-        self.assertIn(key_b, self.server._pending_keys)
+    def test_last_phone_leaving_fires_once(self):
+        sock = _FakeSocket()
+        self.server.phones.sockets.add(sock)
+        self.server.phones.drop(sock)
+        self.server.phones.drop(sock)   # a second path noticing the same disconnect
+        self.assertEqual(self.left, 1)
 
-    def test_only_the_most_recent_key_is_ever_pending(self):
-        for _ in range(5):
-            self.server.new_key()
-        self.assertEqual(len(self.server._pending_keys), 1)
+    def test_one_of_several_leaving_does_not_fire(self):
+        a, b = _FakeSocket(), _FakeSocket()
+        self.server.phones.sockets.update({a, b})
+        self.server.phones.drop(a)
+        self.assertEqual(self.left, 0)
+        self.assertEqual(self.server.phones.sockets, {b})
+
+    def test_dropping_an_unknown_socket_is_a_no_op(self):
+        self.server.phones.drop(_FakeSocket())
+        self.assertEqual(self.left, 0)
+
+    async def test_failed_send_drops_the_socket_and_fires_once(self):
+        dead = _FakeSocket(fails=True)
+        self.server.phones.sockets.add(dead)
+        await self.server.broadcast({"type": "sys", "text": "hi"})
+        self.server.phones.drop(dead)   # heartbeat cleanup arriving later
+        self.assertEqual(self.left, 1)
+        self.assertEqual(self.server.phones.sockets, set())
+
+    async def test_live_phones_still_receive_when_another_fails(self):
+        dead, live = _FakeSocket(fails=True), _FakeSocket()
+        self.server.phones.sockets.update({dead, live})
+        await self.server.broadcast({"type": "sys", "text": "hi"})
+        self.assertEqual(self.left, 0)
+        self.assertEqual(live.sent, [{"type": "sys", "text": "hi"}])
+
+    async def test_history_is_capped(self):
+        for n in range(150):
+            await self.server.broadcast({"n": n})
+        self.assertEqual(len(self.server._history), 100)
+        self.assertEqual(self.server._history[0], {"n": 50})
+
+
+class PairingKeyTests(unittest.TestCase):
+    """GEMZ4US Item G: a superseded key must stop working immediately — this
+    gates access to an app that can trade real funds."""
+
+    def test_new_key_revokes_the_previous_one(self):
+        keys = PairingKey()
+        first, second = keys.issue(), keys.issue()
+        self.assertNotEqual(first, second)
+        self.assertFalse(keys.redeem(first))
+        self.assertTrue(keys.redeem(second))
+
+    def test_a_key_works_once_and_ignores_case(self):
+        keys = PairingKey()
+        key = keys.issue()
+        self.assertTrue(keys.redeem(key.lower()))
+        self.assertFalse(keys.redeem(key))
+
+    def test_expired_key_is_refused(self):
+        keys = PairingKey()
+        key = keys.issue(lifetime=60)
+        with patch("dashboard.server.time.time", return_value=time.time() + 61):
+            self.assertFalse(keys.redeem(key))
+
+    def test_keys_avoid_look_alike_characters(self):
+        keys = PairingKey()
+        for _ in range(50):
+            self.assertFalse(set(keys.issue()) & set("OIL01"))
 
 
 if __name__ == "__main__":

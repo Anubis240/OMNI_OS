@@ -1,11 +1,14 @@
+"""Developer setup for running Omni-OS from source: Python packages, then
+Playwright's browser engines. (The installer build bundles both.)"""
+
 import subprocess
 import sys
 
-print("Installing requirements...")
-subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+for step, command in (
+    ("Python packages", [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"]),
+    ("browser engines for web automation", [sys.executable, "-m", "playwright", "install", "chromium", "firefox", "webkit"]),
+):
+    print(f"Installing {step}…")
+    subprocess.run(command, check=True)
 
-print("Installing Playwright browsers...")
-subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
-
-print("\n✅ Setup complete! Run 'python main.py' to start MARK XXV.")
-
+print("Ready. Start Omni-OS with:  python main.py")

@@ -2,11 +2,11 @@
 
 ## 1. Gemini Live connection (the core API)
 
-**Client:** `google-genai` SDK, `client.aio.live.connect(model=..., config=types.LiveConnectConfig(...))` (`main.py::JarvisLive`).
+**Client:** `google-genai` SDK, `client.aio.live.connect(model=..., config=types.LiveConnectConfig(...))` (`voice/session.py::Assistant`).
 
 **Model:** `models/gemini-2.5-flash-native-audio-preview-12-2025` (`core/settings_store.DEFAULT_LIVE_MODEL`), overridable per-companion or globally via Settings.
 
-**Config assembled fresh on every (re)connect**, `main.py::_build_config()`, in this order:
+**Config assembled fresh on every (re)connect**, `voice/prompt.py::build()` plus `voice/dispatch.py::ToolRouter.declarations()`, in this order:
 1. Load `settings.json`; resolve the active companion (or fall back to the unnamespaced default "Omni" identity).
 2. Resolve the effective model (companion override → global override → hardcoded default).
 3. Load that companion's memory namespace and format it into a `[WHAT YOU KNOW ABOUT THIS PERSON]`-style block.
@@ -20,7 +20,7 @@
 
 **This entire assembly only happens once per connection** — see the README's "Reconnect-to-apply" note for the product implication.
 
-## 2. Built-in Tool Catalog (`TOOL_DECLARATIONS`, `main.py:264-768`)
+## 2. Built-in Tool Catalog (`toolkit/*.py` via `toolkit.schemas()`, plus the session tools in `voice/dispatch.py`)
 
 All 23 tools Gemini can call regardless of Integrations/MCP/Skills configuration. Names and descriptions are copied verbatim from source (they double as the actual model-facing prompt text).
 
@@ -31,28 +31,26 @@ All 23 tools Gemini can call regardless of Integrations/MCP/Skills configuration
 | `weather_report` | Gives the weather report to user | `city` (required) |
 | `send_message` | Sends a text message via WhatsApp, Telegram, or other messaging platform | `receiver`, `message_text`, `platform` (all required) |
 | `reminder` | Sets a timed reminder using Task Scheduler | `date`, `time`, `message` (all required) |
-| `youtube_video` | Play / summarize / get info / show trending YouTube videos | `action`, `query`, `save`, `region`, `url` |
 | `screen_process` | Captures and analyzes the screen or webcam image | `angle` (screen/camera), `text` (required) |
 | `computer_settings` | Volume, brightness, window mgmt, shortcuts, typing, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tabs, zoom, screenshots, lock, refresh | `action`, `description`, `value` |
 | `browser_control` | Controls any web browser: navigate, search, click, fill forms, scroll, screenshot, tabs, multi-browser | `action` (required, 20 sub-actions), `browser`, `url`, `query`, `selector`, `text`, etc. |
 | `file_controller` | Manages files/folders: list, create, delete, move, copy, rename, read, write, find, disk usage | `action` (required), `path`, `destination`, `new_name`, `content`, `name`, `extension`, `count` |
-| `desktop_control` | Wallpaper, organize, clean, list, stats | `action` (required), `path`, `url`, `mode`, `task` |
+| `desktop_control` | Wallpaper (file or URL), current wallpaper, organize, clean, list, stats | `action` (required), `path`, `url`, `mode` |
 | `code_helper` | Writes/edits/explains/runs/builds source code files — never prose | `action` (required), `description`, `language`, `output_path`, `file_path`, `code`, `args`, `timeout` |
 | `dev_agent` | Builds a brand-new project from scratch (plans, writes files, installs deps, opens VS Code, runs/fixes errors) | `description` (required), `language`, `project_name`, `timeout` |
 | `claude_agent` | Delegates to Claude running as a real coding agent with Obsidian-vault + file/tool access, for existing-project work | `request` (required), `timeout` |
 | `agent_task` | Executes complex multi-step tasks needing multiple different tools | `goal` (required), `priority` |
 | `computer_control` | Direct input control: type, click, hotkeys, scroll, move, screenshot, on-screen element finding | `action` (required, 17 sub-actions), `text`, `x`, `y`, `keys`, `key`, etc. |
-| `game_updater` | The only tool for any Steam/Epic Games request: install/update/list/schedule | `action`, `platform`, `game_name`, `app_id`, `hour`, `minute`, `shutdown_when_done` |
-| `flight_finder` | Searches Google Flights and speaks the best options | `origin`, `destination`, `date` (required), `return_date`, `passengers`, `cabin`, `save` |
 | `generate_image` | Generates an image from a text description via AI image generation | `prompt` (required) |
 | `launch_trader` | Opens the Trader panel (does not itself trade) | none |
 | `delegate_to_agent` | Hands a task to a named sub-agent to work on in the background | `agent_name`, `task` (both required) |
 | `share_file` | Gives the user a clickable web link (via the Remote Dashboard) to a local file, instead of a `file://` path | `path` (required) |
-| `shutdown_seraph` | Shuts down the assistant completely | none |
+| `close_assistant` | Closes Omni-OS when the user clearly wants to end the session | none |
+| `get_current_time` | The real current date and time (the prompt's own timestamp can be stale after a reconnect) | none |
 | `file_processor` | Acts on an uploaded/dropped file — images, PDFs, docx/txt, CSV/Excel, JSON/XML, code, audio, video, archives, presentations | `file_path`, `action`, `instruction`, `format`, plus type-specific params (width/height/scale/quality/start/end/timestamp/column/value/condition/ascending/save/destination) |
 | `save_memory` | Silently saves an important personal fact to long-term memory | `category`, `key`, `value` (all required) |
 
-Plus three modules appended separately (own `TOOL_DECLARATIONS`, concatenated at `main.py:766-768`): **blockchain read-only tools** (`actions/blockchain_readonly.py`), **action-item extraction** (`actions/action_items.py`), and **weekly review** (`actions/weekly_review.py`) — not individually re-verified for this PRD; `[TBC]` for their exact parameter shapes.
+Plus three modules appended separately (own `TOOL_DECLARATIONS`, concatenated in `voice/dispatch.py::ToolRouter.declarations()`): **blockchain read-only tools** (`actions/blockchain_readonly.py`), **action-item extraction** (`actions/action_items.py`), and **weekly review** (`actions/weekly_review.py`) — not individually re-verified for this PRD; `[TBC]` for their exact parameter shapes.
 
 Two tools are conditionally excluded from the declared list before it's sent to Gemini: `launch_trader` when the Trader feature is disabled in Settings, and `delegate_to_agent` when there are no eligible sub-agent companions.
 
@@ -78,7 +76,7 @@ This is a private protocol the desktop itself defines — not Gemini's wire form
 
 ## 6. Agent-CLI Delegation (sub-agents)
 
-`main.py::_agent_send_fn(backend)` / `_delegate_to_agent` / `_run_delegation` dispatch a `delegate_to_agent` call to one of: `claude_agent`, `codex_agent`, `opencode_agent`, `openhands_agent`, `grok_agent`, `blackbox_agent` — each backed by its own module under `actions/` (`claude_companion.py`, `codex_companion.py`, `opencode_companion.py`, `openhands_companion.py`, `grok_companion.py`, `blackbox_companion.py`) that shells out to that product's local CLI using the path/vault-dir configured in Settings. The call returns immediately with an acknowledgement; the sub-agent's actual result surfaces asynchronously back into the conversation.
+`voice/session.py::_agent_sender(backend)` / `Assistant.delegate` / `Assistant._delegated` dispatch a `delegate_to_agent` call to one of: `claude_agent`, `codex_agent`, `opencode_agent`, `openhands_agent`, `grok_agent`, `blackbox_agent` — each backed by its own module under `actions/` (`claude_companion.py`, `codex_companion.py`, `opencode_companion.py`, `openhands_companion.py`, `grok_companion.py`, `blackbox_companion.py`) that shells out to that product's local CLI using the path/vault-dir configured in Settings. The call returns immediately with an acknowledgement; the sub-agent's actual result surfaces asynchronously back into the conversation.
 
 ## 7. Third-Party Trading Risk Gate (Seraph)
 

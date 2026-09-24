@@ -3,7 +3,7 @@
 Swapped into the center stack exactly like TraderPanel/SettingsPanel (see
 MainWindow._toggle_integrations_panel()). Reads/writes
 core.settings_store.INTEGRATION_CATALOG + settings["integrations"]; the
-actual API calls live in actions/integrations/. `from ui import C` is a
+actual API calls live in actions/integrations/. `from gui.theme import C` is a
 deferred import for the same reason trader_panel.py/settings_panel.py do it.
 """
 
@@ -87,7 +87,7 @@ class IntegrationsPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from ui import C  # deferred — see module docstring
+        from gui.theme import C
         self._C = C
         self.settings = settings_store.load_settings()
         self._search = ""
@@ -134,7 +134,7 @@ class IntegrationsPanel(QWidget):
         self._search_input.textChanged.connect(self._on_filter_changed)
         bar.addWidget(self._search_input, stretch=1)
 
-        from ui import NoScrollComboBox  # deferred — see module docstring
+        from gui.theme import NoScrollComboBox
         self._category_combo = NoScrollComboBox()
         categories = ["All Categories"] + sorted({e["category"] for e in settings_store.INTEGRATION_CATALOG})
         self._category_combo.addItems(categories)

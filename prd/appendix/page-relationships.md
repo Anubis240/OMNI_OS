@@ -30,10 +30,10 @@
 
 | Written by | Read by | Shared state |
 |---|---|---|
-| Settings → Companions | Main Window (switcher), World (graph), `main.py::_build_config` | `settings["companions"]`, `settings["active_companion_id"]` |
-| World panel | Main Window (sub-agent directory only via `_build_config`), `delegate_to_agent` dispatch | Same `settings["companions"]` list, filtered to agent backends |
-| Settings → Skills / MCP Servers | `main.py::_build_config` (next reconnect only) | `settings["skills"]`, `settings["mcp_servers"]` |
-| Integrations panel | `main.py::_build_config` (next reconnect only) | `settings["integrations"]` |
+| Settings → Companions | Main Window (switcher), World (graph), `voice/prompt.py::build` | `settings["companions"]`, `settings["active_companion_id"]` |
+| World panel | Main Window (sub-agent directory only via `voice/prompt.py::build`), `delegate_to_agent` dispatch | Same `settings["companions"]` list, filtered to agent backends |
+| Settings → Skills / MCP Servers | `voice/prompt.py::build` (next reconnect only) | `settings["skills"]`, `settings["mcp_servers"]` |
+| Integrations panel | `voice/prompt.py::build` (next reconnect only) | `settings["integrations"]` |
 | Settings → Trader toggle | Main Window (`_refresh_trader_visibility`), `main.py` (tool filtering) | `settings["trader"]["enabled"]` |
 | Trader panel | Remote Dashboard (`/api/trader/state`, `/api/trader/action`) | `TraderEngine.public_state()` / `.command()` via `MainWindow.get_trader_state`/`run_trader_action` |
 | Remote Dashboard pairing (desktop) | Remote Dashboard (phone) | Access key + LAN URL, time-limited |

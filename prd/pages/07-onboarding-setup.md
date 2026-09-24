@@ -1,39 +1,39 @@
 # Onboarding & Setup Overlays
 
-> **Source:** `ui.py` (`SetupOverlay`, `RemoteKeyOverlay`); `trader_panel.py` (`McpKeySetupOverlay`)
+> **Source:** `gui/firstrun.py` (`KeyPrompt`), `gui/pairing.py` (`PairingCard`); `trader_panel.py` (`McpKeyKeyPrompt`)
 > **Module:** Onboarding
 > **Generated:** 2026-09-11
 
 ## Overview
 
-Three modal overlays that gate access to parts of the app until a precondition is met: `SetupOverlay` blocks the entire HUD on first run until a Gemini API key and OS selection are provided; `RemoteKeyOverlay` is the phone-pairing QR screen described in the Remote Dashboard page; `McpKeySetupOverlay` ("Connect to Seraph") gates the Trader Panel when no Seraph credential is available or the session expires. The Seraph overlay is local to the Trader Panel, not a global app overlay.
+Three modal overlays that gate access to parts of the app until a precondition is met: `KeyPrompt` blocks the entire HUD on first run until a Gemini API key and OS selection are provided; `PairingCard` is the phone-pairing QR screen described in the Remote Dashboard page; `McpKeyKeyPrompt` ("Connect to Seraph") gates the Trader Panel when no Seraph credential is available or the session expires. The Seraph overlay is local to the Trader Panel, not a global app overlay.
 
 ## Layout
 
-### SetupOverlay
+### KeyPrompt
 A centered modal card over a dimmed HUD: title/explainer text, an API-key password input, an OS selector, and a submit button.
 
-### RemoteKeyOverlay
+### PairingCard
 A centered modal card: LAN URL + access key rendered as a QR code (`_update_qr`), a countdown/expiry indicator (`_tick`), connected/disconnected state (`mark_connected`/`mark_disconnected`), and a "new key" action (`_refresh_key`) for when the prior key expires before pairing completes.
 
-### McpKeySetupOverlay ("Connect to Seraph")
+### McpKeyKeyPrompt ("Connect to Seraph")
 A modal inside the Trader Panel with a primary browser sign-in button, a status line, and a cancel button during pending login. An alternative API-key link reveals a password input and save button, with a link to obtain a key in the console. All panel controls (configuration, start, scan, and command bar) remain blocked until authentication completes. There is no "Skip for now" option: without authentication, the trader cannot be used. When system encryption is unavailable, the overlay warns that the credential will be stored without operating-system protection.
 
 ## Fields
 
-### SetupOverlay
+### KeyPrompt
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | Gemini API key | Password input | Yes | Stored to `config/api_keys.json` |
 | OS | Selector (`_sel`) | Yes | Used to tailor OS-specific behavior in `computer_settings`/`desktop_control` tools |
 
-### RemoteKeyOverlay
+### PairingCard
 | Field | Type | Notes |
 |---|---|---|
 | QR code | Generated image | Encodes the LAN URL + access key |
 | Expiry countdown | Read-only, ticking | `expiry_secs` default 600 |
 
-### McpKeySetupOverlay
+### McpKeyKeyPrompt
 | Field | Type | Notes |
 |---|---|---|
 | Sign in with Seraph | Button | Opens browser sign-in; creates the device API key automatically |
@@ -64,12 +64,12 @@ A modal inside the Trader Panel with a primary browser sign-in button, a status 
 - **Alternative flow:** "Use an API key instead" reveals the password field for a key created manually in the console. A manual key does not carry the execution scope, so live mode is refused with an explicit message.
 
 ## API Dependencies
-- `SetupOverlay` has no direct API dependency; it only writes local config.
-- `RemoteKeyOverlay` only renders state produced by `DashboardServer.new_key()`.
-- `McpKeySetupOverlay` depends on the Seraph authorization server (metadata, dynamic client registration, authorize, and token) and the control-plane (device API-key creation and revocation).
+- `KeyPrompt` has no direct API dependency; it only writes local config.
+- `PairingCard` only renders state produced by `DashboardServer.new_key()`.
+- `McpKeyKeyPrompt` depends on the Seraph authorization server (metadata, dynamic client registration, authorize, and token) and the control-plane (device API-key creation and revocation).
 
 ## Page Relationships
-- **From:** app launch (`SetupOverlay`, conditionally) or the Main Window sidebar (`RemoteKeyOverlay`).
+- **From:** app launch (`KeyPrompt`, conditionally) or the Main Window sidebar (`PairingCard`).
 - **To:** Main Window, once either overlay's precondition is satisfied.
 - **From (Seraph):** opening the Trader Panel without a credential, or session expiration within that panel.
 - **To (Seraph):** the unlocked [Trader Panel](./05-trader-panel.md), once authentication completes; this does not gate the rest of the app. Live mode additionally requires execution scope and signer authorization.

@@ -22,17 +22,17 @@ A single self-contained HTML page (`_APP_HTML`, served at `/`) with:
 ### Pairing / Login
 | Field | Type | Notes |
 |---|---|---|
-| Access key | Auto-filled from QR, or manual entry | Time-limited (`new_key(expiry_secs=600)` default) — a `RemoteKeyOverlay` on desktop shows the QR and a countdown, and can mint a fresh key |
+| Access key | Auto-filled from QR, or manual entry | Time-limited (`PairingKey`, 600 s) — a `PairingCard` on desktop shows the QR and a countdown, and can mint a fresh key |
 
 ## Interactions
 
 ### Pair via QR
-- **Trigger:** desktop user opens the Remote pairing overlay (`RemoteKeyOverlay`).
+- **Trigger:** desktop user opens the Remote pairing overlay (`PairingCard`).
 - **Behavior:** desktop generates a fresh key + LAN URL, renders it as a QR code; scanning it opens `/auto-login?key=...` on the phone, which validates the key and redirects into the main app page, or the phone can instead see live connect/disconnect status reflected as `mark_connected`/`mark_disconnected` on the desktop overlay.
 
 ### Voice/text from the phone
 - **Trigger:** phone user taps mic or types in the mirrored chat.
-- **Behavior:** phone-side JS opens `/ws` for command/text/log traffic and a separate `/ws/audio` for raw mic audio; the desktop relays this into the same `JarvisLive` session as if spoken locally (`_relay_phone_audio`, `_process_dashboard_commands`).
+- **Behavior:** phone-side JS opens `/ws` for command/text/log traffic and a separate `/ws/audio` for raw mic audio; the desktop relays this into the same live session as if spoken locally (`voice/phone.py::PhoneBridge._voice`, `PhoneBridge._typed_messages`).
 - **Known issue, fixed this cycle:** the phone's mic-capture JS only opened `/ws/audio` lazily, from inside `startMic()`; if that reconnecting WebSocket handshake hadn't finished yet, the very first phone utterance after a reconnect could be silently dropped with zero buffering. Fixed by buffering pending mic frames (`pendingMicFrames`, capped at `MAX_PENDING_MIC_FRAMES`) and flushing them once the socket's `onopen` fires.
 
 ### Trader mirroring

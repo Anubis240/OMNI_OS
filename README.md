@@ -319,14 +319,16 @@ ISCC is absent; it does not silently fall back to a downloaded installer.
 
 | Path | Purpose |
 |---|---|
-| `main.py` | Application entry point |
-| `ui.py` | Main assistant UI |
+| `main.py` | Application entry point (process setup, then the window and the assistant) |
+| `voice/` | The live Gemini session: connection loop, mic/speaker, prompt, tool dispatch, phone relay |
+| `gui/` | The desktop window: orb, chat, status card, pairing card, first-run prompt |
+| `toolkit/` | The built-in voice tools (apps, files, browser, code, documents, vision, system…) |
 | `world_panel.py` | World view — the live sub-agent node graph |
 | `integrations_panel.py` | Integrations tab UI |
 | `trader_panel.py`, `trader/` | Trading panel and engine (market data, chains, wallet, live execution) |
 | `settings_panel.py` | In-app settings UI (API keys, companions, MCP, integrations, skills) |
-| `agent/` | Planner, executor, task queue, error handling |
-| `actions/` | Individual tool/action implementations (browser, files, desktop, code, etc.) |
+| `agent/` | Background multi-step tasks (`agent_task`): queue and function-calling worker |
+| `actions/` | Feature modules outside the toolkit: image generation, trader launch, blockchain read-only, companions |
 | `actions/claude_companion.py` | Turn-based conversation driver for Claude-backed sub-agents |
 | `actions/claude_agent.py` | One-shot Claude Agent SDK delegation tool |
 | `actions/integrations/` | Per-service integration implementations (GitHub, Slack, Google, etc.) |

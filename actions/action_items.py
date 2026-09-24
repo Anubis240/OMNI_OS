@@ -1,6 +1,6 @@
 """Extracts action items (task, owner, deadline) from pasted meeting notes
 or document text using Gemini, then files each one into memory under the
-"projects" category via memory_manager.update_memory — the same store and
+"projects" category via memory.profile.remember — the same store and
 same "projects" bucket a companion's own remembered work already lives in —
 so weekly_review.py can later surface them as commitments and flag ones
 that have gone stale. Inspired by the Hermes Agent skill catalog's
@@ -16,7 +16,7 @@ the active companion is known — this module has no access to it otherwise.
 import json
 
 from core.app_paths import get_data_dir
-from memory import memory_manager
+from memory import profile
 
 TOOL_DECLARATIONS = [
     {
@@ -101,7 +101,7 @@ def extract_action_items(parameters: dict, player=None, namespace: str | None = 
     if not lines:
         return "No clear action items found in that text."
 
-    memory_manager.update_memory(updates, namespace=namespace)
+    profile.remember(updates, namespace=namespace)
     if player:
         try:
             player.write_log(f"[ActionItems] Filed {len(lines)} item(s) under '{source}'")

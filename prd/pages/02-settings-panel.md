@@ -62,7 +62,7 @@ A free-form named-key vault (`custom_api_keys`: `[{id, name, value}]`) for anyth
 | URL | Text input | MCP server endpoint |
 | API key | Password input | Optional, per-server |
 
-Add/remove; each save shows the reconnect-required note. Declarations are gathered live (`core/mcp_registry.gather_custom_tool_declarations`) on every `_build_config()` call via a background thread, so a slow/offline server can't freeze the app.
+Add/remove; each save shows the reconnect-required note. Declarations are gathered live (`core/mcp_registry.gather_custom_tool_declarations`) on every `voice/dispatch.py::ToolRouter.declarations()` call via a background thread, so a slow/offline server can't freeze the app.
 
 ### Skills Section
 | Field | Type | Notes |
@@ -92,9 +92,9 @@ This page mostly writes to local JSON (`core/settings_store.save_settings`) rath
 
 | Dependency | Trigger | Notes |
 |---|---|---|
-| Configured MCP server's `tools/list` | Every `_build_config()` call (not from this panel directly) | Runs off the main event loop via `asyncio.to_thread` |
+| Configured MCP server's `tools/list` | Every `voice/dispatch.py::ToolRouter.declarations()` call (not from this panel directly) | Runs off the main event loop via `asyncio.to_thread` |
 
 ## Page Relationships
 - **From:** Main Window sidebar gear icon.
 - **To:** none (terminal panel); Companions section changes are reflected live in the World panel's sub-agent graph and the Main Window's companion switcher.
-- **Data coupling:** every section here writes to the same `settings.json` also read by `main.py::_build_config()`, `integrations_panel.py`, `world_panel.py`, and `trader_panel.py`.
+- **Data coupling:** every section here writes to the same `settings.json` also read by `voice/prompt.py::build()`, `integrations_panel.py`, `world_panel.py`, and `trader_panel.py`.

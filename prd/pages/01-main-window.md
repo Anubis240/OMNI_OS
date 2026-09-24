@@ -1,6 +1,6 @@
 # Main Window — HUD & Chat
 
-> **Source:** `ui.py` (`MainWindow`, `JarvisUI`, `HudCanvas`, `LogWidget`, `_SysMetrics`) · `main.py` (`JarvisLive`)
+> **Source:** `gui/` (`window.MainWindow`, `facade.OmniUI`, `orb.OrbView`, `chatlog.ChatLog`, `sysinfo.Sampler`) · `voice/session.py` (`Assistant`)
 > **Module:** Core Assistant
 > **Generated:** 2026-09-11
 
@@ -10,12 +10,12 @@ The always-open home screen of Omni-OS: a fullscreen, near-black HUD showing an 
 
 ## Layout
 
-- **Center:** `HudCanvas` — an animated particle-sphere / video face that reacts to app state (idle, listening, speaking) and can show a theme-specific companion video.
+- **Center:** `OrbView` — an animated particle sphere that reacts to app state (idle, listening, speaking) and can show a theme-specific companion video.
 - **Top bar:** live clock, connection/state pill (`_refresh_state_pill`), companion switcher (name + left/right chevrons to cycle companions).
 - **Left sidebar:** icon buttons — mute mic, mute speech output, always-listening toggle, open Trader, open Settings, open Integrations, open World, open Remote Dashboard pairing.
 - **Status card:** a togglable panel under the top bar that can switch into "trader config" mode (`_set_status_card_mode`) showing live system metrics (CPU/GPU/RAM/temperature via `_SysMetrics`) otherwise.
 - **Bottom:** chat input row with a text field, send button, and a file-attach button opening a `FileDropZone` (drag-and-drop or browse) for uploads the `file_processor` tool can act on.
-- **Chat/log panel:** `LogWidget`, a `QTextBrowser`-based scrolling feed rendering `SYS:`, `you:`, `omni:` (and legacy `jarvis:`) tagged lines in distinct colors, one line queued and animated in at a time.
+- **Chat/log panel:** `ChatLog`, a `QTextBrowser`-based scrolling feed rendering `SYS:`, `You:`, `Omni:`, `[Phone]:`, `ERR:` and `FILE:` tagged lines in distinct colors, one line queued and animated in at a time.
 
 ## Fields
 
@@ -34,12 +34,12 @@ The always-open home screen of Omni-OS: a fullscreen, near-black HUD showing an 
 ## Interactions
 
 ### App launch
-- If no Gemini API key is configured, a modal `SetupOverlay` blocks the HUD until one is entered (see [07-onboarding-setup.md](./07-onboarding-setup.md)).
-- Otherwise `JarvisLive.run()` connects to Gemini Live immediately; the very first successful connection logs `"SYS: OMNI-OS online."`; any later reconnect in the same process instead logs `"SYS: Reconnected (session #N)."` — a counter (`_connection_count`) was added specifically so the log doesn't misleadingly repeat "online" on every automatic reconnect.
+- If no Gemini API key is configured, a modal `KeyPrompt` blocks the HUD until one is entered (see [07-onboarding-setup.md](./07-onboarding-setup.md)).
+- Otherwise `Assistant.run()` (voice/session.py) connects to Gemini Live immediately; the very first successful connection logs `"SYS: OMNI-OS online."`; any later reconnect in the same process instead logs `"SYS: Reconnected (session #N)."` — a counter (`_connection_count`) was added specifically so the log doesn't misleadingly repeat "online" on every automatic reconnect.
 
 ### Voice conversation
 - **Trigger:** user speaks (mic always streaming unless muted) or types and sends.
-- **Behavior:** audio/text is forwarded to the current Gemini Live session; assistant audio plays back through `_play_audio`, transcripts append to the log, and any tool call Gemini requests is dispatched via `JarvisLive._execute_tool` (see [api-inventory.md](../appendix/api-inventory.md)).
+- **Behavior:** audio/text is forwarded to the current Gemini Live session; assistant audio plays back through `voice/audio.py::Speaker`, transcripts append to the log, and any tool call Gemini requests is dispatched via `voice/dispatch.py::ToolRouter.run` (see [api-inventory.md](../appendix/api-inventory.md)).
 - **Barge-in:** if Gemini reports `interrupted`, playback stops immediately.
 
 ### Companion switching
@@ -64,7 +64,7 @@ The always-open home screen of Omni-OS: a fullscreen, near-black HUD showing an 
 | Dependency | Trigger | Notes |
 |---|---|---|
 | Gemini Live `BidiGenerateContent` WS | App launch, companion switch, settings change requiring reconnect | See [api-inventory.md](../appendix/api-inventory.md) |
-| `_execute_tool` → one of ~23 built-in tools, active MCP servers, or active Integrations | Any Gemini tool call | Dispatch table lives in `main.py`; each tool's own module documents its side effects |
+| `ToolRouter.run` (voice/dispatch.py) → one of ~23 built-in tools, active MCP servers, or active Integrations | Any Gemini tool call | Dispatch table lives in `main.py`; each tool's own module documents its side effects |
 | `save_memory` (Gemini-initiated tool call) | Gemini decides a fact is worth remembering | Writes to the active companion's memory namespace — see `memory/memory_manager.py` |
 
 ## Page Relationships

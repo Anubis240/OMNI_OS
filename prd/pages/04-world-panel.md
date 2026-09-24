@@ -48,8 +48,8 @@ This panel is UI-only over local settings state; it does not call an external AP
 
 | Consumer | Trigger | Notes |
 |---|---|---|
-| `main.py::_build_config()`'s sub-agent directory | Every reconnect | Builds the `[SUB-AGENTS AVAILABLE]` prompt block from `settings["companions"]` filtered to agent backends, excluding the currently-active companion |
-| `JarvisLive._delegate_to_agent` / `_run_delegation` | A `delegate_to_agent` Gemini tool call | Dispatches to the named sub-agent's backend CLI, asynchronously |
+| `voice/prompt.py::build()`'s sub-agent directory | Every reconnect | Builds the `[SUB-AGENTS AVAILABLE]` prompt block from `settings["companions"]` filtered to agent backends, excluding the currently-active companion |
+| `Assistant.delegate` / `Assistant._delegated` (voice/session.py) | A `delegate_to_agent` Gemini tool call | Dispatches to the named sub-agent's backend CLI, asynchronously |
 
 ## Page Relationships
 - **From:** Main Window sidebar icon.

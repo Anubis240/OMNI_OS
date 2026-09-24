@@ -6,7 +6,7 @@ Delegation itself happens through the delegate_to_agent tool (see
 main.py::_delegate_to_agent / _run_delegation); this panel is purely the
 visualization plus where new sub-agents get created. Swapped into the
 center stack exactly like TraderPanel/SettingsPanel/IntegrationsPanel.
-`from ui import C, COMPANION_HUES` is a deferred import for the same reason
+`from gui.theme import C, COMPANION_HUES` is a deferred import for the same reason
 those other panels do it.
 """
 
@@ -67,7 +67,7 @@ _SUB_AGENT_BACKENDS = (
 class WorldPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        from ui import C, COMPANION_HUES  # deferred — see module docstring
+        from gui.theme import C, COMPANION_HUES
         self._C = C
         self._hues = COMPANION_HUES
         self.on_companion_added = None  # wired by MainWindow._ensure_world_panel() to trigger a live reconnect
@@ -254,7 +254,7 @@ class _GraphCanvas(QWidget):
         else:
             self._lead_card.update_content(lead_name, count_txt)
 
-        from ui import companion_color
+        from gui.theme import companion_color
 
         new_ids = {comp["id"] for comp in sub_agents}
         for old_id in list(self._sub_cards):
@@ -502,7 +502,7 @@ class _NodeCard(QFrame):
         fast animation timer, only for cards currently marked running."""
         if not self.is_running:
             return
-        from ui import lerp_hex
+        from gui.theme import lerp_hex
         C = self._C
         t = 0.5 + 0.5 * math.sin(phase * 0.12)
         glow = lerp_hex(self.color, C.WHITE, t * 0.5)
@@ -591,7 +591,7 @@ class _AddSubAgentDialog(QDialog):
 
         backend_label = "Backend" if self._is_lead else "Backend — which CLI this sub-agent runs on"
         self._labeled(lay, backend_label)
-        from ui import NoScrollComboBox  # deferred — see module docstring
+        from gui.theme import NoScrollComboBox
         self._backend = NoScrollComboBox()
         if self._is_lead:
             # A sub-agent can never legitimately be gemini_live-backed

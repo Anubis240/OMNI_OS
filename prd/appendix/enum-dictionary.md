@@ -3,8 +3,8 @@
 > Every value list below was read directly from source, not inferred. Line refs point at `Omni-OS/` unless noted.
 
 ## Gemini Live Prebuilt Voices
-`ui.py:150` — `VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"]`
-Selectable per-companion (Settings → Companions) or as the global default (`JarvisUI.voice`).
+`gui/theme.py` — `VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"]`
+Selectable per-companion (Settings → Companions) or as the global default (`OmniUI.voice`).
 
 ## Companion Backend
 `core/settings_store.py:64-68` — a companion's `backend` field:
@@ -103,4 +103,4 @@ Any non-`gemini_live` backend is eligible as a `delegate_to_agent` sub-agent tar
 `DEFAULT_CHAIN = "ethereum"`. Live chains route through Uniswap V2/V3 router + quoter contracts per-chain; each carries 1-2 public RPC fallback URLs. There is currently no UI field to add a chain to the enabled list (`_CONFIG_FIELDS` in `trader_panel.py` has no `chains` entry) — doing so today means hand-editing the trader config file.
 
 ## Dashboard Access-Key Lifecycle
-`dashboard/server.py::new_key(expiry_secs=600)` — default 10-minute expiry window to complete phone pairing; regenerable on demand from the desktop's `RemoteKeyOverlay`.
+`dashboard/server.py::PairingKey.issue()` (KEY_LIFETIME = 600 s) — default 10-minute expiry window to complete phone pairing; regenerable on demand from the desktop's `PairingCard`.

@@ -8,9 +8,9 @@ with.
 
 Swapped into the center stack exactly like TraderPanel (see
 MainWindow.open_settings_panel()) — same mechanic, own file, no cross-
-import between the two panels. `from ui import C` is a deferred import for
+import between the two panels. `from gui.theme import C` is a deferred import for
 the same reason trader_panel.py does it: avoids a circular import at
-module-load time since ui.py only imports this lazily, on first click.
+module-load time since gui/window.py only imports this lazily, on first click.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class SettingsPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from ui import C  # deferred — see module docstring
+        from gui.theme import C
         self._C = C
         self.settings = settings_store.load_settings()
 
@@ -64,7 +64,7 @@ class SettingsPanel(QWidget):
 
         self._status_sig.connect(self._show_status)
         self.on_companions_changed = None  # callable: () -> None — wired by
-                                             # ui.py::_ensure_settings_panel to
+                                             # gui/window.py (MainWindow._panel) to
                                              # MainWindow._notify_companions_changed,
                                              # same callback World Panel already uses
                                              # to force an immediate reconnect after
@@ -240,7 +240,7 @@ class SettingsPanel(QWidget):
         self._live_model.setText(self.settings.get("live_model", ""))
         lay.addWidget(self._make_button("SAVE", self._on_save_live_model))
 
-        from ui import VOICES, load_saved_voice, NoScrollComboBox  # deferred — see module docstring
+        from gui.theme import VOICES, load_saved_voice, NoScrollComboBox
         default_voice_lbl = QLabel("Default voice (used when no companion is active)")
         default_voice_lbl.setFont(QFont("Segoe UI", 8))
         default_voice_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
@@ -281,7 +281,7 @@ class SettingsPanel(QWidget):
         backend_lbl.setFont(QFont("Segoe UI", 8))
         backend_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
         lay.addWidget(backend_lbl)
-        from ui import NoScrollComboBox  # deferred — see module docstring
+        from gui.theme import NoScrollComboBox
         self._new_companion_backend = NoScrollComboBox()
         # display text -> backend id. Voice uses the live Gemini session (voice
         # field below applies); the two Text options each use their own
@@ -300,7 +300,7 @@ class SettingsPanel(QWidget):
         )
         lay.addWidget(self._new_companion_backend)
 
-        from ui import VOICES  # deferred — see module docstring
+        from gui.theme import VOICES
         voice_lbl = QLabel("Voice (used only for the Voice interaction mode)")
         voice_lbl.setFont(QFont("Segoe UI", 8))
         voice_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
@@ -376,7 +376,7 @@ class SettingsPanel(QWidget):
             self._companions_list_layout.addWidget(empty)
             return
 
-        from ui import COMPANION_HUES  # deferred — see module docstring
+        from gui.theme import COMPANION_HUES
 
         for i, comp in enumerate(companions):
             row = QWidget()
@@ -444,7 +444,7 @@ class SettingsPanel(QWidget):
         # _persist() and saves directly, then reuses the same reconnect-now
         # mechanism Section C3 already fixed for companion switching instead
         # of leaving this as another silent "next reconnect" dead end.
-        from ui import save_voice  # deferred — see module docstring
+        from gui.theme import save_voice
         save_voice(self._default_voice.currentText())
         self._status_sig.emit("Default voice saved — reconnecting now.", False)
         if self.on_companions_changed:
@@ -480,7 +480,7 @@ class SettingsPanel(QWidget):
         2026-09-11 report (GEMZ4US, Section B2): a companion deleted via the
         World Panel appeared to "survive" in Settings until removed there
         directly. Root cause — this panel is constructed once and reused
-        for the app's whole lifetime (see ui.py::_ensure_settings_panel),
+        for the app's whole lifetime (see gui/window.py (MainWindow._panel)),
         caching `self.settings` in memory at construction time; the World
         Panel's own delete path correctly writes to disk and notifies
         main.py to reconnect, but had no way to tell an already-open

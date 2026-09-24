@@ -2,10 +2,10 @@
 the old separate Electron window (see MainWindow.open_trader_panel()).
 
 Phase 1: paper-mode trading only, using trader/engine.py's TraderEngine.
-Reuses the app's existing color palette (class C in ui.py) directly — no
-new theme, no background video. `from ui import C, qcol` is a deferred
+Reuses the app's existing color palette (class C in gui/theme.py) directly — no
+new theme, no background video. `from gui.theme import C, qcol` is a deferred
 import (done inside __init__, not at module load time) so this module can
-be imported by ui.py without a circular-import at load time; ui.py itself
+be imported by gui/window.py without a circular-import at load time; gui/window.py itself
 only imports TraderPanel lazily, on first click of the TRADER button.
 """
 
@@ -245,7 +245,7 @@ class TraderPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from ui import C, qcol  # deferred — see module docstring
+        from gui.theme import C, qcol
         self._C = C
         self._qcol = qcol
         self._wallet_cache: dict = {}
@@ -1762,7 +1762,7 @@ class TraderPanel(QWidget):
         # every piece of app-supplied text invisible — message body AND
         # both button labels — leaving only the OS-drawn title bar legible.
         # Root cause: this app runs QApplication.setStyle("Fusion") (see
-        # ui.py's JarvisUI.__init__), and on a Windows box with the OS set
+        # gui/facade.py's OmniUI.__init__), and on a Windows box with the OS set
         # to dark mode, Qt6's Fusion style picks up a dark-mode-derived
         # default QPalette for text color while a stock QMessageBox's own
         # box/button faces don't follow along the same way — light text on

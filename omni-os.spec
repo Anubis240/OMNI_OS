@@ -7,7 +7,7 @@
 # onnxruntime, web3, torch-free but still heavy) and, more importantly,
 # several paths in this app (dashboard cert persistence, config files) are
 # written relative to the real install directory via a getattr(sys,
-# "frozen")-aware BASE_DIR helper (see ui.py/main.py/dashboard/server.py) —
+# "frozen")-aware BASE_DIR helper (see core/app_paths.py::get_data_dir) —
 # --onefile's temp extraction dir would break that persistence across runs.
 #
 # Deliberately NOT bundling config/*.json, config/certs/, or config/trader/
@@ -191,8 +191,8 @@ exe = EXE(
     icon=str(PROJECT_DIR / "assets" / "icon.ico") if sys.platform == "win32" else None,
     # PyInstaller 6.x defaults onedir builds to a separate "_internal"
     # subfolder for everything but the .exe itself. This app's own
-    # frozen-mode BASE_DIR (see get_base_dir()/_base_dir() in main.py/
-    # ui.py/dashboard/server.py) deliberately resolves to sys.executable's
+    # frozen-mode data dir (see core/app_paths.py::get_data_dir, used by
+    # every module) deliberately resolves to sys.executable's
     # own directory — for config/cert persistence, NOT a nested folder —
     # so bundled data (prompt.txt, avatar video/image) needs to live at
     # that same top level, not under _internal. (Belongs on EXE, not

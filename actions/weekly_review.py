@@ -17,7 +17,7 @@ namespace is passed in by the caller rather than looked up here.
 
 from datetime import datetime
 
-from memory import memory_manager
+from memory import profile
 
 STALE_AFTER_DAYS = 14
 
@@ -45,7 +45,7 @@ def _days_since(date_str: str) -> int | None:
 
 
 def weekly_review(parameters: dict = None, player=None, namespace: str | None = None) -> str:
-    memory = memory_manager.load_memory(namespace)
+    memory = profile.load(namespace)
 
     recent: list[str] = []
     stalled: list[tuple[int, str]] = []
