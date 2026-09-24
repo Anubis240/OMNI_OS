@@ -1694,6 +1694,17 @@ class TraderPanel(QWidget):
                 f"SYS: Min liquidity $ raised to the ${self.engine.config['minLiquidityUsd']:,.0f} minimum "
                 f"(entered {requested_liq:.0f})"
             )
+        # GEMZ4US, Item J (2026-09-23): same clamp notice for the 5-minute
+        # scan-interval floor as minLiquidityUsd already gets above — they
+        # asked for consistency after confirming by exact scan-start
+        # timestamps that a lower value was accepted with no rejection but
+        # silently never honored.
+        requested_interval = partial.get("intervalMinutes")
+        if requested_interval is not None and self.engine.config["intervalMinutes"] != requested_interval:
+            self._append_feed_text(
+                f"SYS: Scan interval raised to the {self.engine.config['intervalMinutes']:.0f}-minute minimum "
+                f"(entered {requested_interval:.0f})"
+            )
         # GEMZ4US, Item A (2026-09-20): every Config field silently ignored
         # unparseable input (a comma, a "K" suffix, ...) and kept its
         # previous value, with nothing in the Event Feed to say so — asked

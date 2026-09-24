@@ -37,6 +37,15 @@ from . import trending
 from .analysis import analyze
 
 MIN_LIQUIDITY_FLOOR_USD = 100000
+# GEMZ4US, Item J (2026-09-23): confirmed by exact scan-start timestamps
+# across 5 consecutive cycles that a configured interval below this floor
+# is silently ignored at scan time (_loop()'s own max(5, ...) below) — but
+# nothing told the user, so the CONFIG field kept showing whatever they'd
+# entered (e.g. "1") as if it had been honored. Clamping here too, at
+# set_config() time, so the stored config matches real behavior and
+# trader_panel.py can raise the same clamp notice minLiquidityUsd already
+# gets.
+SCAN_INTERVAL_FLOOR_MIN = 5
 
 # GEMZ4US, 2026-09-22 (Part 4): passive EQUITY refresh (phone dashboard
 # polling every few seconds, desktop panel every 30s) deliberately never
@@ -1021,7 +1030,7 @@ class TraderEngine:
             # makes scans start at the configured cadence, clamped to 0 so
             # a cycle that runs longer than the interval itself just means
             # back-to-back scans with no wait, not a negative sleep.
-            wait_seconds = max(5, self.config["intervalMinutes"]) * 60
+            wait_seconds = max(SCAN_INTERVAL_FLOOR_MIN, self.config["intervalMinutes"]) * 60
             elapsed = time.monotonic() - cycle_start
             self._wake_event.wait(max(0, wait_seconds - elapsed))
             self._wake_event.clear()
@@ -1132,6 +1141,7 @@ class TraderEngine:
         if self.config["tradeSizeMaxUsd"] < self.config["tradeSizeMinUsd"]:
             self.config["tradeSizeMaxUsd"] = self.config["tradeSizeMinUsd"]
         self.config["minLiquidityUsd"] = max(self.config.get("minLiquidityUsd") or 0, MIN_LIQUIDITY_FLOOR_USD)
+        self.config["intervalMinutes"] = max(self.config.get("intervalMinutes") or 0, SCAN_INTERVAL_FLOOR_MIN)
         self._save_config()
         return self.status()
 

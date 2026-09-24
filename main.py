@@ -1084,6 +1084,31 @@ class JarvisLive:
                     self._dashboard._phone_audio_in_queue.get(), timeout=1.0
                 )
             except asyncio.TimeoutError:
+                # GEMZ4US, N30 (2026-09-23): a controlled 11-attempt test
+                # isolated a real, severe failure mode beyond plain silent
+                # drops — a phone attempt sometimes doesn't vanish, it gets
+                # queued and MERGES into the next attempt's transcript, even
+                # across a full mic-off/mic-on cycle. Root cause: unlike the
+                # PC mic (a continuously-open stream where silence flows
+                # through naturally, giving Gemini's VAD what it needs to
+                # close a turn), the phone is tap-to-talk — the stream just
+                # stops dead when the button is released, no trailing
+                # silence, no signal telling the model this source is done.
+                # With nothing to close the turn, VAD can be left holding it
+                # open until the next tap's audio arrives and gets appended
+                # to it. send_realtime_input(audio_stream_end=True) is the
+                # SDK's own mechanism for exactly this — telling VAD a
+                # discrete audio source has ended — fired here on the same
+                # active-to-idle transition that already flips
+                # _phone_active, so it fires once per silence, not per poll.
+                if self._phone_active and self.session:
+                    try:
+                        await asyncio.wait_for(
+                            self.session.send_realtime_input(audio_stream_end=True),
+                            timeout=SEND_RESPONSE_TIMEOUT,
+                        )
+                    except Exception as err:
+                        self.ui.write_log(f"SYS: Phone audio_stream_end signal failed — {err}")
                 self._phone_active = False  # no audio for 1s — give the PC mic back
                 continue
             self._phone_active = True
