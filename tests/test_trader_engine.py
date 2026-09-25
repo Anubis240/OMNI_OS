@@ -340,6 +340,63 @@ class PaperBuyCostBasisTests(unittest.TestCase):
         self.assertAlmostEqual(pos["qty"] * pos["entryPriceUsd"], pos["costUsd"], places=9)
 
 
+class StopLossIgnoresGasTests(unittest.TestCase):
+    """Item M (GEMZ4US, 2026-09-23/24): SUPER bought for $4.80 ($1.80 trade
+    + $3 simulated gas) was stop-lossed at -62.97% one scan later with the
+    market price almost unchanged, then bought again. The stop-loss was
+    measured from the gas-inclusive entry price."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine()
+        self.engine.config["tradeSizeMinUsd"] = 1.80
+        self.engine.config["tradeSizeMaxUsd"] = 1.80
+        self.market_price = 0.17988
+        self.engine._execute_buy({"symbol": "SUPER", "address": TOKEN_ADDRESS, "chain": "ethereum"},
+                                 self.market_price, {"source": "scan"})
+        self.pos = self.engine.state["positions"][0]
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_reproduces_the_report_and_no_longer_trips_the_stop_loss(self):
+        self.assertAlmostEqual(self.pos["costUsd"], 4.80, places=2)
+        old_move = (self.market_price - self.pos["entryPriceUsd"]) / self.pos["entryPriceUsd"] * 100
+        self.assertAlmostEqual(old_move, -63.0, delta=0.5)  # what the old stop-loss saw
+        drop = self.engine._stop_loss_move_pct(self.pos, self.market_price)
+        self.assertGreater(drop, -self.engine.config["stopLossPct"])  # only the 0.8% swap fee/slippage
+        self.assertAlmostEqual(drop, -0.8, places=6)
+
+    def test_a_real_drop_still_trips_it(self):
+        drop = self.engine._stop_loss_move_pct(self.pos, self.market_price * 0.95)
+        self.assertLess(drop, -self.engine.config["stopLossPct"])
+
+    def test_take_profit_still_needs_the_gas_covered(self):
+        # +4% on the market price is still far below the gas-inclusive entry.
+        move = (self.market_price * 1.04 - self.pos["entryPriceUsd"]) / self.pos["entryPriceUsd"] * 100
+        self.assertLess(move, self.engine.config["takeProfitPct"])
+
+    def test_paper_position_from_before_the_fix_recovers_its_fill_price(self):
+        del self.pos["fillPriceUsd"]
+        drop = self.engine._stop_loss_move_pct(self.pos, self.market_price)
+        self.assertAlmostEqual(drop, -0.8, places=6)
+
+    def test_live_position_without_fill_price_keeps_the_old_basis(self):
+        pos = {"symbol": "UNI", "qty": 2.0, "entryPriceUsd": 10.0, "costUsd": 20.0}
+        self.engine.state["livePositions"] = [pos]
+        self.assertAlmostEqual(self.engine._stop_loss_move_pct(pos, 9.0), -10.0)
+
+    def test_merging_buys_averages_the_fill_price(self):
+        self.engine._execute_buy({"symbol": "SUPER", "address": TOKEN_ADDRESS, "chain": "ethereum"},
+                                 self.market_price * 2, {"source": "manual"})
+        self.assertEqual(len(self.engine.state["positions"]), 1)
+        # equal dollar amounts at 1x and 2x the price: qty-weighted fill is 4/3 of the first
+        self.assertAlmostEqual(self.pos["fillPriceUsd"], self.market_price / 0.992 * 4 / 3, places=9)
+
+
 class RouteLogLineTests(unittest.TestCase):
     """Item E (GEMZ4US, 2026-09-21): a real sell routed through a $51-
     liquidity V2 pool at ~15% worse than a $67K pool, only discoverable

@@ -428,8 +428,8 @@ class TraderEngine:
                 continue
             self._merge_position(self.state["livePositions"], {
                 "symbol": pend["symbol"], "address": pend["address"], "chain": pend.get("chain", chains_mod.DEFAULT_CHAIN),
-                "qty": outcome["qty"], "entryPriceUsd": outcome["priceUsd"], "costUsd": outcome["costUsd"],
-                "openedAt": pend["submittedAt"], "txHash": pend["txHash"], "wallet": ws["address"],
+                "qty": outcome["qty"], "entryPriceUsd": outcome["priceUsd"], "fillPriceUsd": outcome.get("fillPriceUsd"),
+                "costUsd": outcome["costUsd"], "openedAt": pend["submittedAt"], "txHash": pend["txHash"], "wallet": ws["address"],
             })
             self._trades_today()["count"] += 1
             self._emit({"type": "buy", "symbol": pend["symbol"], "address": pend["address"], "priceUsd": outcome["priceUsd"],
@@ -572,6 +572,8 @@ class TraderEngine:
             return
         total_qty = existing["qty"] + entry["qty"]
         existing["entryPriceUsd"] = (existing["qty"] * existing["entryPriceUsd"] + entry["qty"] * entry["entryPriceUsd"]) / total_qty
+        old_fill, new_fill = existing.get("fillPriceUsd"), entry.get("fillPriceUsd")
+        existing["fillPriceUsd"] = (existing["qty"] * old_fill + entry["qty"] * new_fill) / total_qty if old_fill and new_fill else None
         existing["qty"] = total_qty
         existing["costUsd"] += entry["costUsd"]
         if entry.get("txHash"):
@@ -612,8 +614,8 @@ class TraderEngine:
                 self._emit({"type": "log", "text": route_text})
             self._merge_position(self.state["livePositions"], {
                 "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
-                "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "costUsd": result["costUsd"],
-                "openedAt": _now_iso(), "txHash": result["txHash"], "wallet": result.get("wallet"),
+                "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "fillPriceUsd": result.get("fillPriceUsd"),
+                "costUsd": result["costUsd"], "openedAt": _now_iso(), "txHash": result["txHash"], "wallet": result.get("wallet"),
             })
             self._trades_today()["count"] += 1
             self._emit({"type": "buy", "symbol": token["symbol"], "address": token["address"], "priceUsd": result["priceUsd"],
@@ -634,15 +636,16 @@ class TraderEngine:
         # swap-fee/slippage cut), a real, reported display bug (GEMZ4US,
         # Finding #25, 2026-09-17): a FORCE BUY showed qty=0.8070
         # entry=$4.781742 cost=$6.89, where qty*entry ($3.86) didn't match
-        # cost ($6.89) at all. Deriving entryPriceUsd from cost also makes
-        # PAPER's take-profit/stop-loss % (computed against entryPriceUsd
-        # a few lines below in cycle()) correctly account for gas drag on
-        # breakeven, same as LIVE already does — not just a display fix.
+        # cost ($6.89) at all. Take-profit is measured against this
+        # gas-inclusive price, so it only fires once a sale covers the buy's
+        # gas too. The stop-loss is NOT (see _stop_loss_move_pct):
+        # fillPriceUsd is the gas-free price paid per token.
         entry_price_usd = total_cost / qty
         self.state["balanceUsd"] -= total_cost
         self._merge_position(self.state["positions"], {
             "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
-            "qty": qty, "entryPriceUsd": entry_price_usd, "costUsd": total_cost, "openedAt": _now_iso(),
+            "qty": qty, "entryPriceUsd": entry_price_usd, "fillPriceUsd": trade_size_usd / qty,
+            "costUsd": total_cost, "openedAt": _now_iso(),
         })
         self._trades_today()["count"] += 1
         self._emit({"type": "buy", "symbol": token["symbol"], "address": token["address"],
@@ -886,6 +889,25 @@ class TraderEngine:
             self.state["tradesToday"] = {"date": _today(), "count": 0}
         return self.state["tradesToday"]
 
+    def _stop_loss_move_pct(self, pos: dict, price_usd: float) -> float:
+        """% market move since the buy, measured from the gas-free price paid
+        per token (fillPriceUsd), for the stop-loss.
+
+        Item M (GEMZ4US, 2026-09-23/24): measured from the gas-inclusive
+        entryPriceUsd instead, a flat gas fee put small positions far below
+        the stop-loss the moment they were bought — a $1.80 PAPER trade plus
+        $3 simulated gas read -63% on its first scan with no market move,
+        sold, and was bought again on the next scan."""
+        basis = pos.get("fillPriceUsd")
+        if not basis:
+            basis = pos["entryPriceUsd"]
+            # Opened before fillPriceUsd existed. A PAPER position's cost is
+            # its trade size plus one flat gasUsd, so the fill price can be
+            # recovered; a LIVE one's real gas isn't on record.
+            if any(p is pos for p in self.state["positions"]) and pos["costUsd"] > self.config["gasUsd"]:
+                basis = (pos["costUsd"] - self.config["gasUsd"]) / pos["qty"]
+        return (price_usd - basis) / basis * 100
+
     def _cycle(self):
         self._trades_today()
 
@@ -1014,12 +1036,13 @@ class TraderEngine:
                     self._emit({"type": "log", "text": f"skip {pos['symbol']} (not on watchlist, price lookup failed): {err}"})
                     continue
             move_pct = ((price_usd - pos["entryPriceUsd"]) / pos["entryPriceUsd"]) * 100
+            drop_pct = self._stop_loss_move_pct(pos, price_usd)
             held_hours = (time.time() - datetime.fromisoformat(pos["openedAt"]).timestamp()) / 3600
             reason = None
             if move_pct >= self.config["takeProfitPct"] and not pos.get("held"):
                 reason = f"take-profit +{move_pct:.2f}%"
-            elif move_pct <= -self.config["stopLossPct"]:
-                reason = f"stop-loss {move_pct:.2f}%"
+            elif drop_pct <= -self.config["stopLossPct"]:
+                reason = f"stop-loss {drop_pct:.2f}%"
             elif held_hours >= self.config["maxHoldHours"]:
                 # GEMZ4US, 2026-09-18 (Finding G): "(max hold 0.3h)" could
                 # be misread as the configured threshold — it's actually
@@ -1468,6 +1491,7 @@ class TraderEngine:
             if info is None:
                 return {"ok": False, "message": f"adopt {symbol} failed: tx {tx_hash} not found, not confirmed, reverted, or delivered nothing to this wallet"}
             new_qty, entry_price_usd, cost_usd = info["qty"], info["priceUsd"], info["costUsd"]
+            fill_price_usd = info.get("fillPriceUsd")
             basis_note = "exact — from the tx's own ETH spent + gas"
         else:
             try:
@@ -1487,18 +1511,20 @@ class TraderEngine:
                              and new_qty <= p["qty"] * 1.01), None)
             if detached:
                 entry_price_usd = detached["entryPriceUsd"]
+                fill_price_usd = detached.get("fillPriceUsd")
                 basis_note = "original entry price, carried over from the HELD ELSEWHERE entry"
             else:
                 try:
                     entry_price_usd = market.current_price(address, chain)
                 except Exception as err:
                     return {"ok": False, "message": f"adopt {symbol} failed: could not fetch a market price for cost basis: {err}"}
+                fill_price_usd = entry_price_usd
                 basis_note = "approximate — no tx hash given, priced at today's market rate, not the real entry price"
             cost_usd = new_qty * entry_price_usd
 
         self._merge_position(self.state["livePositions"], {
             "symbol": symbol, "address": address, "chain": chain,
-            "qty": new_qty, "entryPriceUsd": entry_price_usd, "costUsd": cost_usd,
+            "qty": new_qty, "entryPriceUsd": entry_price_usd, "fillPriceUsd": fill_price_usd, "costUsd": cost_usd,
             "openedAt": _now_iso(), "txHash": tx_hash or "", "wallet": ws["address"],
         })
         if detached:
@@ -1530,12 +1556,13 @@ class TraderEngine:
             final_pos = next(p for p in self.state["livePositions"] if p["symbol"] == symbol)
             current_price_usd = market.current_price(address, chain)
             move_pct = (current_price_usd - final_pos["entryPriceUsd"]) / final_pos["entryPriceUsd"] * 100
-            if move_pct <= -self.config["stopLossPct"]:
-                warning = (f" ⚠ already {move_pct:.2f}% below entry — past your configured stop-loss "
+            drop_pct = self._stop_loss_move_pct(final_pos, current_price_usd)
+            if drop_pct <= -self.config["stopLossPct"]:
+                warning = (f" ⚠ already {drop_pct:.2f}% below entry — past your configured stop-loss "
                            f"(-{self.config['stopLossPct']}%). Starting the trader will sell this on the next "
                            f"scan for real unless you raise Stop loss % or handle it manually first.")
                 self._emit({"type": "log", "text": f"⚠ adopted {symbol} is already past its stop-loss threshold "
-                                                    f"({move_pct:.2f}% vs -{self.config['stopLossPct']}%) — starting the trader will sell it on the next scan"})
+                                                    f"({drop_pct:.2f}% vs -{self.config['stopLossPct']}%) — starting the trader will sell it on the next scan"})
             elif move_pct >= self.config["takeProfitPct"] and not final_pos.get("held"):
                 warning = (f" Note: already +{move_pct:.2f}% above entry — past your configured take-profit "
                            f"(+{self.config['takeProfitPct']}%). Starting the trader will sell this on the next "
