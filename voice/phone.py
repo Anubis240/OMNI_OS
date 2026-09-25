@@ -23,6 +23,7 @@ class PhoneBridge:
         self.a = assistant
         self.server = None
         self.talking = False   # phone mic currently streaming (the PC mic yields to it)
+        self._last_mirror: asyncio.Task | None = None
 
     # --- lifecycle ------------------------------------------------------
     def start(self) -> None:
@@ -70,8 +71,18 @@ class PhoneBridge:
         self.post({"type": "image", "data": f"data:{mime_type};base64,{encoded}"})
 
     def mirror_audio(self, chunk: bytes) -> None:
-        if self.server is not None:
-            asyncio.create_task(self.server.broadcast_audio(chunk))
+        """Forward reply audio to the phone. Chunks arrive in bursts, so each
+        send waits for the one before it — the phone must get them in order."""
+        if self.server is None:
+            return
+        before = self._last_mirror
+
+        async def send() -> None:
+            if before is not None and not before.done():
+                await asyncio.wait({before})
+            await self.server.broadcast_audio(chunk)
+
+        self._last_mirror = asyncio.create_task(send())
 
     # --- inbound --------------------------------------------------------
     async def _typed_messages(self) -> None:

@@ -85,6 +85,12 @@ class OmniUI:
     def show_speaking(self) -> None:
         self._win.activity_changed.emit("speaking")
 
+    def set_voice_level(self, level: float) -> None:
+        """Loudness (0..1) of the reply audio now playing; drives the orb.
+        Called from the audio thread — a plain float write the orb reads
+        on its next frame."""
+        self._win.orb.voice_level = level
+
     def open_trader_panel(self) -> None:
         self._win.open_trader_requested.emit()
 

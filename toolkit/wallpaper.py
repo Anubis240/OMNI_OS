@@ -12,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
-from datetime import date
 from pathlib import Path
 
 from toolkit import places
@@ -82,20 +81,6 @@ def _current_wallpaper() -> str:
     return out.stdout.strip().strip("'") or "unknown"
 
 
-def _archive_desktop() -> str:
-    desk = places.folder("desktop")
-    box = desk / f"Desktop archive {date.today():%Y-%m-%d}"
-    moved = 0
-    for item in list(desk.iterdir()):
-        if item.is_dir() or item.name.startswith(".") or item.suffix.lower() in places.SHORTCUT_SUFFIXES:
-            continue
-        box.mkdir(exist_ok=True)
-        if not (box / item.name).exists():
-            shutil.move(str(item), str(box / item.name))
-            moved += 1
-    return f"Moved {moved} loose file(s) from the desktop into '{box.name}'." if moved else "The desktop has no loose files."
-
-
 def _desktop_summary(detailed: bool) -> str:
     desk = places.folder("desktop")
     items = [p for p in desk.iterdir() if not p.name.startswith(".")]
@@ -145,7 +130,7 @@ def desktop_control(args: dict, ctx: ToolContext) -> str:
         if action == "organize":
             return tidy(places.folder("desktop"), by="date" if args.get("mode") == "by_date" else "type")
         if action == "clean":
-            return _archive_desktop()
+            return tidy(places.folder("desktop"), by="sweep")
         if action in ("list", "stats"):
             return _desktop_summary(detailed=action == "list")
     except Exception as err:

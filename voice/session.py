@@ -185,8 +185,8 @@ class Assistant:
             try:
                 async for msg in timeouts.iter_with_idle_timeout(self.session.receive(), pending):
                     if msg.data:
-                        self._speaker.turn_finished.clear()
-                        self._speaker.queue.put_nowait(msg.data)
+                        self._speaker.feed(msg.data)
+                        self.phone.mirror_audio(msg.data)
 
                     update = msg.session_resumption_update
                     if update and update.resumable and update.new_handle:
@@ -201,7 +201,7 @@ class Assistant:
                                 heard_from_phone = self.phone.talking
                             heard.append(_clean(content.input_transcription.text))
                         if content.turn_complete:
-                            self._speaker.turn_finished.set()
+                            self._speaker.end_of_turn()
                             self._awaiting_reply_since = None
                             self._record("[Phone]" if heard_from_phone else "You", heard, "you")
                             self._record("Omni", said, "seraph")   # "seraph" = dashboard wire type
@@ -285,7 +285,8 @@ class Assistant:
                                 asyncio.TaskGroup() as jobs):
                         self.session = session
                         self._outbox = asyncio.Queue(maxsize=10)
-                        self._speaker = audio.Speaker(self._speaking_changed, timeouts.PLAYBACK_TAIL)
+                        self._speaker = audio.Speaker(self._speaking_changed, timeouts.PLAYBACK_TAIL,
+                                                      on_level=self.ui.set_voice_level)
                         self._connections += 1
                         self.ui.show_listening()
                         self.ui.post("SYS: OMNI-OS online." if self._connections == 1
@@ -294,8 +295,7 @@ class Assistant:
                         jobs.create_task(audio.capture(lambda pcm: self.queue_audio(pcm), self._mic_open,
                                                        self.ui.post))
                         jobs.create_task(self._receive())
-                        jobs.create_task(self._speaker.run(lambda: self.ui.speech_muted,
-                                                           self.phone.mirror_audio))
+                        jobs.create_task(self._speaker.run(lambda: self.ui.speech_muted))
                         jobs.create_task(self._watch_for_reconnect())
                 except asyncio.TimeoutError:
                     self.ui.post(f"SYS: connection handshake timed out after {timeouts.CONNECT}s — retrying.")
@@ -307,7 +307,7 @@ class Assistant:
             self.session = None
             await self._summarize_conversation()
             if self._speaker is not None:
-                self._speaker.stop_speaking()
+                self._speaker.silence()
             self.ui.show_thinking()
             await asyncio.sleep(3)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from toolkit import places
@@ -201,24 +201,41 @@ def _info(args, ctx):
             f"modified {stamp(st.st_mtime)}, created {stamp(st.st_ctime)}")
 
 
+def _is_loose(item: Path) -> bool:
+    """A plain, visible file that isn't a shortcut — what tidying may move."""
+    return item.is_file() and not item.name.startswith(".") and item.suffix.lower() not in places.SHORTCUT_SUFFIXES
+
+
+def _unused_path(path: Path) -> Path:
+    """`path` itself, or 'name (2).ext', 'name (3).ext' … if that's taken."""
+    candidate, n = path, 1
+    while candidate.exists():
+        n += 1
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+    return candidate
+
+
 def tidy(folder: Path, by: str = "type") -> str:
-    """Sort loose files in `folder` into sub-folders by type or by month.
-    Folders, hidden files and shortcuts stay put; name clashes are skipped."""
-    moved = clashes = 0
-    for item in list(folder.iterdir()):
-        if item.is_dir() or item.name.startswith(".") or item.suffix.lower() in places.SHORTCUT_SUFFIXES:
-            continue
-        bucket = (datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m")
-                  if by == "date" else places.category_of(item))
-        dest = folder / bucket / item.name
-        if dest.exists():
-            clashes += 1
-            continue
-        dest.parent.mkdir(exist_ok=True)
-        shutil.move(str(item), str(dest))
-        moved += 1
-    note = f" ({clashes} skipped because a file with that name was already there)" if clashes else ""
-    return f"Sorted {moved} file(s) in {folder} by {by}{note}."
+    """Move the loose files in `folder` into sub-folders: by file type, by
+    month modified ("date"), or all into one dated "Swept" folder ("sweep").
+    Folders, hidden files and shortcuts stay put. A name that's already
+    taken where a file is going gets a numbered copy, never an overwrite."""
+    swept = f"Swept {date.today():%Y-%m-%d}"
+    buckets = {
+        "date": lambda item: datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m"),
+        "sweep": lambda item: swept,
+    }
+    bucket_of = buckets.get(by, places.category_of)
+    loose = [item for item in folder.iterdir() if _is_loose(item)]
+    if not loose:
+        return f"There are no loose files in {folder}."
+    for item in loose:
+        destination = folder / bucket_of(item)
+        destination.mkdir(exist_ok=True)
+        shutil.move(str(item), str(_unused_path(destination / item.name)))
+    if by == "sweep":
+        return f"Moved {len(loose)} loose file(s) into '{swept}' in {folder}."
+    return f"Sorted {len(loose)} file(s) in {folder} by {by}."
 
 
 def _organize_desktop(args, ctx):
