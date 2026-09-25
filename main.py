@@ -884,6 +884,29 @@ class _ReconnectRequested(Exception):
     voice_name is only read at connect time."""
 
 
+def _describe_disconnect(err: BaseException) -> str:
+    """The Live session's tasks run in a TaskGroup, so a dropped connection
+    arrives as "unhandled errors in a TaskGroup (1 sub-exception)" — which
+    hides the actual cause. GEMZ4US 2026-09-24 saw that line three times
+    (twice while idle) with no way to tell why. Name the real exception(s)
+    inside the group instead, e.g. the websocket close code and reason."""
+    leaves = []
+
+    def walk(e):
+        if isinstance(e, BaseExceptionGroup):
+            for sub in e.exceptions:
+                walk(sub)
+        else:
+            leaves.append(e)
+
+    walk(err)
+    parts = []
+    for e in leaves[:3]:
+        msg = " ".join(str(e).split())[:200]
+        parts.append(f"{type(e).__name__}: {msg}" if msg else type(e).__name__)
+    return "; ".join(parts) or str(err)
+
+
 # Companion backends with their own turn-based text session and no live-
 # voice equivalent (contrast "gemini_live", which drives the real-time
 # session directly). All six share the exact same async
@@ -2065,7 +2088,7 @@ class JarvisLive:
                     # only ever printed to the console — invisible in the
                     # Event Feed the tester actually watches. This is the
                     # catch-all net: whatever the cause, it's now visible.
-                    self.ui.write_log(f"SYS: Connection lost ({e}) — reconnecting.")
+                    self.ui.write_log(f"SYS: Connection lost ({_describe_disconnect(e)}) — reconnecting.")
             self.session = None
             if len(self._session_log) >= 3:  # only worth summarizing if there was a real exchange
                 await self._save_session_summary()
