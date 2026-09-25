@@ -30,26 +30,30 @@ class PhoneBridge:
         """Start the dashboard server if its optional dependencies are installed."""
         ui = self.a.ui
         try:
-            from dashboard.server import DashboardServer
+            from dashboard.server import LinkHooks, PhoneLink
         except Exception as err:
             print(f"[phone] dashboard unavailable: {err}")
             return
-        server = DashboardServer()
-        server.set_connect_callback(lambda: (ui.post("SYS: Your phone is linked — Remote Dashboard is live."),
-                                             ui.notify_phone_connected()))
-        server.set_disconnect_callback(lambda: (ui.post("SYS: Your phone has left the Remote Dashboard."),
-                                                ui.notify_phone_disconnected()))
-        server.set_trader_state_callback(ui.get_trader_state)
-        server.set_trader_action_callback(ui.run_trader_action)
-        server.set_error_callback(lambda msg: ui.post(f"SYS: Remote Dashboard {msg}"))
-        server.set_warning_callback(lambda msg: ui.post(f"SYS: Remote Dashboard {msg}"))
-        self.server = server
-        asyncio.create_task(server.serve())
+
+        def joined():
+            ui.post("SYS: Your phone is linked — Remote Dashboard is live.")
+            ui.notify_phone_connected()
+
+        def left():
+            ui.post("SYS: Your phone has left the Remote Dashboard.")
+            ui.notify_phone_disconnected()
+
+        def report(message: str) -> None:
+            ui.post(f"SYS: Remote Dashboard {message}")
+
+        self.server = PhoneLink(LinkHooks(phone_joined=joined, phone_left=left, failed=report, warning=report,
+                                          trader_state=ui.get_trader_state, trader_action=ui.run_trader_action))
+        asyncio.create_task(self.server.run())
         asyncio.create_task(self._typed_messages())
         asyncio.create_task(self._voice())
 
     def pairing(self):
-        """(url, key, auto-login url) for the pairing QR, or None with the reason logged."""
+        """(url, code, QR link) for the pairing card, or None with the reason logged."""
         if self.server is None:
             self.a.ui.post('SYS: Remote Dashboard unavailable — install fastapi, "uvicorn[standard]" and qrcode[pil].')
             return None
@@ -57,13 +61,13 @@ class PhoneBridge:
             why = self.server.start_error or "it hasn't started yet — try again in a moment."
             self.a.ui.post(f"SYS: Remote Dashboard isn't running: {why}")
             return None
-        key, url = self.server.new_key(), self.server.get_url()
-        return url, key, f"{url}/auto-login?key={key}"
+        code, url = self.server.issue_pairing_code(), self.server.base_url
+        return url, code, f"{url}/pair/scan?code={code}"
 
     # --- outbound -------------------------------------------------------
     def post(self, message: dict) -> None:
         if self.server is not None and self.a.loop is not None:
-            asyncio.run_coroutine_threadsafe(self.server.broadcast(message), self.a.loop)
+            asyncio.run_coroutine_threadsafe(self.server.publish(message), self.a.loop)
 
     def send_image(self, image_bytes: bytes, mime_type: str) -> None:
         """Called from generate_image's worker thread."""
@@ -80,14 +84,14 @@ class PhoneBridge:
         async def send() -> None:
             if before is not None and not before.done():
                 await asyncio.wait({before})
-            await self.server.broadcast_audio(chunk)
+            await self.server.play_on_phone(chunk)
 
         self._last_mirror = asyncio.create_task(send())
 
     # --- inbound --------------------------------------------------------
     async def _typed_messages(self) -> None:
         """Phone-typed text → the live session."""
-        inbox = self.server.commands
+        inbox = self.server.inbox
         while True:
             text = await inbox.get()
             if not text:
@@ -102,7 +106,7 @@ class PhoneBridge:
                     continue
                 # Echo it to every connected client: typed turns have no input
                 # transcription, so nothing else would show them.
-                await self.server.broadcast({"type": "you", "text": text})
+                await self.server.publish({"type": "you", "text": text})
                 self.a.ui.post(f"[Phone]: {text}")
                 await self.a.send_text(text)
             except Exception as err:
@@ -118,7 +122,7 @@ class PhoneBridge:
         audio_stream_end to close it explicitly. Chunks that can't be
         delivered are reported once per episode, not per chunk.
         """
-        inbox = self.server.phone_audio
+        inbox = self.server.mic_frames
         last_problem = None
         while True:
             try:

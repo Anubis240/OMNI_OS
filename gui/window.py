@@ -582,7 +582,7 @@ class OmniWindow(QMainWindow):
     def _open_pairing(self) -> None:
         pairing = self.on_remote_clicked() if self.on_remote_clicked else None
         if not pairing:
-            self.chat.post("SYS: Couldn't create a pairing key right now.")
+            self.chat.post("SYS: Couldn't create a pairing code right now.")
             return
         if self._pairing is not None:
             self._pairing.dismiss()
@@ -593,7 +593,7 @@ class OmniWindow(QMainWindow):
         self._pairing = card
         card.show()
         self._place_floaters()
-        self.chat.post(f"SYS: Pairing key ready — {url}")
+        self.chat.post(f"SYS: Pairing code ready — {url}")
 
     def phone_connected(self) -> None:
         if self._pairing is not None and self._pairing.isVisible():

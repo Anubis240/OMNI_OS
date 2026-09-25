@@ -117,7 +117,7 @@ class _SlowServer:
     def __init__(self):
         self.sent = []
 
-    async def broadcast_audio(self, chunk):
+    async def play_on_phone(self, chunk):
         # later chunks finish faster: without ordering they'd overtake
         await asyncio.sleep(0.01 * (10 - chunk[0]))
         self.sent.append(chunk[0])

@@ -220,7 +220,7 @@ class Assistant:
         self.ui.post(f"{who}: {text}")
         self._transcript.append(f"{who}: {text}")
         if self.dashboard is not None:
-            asyncio.create_task(self.dashboard.broadcast({"type": wire_type, "text": text}))
+            asyncio.create_task(self.dashboard.publish({"type": wire_type, "text": text}))
 
     async def _answer_tools(self, calls) -> None:
         replies = []

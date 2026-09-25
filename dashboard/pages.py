@@ -137,8 +137,8 @@ APP_HTML = """<!DOCTYPE html>
   <form id="f"><input id="t" autocomplete="off" placeholder="Message Omni…"><button>SEND</button></form>
 <script>
   var TRADER_ENABLED = __TRADER_ENABLED__;
-  var token = sessionStorage.getItem('seraph_token');
-  if (!token) { location.replace('/login'); }
+  var token = sessionStorage.getItem('omni_session');
+  if (!token) { location.replace('/pair'); }
   var logEl = document.getElementById('log');
   var statusEl = document.getElementById('status');
   var voiceStatusEl = document.getElementById('voice-status');
@@ -199,7 +199,7 @@ APP_HTML = """<!DOCTYPE html>
   }
 
   var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // Opened once at page load and, unlike /ws/audio (re-opened fresh every
+  // Opened once at page load and, unlike the voice socket (re-opened fresh every
   // time the mic is tapped, so it self-heals), had no reconnect logic at
   // all — an idle timeout or a transient mobile-network drop silently
   // killed the ONLY channel Omni's replies are broadcast through, with no
@@ -208,10 +208,10 @@ APP_HTML = """<!DOCTYPE html>
   var ws = null, wsRetryMs = 1000;
   var wsConnectedAt = 0;
   function connectWs() {
-    ws = new WebSocket(proto + '://' + location.host + '/ws?token=' + encodeURIComponent(token));
+    ws = new WebSocket(proto + '://' + location.host + '/socket/chat?token=' + encodeURIComponent(token));
     ws.onopen = function() {
       // The server always replays its last 50 history entries fresh on
-      // every /ws accept (so a phone reconnecting mid-session sees prior
+      // every chat-socket accept (so a phone reconnecting mid-session sees prior
       // context) — harmless when a connection barely ever reconnected, but
       // now that this reconnects automatically (below), leaving the old
       // DOM in place meant every reconnect (e.g. the phone's own screen
@@ -244,7 +244,7 @@ APP_HTML = """<!DOCTYPE html>
       if (msg.type === 'ping') { try { ws.send(JSON.stringify({type: 'pong'})); } catch (_) {} return; }
       if (msg.type === 'you') addLine('you', 'You: ' + msg.text);
       else if (msg.type === 'seraph') addLine('seraph', 'Omni: ' + msg.text);
-      else if (msg.type === 'sys') addLine('sys', msg.text);
+      else if (msg.type === 'notice') addLine('sys', msg.text);
       else if (msg.type === 'image') addImage(msg.data);
       else if (msg.type === 'link') addLink(msg.url, msg.label);
     };
@@ -274,12 +274,12 @@ APP_HTML = """<!DOCTYPE html>
       input.value = '';
       return;
     }
-    fetch('/api/command', {
+    fetch('/api/say', {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
       body: JSON.stringify({text: text}),
     }).then(function(r) {
-      if (r.status === 401) { sessionStorage.removeItem('seraph_token'); location.replace('/login'); }
+      if (r.status === 401) { sessionStorage.removeItem('omni_session'); location.replace('/pair'); }
     });
     input.value = '';
   });
@@ -292,7 +292,7 @@ APP_HTML = """<!DOCTYPE html>
   // GEMZ4US, Finding #44 (2026-09-16): "Phone audio" channel slow/unreliable
   // to establish — needed ~10 manual attempts in a long-running session,
   // versus near-instant right after a restart. Root cause: unlike the main
-  // /ws channel just above (which retries with backoff on its own), this
+  // chat socket just above (which retries with backoff on its own), this
   // socket had NO reconnect logic at all — the original design (see Bug 12
   // comment below) assumed re-opening it fresh on every mic tap was
   // sufficient "self-healing", i.e. the user manually retrying via another
@@ -337,7 +337,7 @@ APP_HTML = """<!DOCTYPE html>
 
   function ensureAudioWs() {
     if (audioWs && (audioWs.readyState === WebSocket.OPEN || audioWs.readyState === WebSocket.CONNECTING)) return;
-    audioWs = new WebSocket(proto + '://' + location.host + '/ws/audio?token=' + encodeURIComponent(token));
+    audioWs = new WebSocket(proto + '://' + location.host + '/socket/voice?token=' + encodeURIComponent(token));
     audioWs.binaryType = 'arraybuffer';
     audioWs.onopen  = function() {
       audioReady = true;
@@ -349,7 +349,7 @@ APP_HTML = """<!DOCTYPE html>
     audioWs.onclose = function() {
       audioReady = false;
       voiceStatusEl.textContent = 'voice disconnected — reconnecting…';
-      // Same stability-aware backoff as the main /ws channel: only reset to
+      // Same stability-aware backoff as the chat socket: only reset to
       // the 1s floor if the connection actually held a while, so a flapping
       // network doesn't retry forever at the fastest rate.
       var wasStable = audioConnectedAt && (Date.now() - audioConnectedAt) >= 5000;
@@ -461,7 +461,7 @@ APP_HTML = """<!DOCTYPE html>
         // explanation for GEMZ4US's 3/3 repro showing "zero trace of the
         // logging I added last time" — the loss was happening upstream of
         // everything that logging could see. Reported once per drop
-        // episode (not per frame) over the main /ws, same as the
+        // episode (not per frame) over the chat socket, same as the
         // server-side pattern, and cleared as soon as a frame gets through.
         micDropReported = true;
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -598,7 +598,7 @@ APP_HTML = """<!DOCTYPE html>
   function fetchTraderState() {
     fetchWithTimeout('/api/trader/state', { headers: { 'Authorization': 'Bearer ' + token } }, 10000)
       .then(function(r) {
-        if (r.status === 401) { sessionStorage.removeItem('seraph_token'); location.replace('/login'); return null; }
+        if (r.status === 401) { sessionStorage.removeItem('omni_session'); location.replace('/pair'); return null; }
         return r.json();
       })
       .then(function(d) { if (d) renderTrader(d); })
@@ -633,7 +633,7 @@ APP_HTML = """<!DOCTYPE html>
       body: JSON.stringify(Object.assign({ action: action }, payload)),
     }, 15000)
       .then(function(r) {
-        if (r.status === 401) { sessionStorage.removeItem('seraph_token'); location.replace('/login'); return null; }
+        if (r.status === 401) { sessionStorage.removeItem('omni_session'); location.replace('/pair'); return null; }
         return r.json().then(function(d) { return { status: r.status, body: d }; });
       })
       .then(function(res) {
@@ -663,7 +663,7 @@ APP_HTML = """<!DOCTYPE html>
       headers: { 'Authorization': 'Bearer ' + token },
     }, 10000)
       .then(function(r) {
-        if (r.status === 401) { sessionStorage.removeItem('seraph_token'); location.replace('/login'); return null; }
+        if (r.status === 401) { sessionStorage.removeItem('omni_session'); location.replace('/pair'); return null; }
         return r.json();
       })
       .then(function(d) {
@@ -750,24 +750,24 @@ LOGIN_HTML = """<!DOCTYPE html>
 <body>
   <div>
     <h2>◈ OMNI-OS REMOTE</h2>
-    <p style="color:#575757;font-size:13px">Enter the 6-character key shown on Omni-OS's screen</p>
-    <input id="pin" maxlength="6" autocomplete="off" autocapitalize="characters">
+    <p style="color:#575757;font-size:13px">Type the 6-character code shown in Omni-OS</p>
+    <input id="pair-code" maxlength="6" autocomplete="off" autocapitalize="characters">
     <button id="go">CONNECT</button>
     <div id="err"></div>
   </div>
 <script>
   document.getElementById('go').onclick = function() {
-    var pin = document.getElementById('pin').value.trim().toUpperCase();
-    fetch('/login', {
+    var code = document.getElementById('pair-code').value.trim().toUpperCase();
+    fetch('/pair', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({pin: pin}),
+      body: JSON.stringify({code: code}),
     }).then(function(r) { return r.json().then(function(d) { return {ok: r.ok, d: d}; }); })
       .then(function(res) {
         if (res.ok && res.d.ok) {
-          sessionStorage.setItem('seraph_token', res.d.token);
+          sessionStorage.setItem('omni_session', res.d.token);
           location.replace('/');
         } else {
-          document.getElementById('err').textContent = res.d.error || 'Invalid or expired key';
+          document.getElementById('err').textContent = res.d.error || 'That code is wrong or has expired.';
         }
       });
   };
