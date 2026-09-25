@@ -3,7 +3,7 @@
 #   .venv312\Scripts\pyinstaller.exe omni-os.spec --noconfirm
 #
 # --onedir (not --onefile): a --onefile build re-extracts everything to a
-# temp dir on every launch (slow startup for an app this size — PyQt6,
+# temp dir on every launch (slow startup for an app this size — PySide6,
 # onnxruntime, web3, torch-free but still heavy) and, more importantly,
 # several paths in this app (dashboard cert persistence, config files) are
 # written relative to the real install directory via a getattr(sys,
@@ -25,6 +25,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_all, copy_metadata
 
 block_cipher = None
+GPL_EXCLUDES = ["PyQt6", "PyQt5", "pymsgbox", "mouseinfo"]
 PROJECT_DIR = Path(SPECPATH)
 # GEMZ4US, 2026-09-20: added the VERSION file so the running app can show
 # its own version (core/app_paths.py::get_app_version()) — the default
@@ -132,7 +133,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=runtime_hooks,
-    excludes=[],
+    # Licence hygiene for a closed-source build: PyQt (GPL) must never ride
+    # along from a shared environment, and PyAutoGUI's optional GPL helpers
+    # (message boxes, the MouseInfo app) are unused — PyAutoGUI runs without them.
+    excludes=GPL_EXCLUDES,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -142,8 +146,8 @@ a = Analysis(
 if sys.platform.startswith("linux"):
     sys.path.insert(0, str(PROJECT_DIR / "scripts"))
     from release_bundle import linux_binaries, without_browser_toc, append_linux_browsers
-    import PyQt6
-    qt_root = Path(PyQt6.__file__).parent.resolve()
+    import PySide6
+    qt_root = Path(PySide6.__file__).parent.resolve()
     # Qt hooks select QtWidgets/QtMultimedia and their required plugins. Do not
     # seed closure from the whole Qt wheel (including unused QML design tools).
     qt_inputs = [Path(source) for _, source, kind in a.binaries
@@ -152,7 +156,7 @@ if sys.platform.startswith("linux"):
         Path(playwright.__file__).parent / "driver",
         sdk_root / "_bundled" if sdk_spec else browser_dir,
         *qt_inputs,
-    ], library_paths=[qt_root / "Qt6" / "lib"], library_scope=qt_root,
+    ], library_paths=[qt_root / "Qt" / "lib"], library_scope=qt_root,
        browser_root=browser_dir)
     a.binaries += [(str(Path(destination) / Path(source).name), source, "BINARY")
                    for source, destination in closure]

@@ -19,9 +19,9 @@ import time
 import webbrowser
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QTextBrowser,
     QVBoxLayout, QWidget,
@@ -73,9 +73,9 @@ class SeraphConnectCard(QFrame):
     Seraph (the key is then created for the user); pasting an existing Seraph
     API key is tucked behind a link for people who already have one."""
 
-    sign_in_requested = pyqtSignal()
-    cancel_requested = pyqtSignal()
-    done = pyqtSignal(str)
+    sign_in_requested = Signal()
+    cancel_requested = Signal()
+    done = Signal(str)
 
     # role -> (point size, bold, Tone attribute)
     _TEXT_ROLES = {
@@ -195,14 +195,14 @@ class SeraphConnectCard(QFrame):
 
 
 class TraderPanel(QWidget):
-    _event_sig = pyqtSignal(object)
+    _event_sig = Signal(object)
     # Carries a zero-arg callable — lets any background thread schedule a
     # callback to run safely on the Qt GUI thread. Required for anything
     # that might hit live-mode network calls (RPC, Seraph gate, on-chain
     # confirmation wait): a real bug found via live testing was a manual
     # live buy blocking the entire UI for ~1 minute because it ran
     # synchronously from a button-click handler.
-    _run_on_gui_sig = pyqtSignal(object)
+    _run_on_gui_sig = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

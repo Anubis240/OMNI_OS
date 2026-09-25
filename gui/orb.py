@@ -15,9 +15,9 @@ import math
 import time
 
 import numpy as np
-from PyQt6.QtCore import QPointF, QTimer, Qt
-from PyQt6.QtGui import QBrush, QColor, QPainter, QRadialGradient
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtCore import QPointF, QTimer, Qt
+from PySide6.QtGui import QBrush, QColor, QPainter, QRadialGradient
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from gui.theme import Tone, lerp_hex, with_alpha
 

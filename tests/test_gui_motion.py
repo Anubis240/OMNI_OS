@@ -6,8 +6,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtGui import QTextCursor  # noqa: E402
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtGui import QTextCursor  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from gui.chatlog import ChatLog  # noqa: E402
 from gui.orb import OrbView  # noqa: E402

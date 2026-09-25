@@ -12,9 +12,9 @@ from __future__ import annotations
 import io
 import time
 
-from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QPixmap
-from PyQt6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton,
+from PySide6.QtCore import QPoint, QTimer, Qt, Signal
+from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton,
                              QVBoxLayout, QWidget)
 
 from gui.theme import Tone
@@ -45,7 +45,7 @@ def _text(text: str, colour: str, size: int = 9, bold: bool = False) -> QLabel:
 
 
 class PairingCard(QWidget):
-    closed = pyqtSignal()
+    closed = Signal()
     WIDTH, HEIGHT = 540, 272
 
     def __init__(self, url: str, code: str, qr_link: str, parent=None):

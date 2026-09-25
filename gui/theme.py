@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QComboBox
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QComboBox
 
 from core.app_paths import get_data_dir
 

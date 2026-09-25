@@ -14,9 +14,9 @@ import time
 from pathlib import Path
 
 import psutil
-from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QFont, QKeySequence, QShortcut
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QCursor, QFont, QKeySequence, QShortcut
+from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolTip,
     QVBoxLayout, QWidget,
@@ -91,10 +91,10 @@ class OmniWindow(QMainWindow):
     # so Qt runs it on the GUI thread. (Building widgets off the GUI thread —
     # e.g. opening the trader panel by voice — was the likely cause of the
     # long freezes in Bug 11.)
-    log_line = pyqtSignal(str)
-    activity_changed = pyqtSignal(str)
-    open_trader_requested = pyqtSignal()
-    question_asked = pyqtSignal(object)
+    log_line = Signal(str)
+    activity_changed = Signal(str)
+    open_trader_requested = Signal()
+    question_asked = Signal(object)
 
     def __init__(self):
         super().__init__()

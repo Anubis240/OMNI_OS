@@ -1,4 +1,4 @@
-"""Omni-OS desktop window (PyQt6).
+"""Omni-OS desktop window (PySide6).
 
   theme.py    palette, colour helpers, voices, small shared widgets
   sysinfo.py  background CPU/memory/network/GPU/temperature sampler

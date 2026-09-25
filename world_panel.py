@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
+from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
@@ -185,9 +185,9 @@ class WorldPanel(QWidget):
 
 
 class _GraphCanvas(QWidget):
-    add_clicked = pyqtSignal()
-    edit_requested = pyqtSignal(str)
-    delete_requested = pyqtSignal(str)
+    add_clicked = Signal()
+    edit_requested = Signal(str)
+    delete_requested = Signal(str)
 
     NODE_W, NODE_H = 190, 88
     LEAD_W, LEAD_H = 220, 92
@@ -392,9 +392,9 @@ class _NodeCard(QFrame):
     real id and still stay fixed-position with no delete affordance,
     since deleting the active/default identity isn't the same kind of
     operation as deleting a sub-agent)."""
-    dragged = pyqtSignal(str, int, int)
-    edit_clicked = pyqtSignal(str)
-    delete_clicked = pyqtSignal(str)
+    dragged = Signal(str, int, int)
+    edit_clicked = Signal(str)
+    delete_clicked = Signal(str)
 
     def __init__(self, name: str, subtitle: str, extra: str, color: str, Tone, companion_id: str | None,
                  parent=None, *, draggable: bool = True, show_delete: bool = True):

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFont
-from PyQt6.QtWidgets import QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from core.app_paths import get_data_dir, get_os_name
 from gui.theme import Tone
@@ -39,7 +39,7 @@ def store_api_key(key: str) -> None:
 
 
 class KeyPrompt(QWidget):
-    submitted = pyqtSignal(str)
+    submitted = Signal(str)
     WIDTH, HEIGHT = 440, 300
 
     def __init__(self, parent=None):

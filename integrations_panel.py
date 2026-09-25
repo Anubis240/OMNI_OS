@@ -13,10 +13,10 @@ import re
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
-from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
@@ -83,7 +83,7 @@ def _icon_badge_pixmap(catalog_id: str, size: int, badge_color: str) -> QPixmap 
 
 
 class IntegrationsPanel(QWidget):
-    _status_sig = pyqtSignal(str, bool)  # (message, is_error)
+    _status_sig = Signal(str, bool)  # (message, is_error)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -283,7 +283,7 @@ class IntegrationsPanel(QWidget):
 
 
 class _ConnectDialog(QDialog):
-    saved = pyqtSignal(str, bool, bool)  # (message, is_error, needs_reconnect)
+    saved = Signal(str, bool, bool)  # (message, is_error, needs_reconnect)
 
     def __init__(self, entry: dict, settings: dict, Tone, parent=None):
         super().__init__(parent)

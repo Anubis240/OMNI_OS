@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
-from PyQt6.QtWidgets import QTextBrowser
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import QTextBrowser
 
 from gui.theme import Tone
 
@@ -51,7 +51,7 @@ class _Fade:
 
 
 class ChatLog(QTextBrowser):
-    _arrived = pyqtSignal(str)
+    _arrived = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

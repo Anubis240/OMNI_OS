@@ -9,16 +9,16 @@ from __future__ import annotations
 import sys
 import time
 
-from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication
 
 from gui.theme import Tone
 from gui.window import OmniWindow
 
 
 class _Relay(QObject):
-    phone_connected = pyqtSignal()
-    phone_disconnected = pyqtSignal()
+    phone_connected = Signal()
+    phone_disconnected = Signal()
 
 
 class OmniUI:

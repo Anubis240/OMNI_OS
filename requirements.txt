@@ -1,7 +1,7 @@
 # Omni-OS runtime dependencies, grouped by what uses them.
 
 # --- window, voice and the Gemini session ---
-pyqt6
+PySide6
 google-genai
 sounddevice
 pydub

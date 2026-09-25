@@ -60,8 +60,8 @@ def run(argv=None):
 
         # Static imports allow PyInstaller to discover the native dependencies.
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtMultimedia import QMediaPlayer
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtMultimedia import QMediaPlayer
         import sounddevice
         from google import genai
         import uvicorn
