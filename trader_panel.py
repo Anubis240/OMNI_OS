@@ -1423,9 +1423,27 @@ class TraderPanel(QWidget):
         cfg = self.engine.config
         self._stat_labels["trades"].setText(f"{state.get('tradesToday', 0)}/{cfg['maxDailyTrades']}")
         positions = state.get("positions") or []
-        self._stat_labels["positions"].setText(f"{len(positions)}/{cfg['maxOpenPositions']}")
+        # GEMZ4US 2026-09-25: "0/10" next to two [LIVE] rows looked wrong. The
+        # count is this mode's positions (what maxOpenPositions limits); say
+        # how many other rows are listed and why they don't count.
+        live_elsewhere, detached = self._other_position_rows()
+        others = len(live_elsewhere) + len(detached)
+        pos_lbl = self._stat_labels["positions"]
+        pos_lbl.setText(f"{len(positions)}/{cfg['maxOpenPositions']}" + (f" +{others}" if others else ""))
+        pos_lbl.setToolTip(
+            f"{len(positions)} open in {'LIVE' if self.engine.armed_live else 'PAPER'} mode, out of the "
+            f"{cfg['maxOpenPositions']} allowed." + (
+                f" The other {others} listed ({len(live_elsewhere)} from the other mode, {len(detached)} held "
+                "in another wallet) are shown for reference and don't count toward the limit." if others else ""))
         running = state.get("running")
         self._start_btn.setText("■ STOP" if running else "▶ START")
+
+    def _other_position_rows(self) -> tuple[list, list]:
+        """Rows listed besides this mode's positions: LIVE positions while in
+        PAPER mode (Finding #24) and HELD ELSEWHERE entries (Item F)."""
+        live_elsewhere = [] if self.engine.armed_live else (self.engine.state.get("livePositions") or [])
+        detached = self.engine.state.get("detachedLivePositions") or []
+        return live_elsewhere, detached
 
     def _refresh_positions(self):
         C = self._C
@@ -1443,8 +1461,7 @@ class TraderPanel(QWidget):
         # app just stopped showing it, with no indicator anywhere. Listed
         # here too, badged and read-only, so a real position is never
         # invisible just because the mode toggle is elsewhere.
-        live_elsewhere = [] if self.engine.armed_live else (self.engine.state.get("livePositions") or [])
-        detached = self.engine.state.get("detachedLivePositions") or []
+        live_elsewhere, detached = self._other_position_rows()
         if not positions and not live_elsewhere and not detached:
             empty_lbl = QLabel("no open positions")
             empty_lbl.setFont(QFont("Segoe UI", 9))

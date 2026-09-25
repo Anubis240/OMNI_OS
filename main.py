@@ -58,6 +58,7 @@ if sys.platform == "win32":
 
 import ssl
 
+import numpy as np
 import sounddevice as sd
 
 # Some machines run SSL-inspecting antivirus/corporate proxies (Norton, Zscaler,
@@ -907,6 +908,47 @@ def _describe_disconnect(err: BaseException) -> str:
     return "; ".join(parts) or str(err)
 
 
+# GEMZ4US N42 (2026-09-25): after an app restart the desktop mic stayed
+# silent for ~50 minutes — Listening on, no "You:" line, no error — until a
+# full Windows restart. Omni can't fix a stuck audio stack, but it can say
+# so instead of a silent listen/stop cycle.
+MIC_SILENCE_WARN_S = 5.0   # listening this long with nothing usable from the mic → say so
+MIC_DIGITAL_SILENCE = 4    # peak |sample| at or below this: the device is delivering zeros
+SPEECH_PEAK = 1500         # peak |sample| above this counts as someone speaking
+SPEECH_GAP_S = 1.5         # a pause this long starts a new spoken message
+LOST_VOICE_WINDOW_S = 20.0  # speech this recent when a connection drops may have been lost
+
+
+def _peak(samples) -> int:
+    """Largest absolute value in a block of int16 samples (0 for an empty block)."""
+    samples = np.asarray(samples, dtype=np.int32)
+    return int(np.abs(samples).max()) if samples.size else 0
+
+
+def _mic_problem(now: float, listening_since: float | None,
+                 last_frame_at: float, last_sound_at: float) -> str | None:
+    """Why the PC mic isn't being heard while listening, or None if it's fine
+    (or it's too early to tell)."""
+    if listening_since is None or now - listening_since < MIC_SILENCE_WARN_S:
+        return None
+    if last_frame_at < listening_since:
+        return "the microphone isn't delivering any audio"
+    if last_sound_at < listening_since:
+        return "the microphone is delivering only silence"
+    return None
+
+
+def _voice_lost_in_disconnect(now: float, speech_started_at: float | None,
+                              last_speech_at: float, last_heard_at: float) -> bool:
+    """GEMZ4US N30/B (2026-09-24/25): a spoken message sent just before the
+    connection dropped vanished without a "You:" line — it went out on a
+    socket that was already dead. True when someone spoke recently and no
+    transcript of that speech came back."""
+    return (speech_started_at is not None
+            and now - last_speech_at <= LOST_VOICE_WINDOW_S
+            and last_heard_at < speech_started_at)
+
+
 # Companion backends with their own turn-based text session and no live-
 # voice equivalent (contrast "gemini_live", which drives the real-time
 # session directly). All six share the exact same async
@@ -983,6 +1025,13 @@ class JarvisLive:
                                             # summarized and saved to memory on disconnect/shutdown
         self._dashboard = None      # DashboardServer | None — remote/phone control, started once in run()
         self._phone_active = False  # True while the phone mic is actively streaming audio
+        # Mic health and spoken-message tracking (monotonic seconds) — see
+        # _mic_problem() and _voice_lost_in_disconnect().
+        self._mic_frame_at = 0.0       # last time the PC mic delivered any frame
+        self._mic_sound_at = 0.0       # last time it delivered something other than zeros
+        self._speech_started_at: float | None = None  # start of the latest spoken message sent
+        self._last_speech_at = 0.0     # last outgoing chunk that carried speech
+        self._last_heard_at = 0.0      # last input transcript received from Gemini
         self._connection_count = 0  # see run()'s "SYS: OMNI-OS online." vs "SYS: Reconnected." split
         self._resumption_handle: str | None = None  # last Gemini Live session-resumption handle
                                                       # (see session_resumption_update handling in
@@ -1085,6 +1134,17 @@ class JarvisLive:
                 self.ui.write_log(f"SYS: Phone command failed ({e}).")
                 await asyncio.sleep(0.5)
 
+    def _note_outgoing_audio(self, peak: int) -> None:
+        """Record a chunk of mic/phone audio that went to the session: if it
+        carries speech, it extends the current spoken message (or starts a
+        new one after a pause). Called from the mic thread and the loop."""
+        if peak <= SPEECH_PEAK:
+            return
+        now = time.monotonic()
+        if now - self._last_speech_at > SPEECH_GAP_S:
+            self._speech_started_at = now
+        self._last_speech_at = now
+
     async def _relay_phone_audio(self) -> None:
         """Runs for the whole app lifetime — forwards phone mic PCM chunks into the
         live session, same input path as the PC mic. Drops chunks when there's no
@@ -1145,6 +1205,7 @@ class JarvisLive:
                 try:
                     self.out_queue.put_nowait({"data": chunk, "mime_type": "audio/pcm"})
                     reason = None
+                    self._note_outgoing_audio(_peak(np.frombuffer(chunk[:len(chunk) // 2 * 2], dtype=np.int16)))
                 except asyncio.QueueFull:
                     reason = "outgoing queue full"
 
@@ -1736,6 +1797,10 @@ class JarvisLive:
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            peak = _peak(indata)
+            self._mic_frame_at = time.monotonic()
+            if peak > MIC_DIGITAL_SILENCE:
+                self._mic_sound_at = self._mic_frame_at
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if jarvis_speaking or self.ui.muted or self._phone_active:
@@ -1750,6 +1815,7 @@ class JarvisLive:
                 self.out_queue.put_nowait,
                 {"data": data, "mime_type": "audio/pcm"}
             )
+            self._note_outgoing_audio(peak)
 
         try:
             with sd.InputStream(
@@ -1761,8 +1827,23 @@ class JarvisLive:
                 callback=callback,
             ):
                 print("[JARVIS] 🎤 Mic stream open")
+                listening_since: float | None = None
+                warned = False
                 while True:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.25)
+                    if not self.ui.always_listening or self.ui.muted or self._phone_active:
+                        listening_since, warned = None, False
+                        continue
+                    now = time.monotonic()
+                    if listening_since is None:
+                        listening_since = now
+                    problem = _mic_problem(now, listening_since, self._mic_frame_at, self._mic_sound_at)
+                    if problem and not warned:
+                        warned = True
+                        self.ui.write_log(
+                            f"SYS: Listening, but {problem} — Omni can't hear this PC. Check the input "
+                            "device in Windows Sound settings; if it persists, restart Windows. Typed "
+                            "input and the phone mic still work.")
         except asyncio.CancelledError:
             raise  # normal shutdown/reconnect path — must propagate
         except Exception as e:
@@ -1828,6 +1909,7 @@ class JarvisLive:
                                     out_buf.append(txt)
 
                             if sc.input_transcription and sc.input_transcription.text:
+                                self._last_heard_at = time.monotonic()
                                 txt = _clean_transcript(sc.input_transcription.text)
                                 if txt:
                                     if not in_buf:
@@ -2089,6 +2171,14 @@ class JarvisLive:
                     # Event Feed the tester actually watches. This is the
                     # catch-all net: whatever the cause, it's now visible.
                     self.ui.write_log(f"SYS: Connection lost ({_describe_disconnect(e)}) — reconnecting.")
+            if _voice_lost_in_disconnect(time.monotonic(), self._speech_started_at,
+                                         self._last_speech_at, self._last_heard_at):
+                lost = ("Your last voice message didn't reach Omni before the connection dropped — "
+                        "please say it again once it's back.")
+                self.ui.write_log(f"SYS: {lost}")
+                if self._dashboard:   # the phone is where tap-to-talk messages usually come from
+                    await self._dashboard.broadcast({"type": "sys", "text": lost})
+            self._speech_started_at = None
             self.session = None
             if len(self._session_log) >= 3:  # only worth summarizing if there was a real exchange
                 await self._save_session_summary()
