@@ -431,7 +431,7 @@ class TraderEngine:
                 "qty": outcome["qty"], "entryPriceUsd": outcome["priceUsd"], "costUsd": outcome["costUsd"],
                 "openedAt": pend["submittedAt"], "txHash": pend["txHash"], "wallet": ws["address"],
             })
-            self.state["tradesToday"]["count"] += 1
+            self._trades_today()["count"] += 1
             self._emit({"type": "buy", "symbol": pend["symbol"], "address": pend["address"], "priceUsd": outcome["priceUsd"],
                          "qty": outcome["qty"], "costUsd": outcome["costUsd"], "txHash": pend["txHash"], "live": True,
                          "reconciledLate": True, **(pend.get("context") or {})})
@@ -615,7 +615,7 @@ class TraderEngine:
                 "qty": result["qty"], "entryPriceUsd": result["priceUsd"], "costUsd": result["costUsd"],
                 "openedAt": _now_iso(), "txHash": result["txHash"], "wallet": result.get("wallet"),
             })
-            self.state["tradesToday"]["count"] += 1
+            self._trades_today()["count"] += 1
             self._emit({"type": "buy", "symbol": token["symbol"], "address": token["address"], "priceUsd": result["priceUsd"],
                          "qty": result["qty"], "costUsd": result["costUsd"], "txHash": result["txHash"], "live": True, **context})
             return
@@ -644,7 +644,7 @@ class TraderEngine:
             "symbol": token["symbol"], "address": token["address"], "chain": token.get("chain", chains_mod.DEFAULT_CHAIN),
             "qty": qty, "entryPriceUsd": entry_price_usd, "costUsd": total_cost, "openedAt": _now_iso(),
         })
-        self.state["tradesToday"]["count"] += 1
+        self._trades_today()["count"] += 1
         self._emit({"type": "buy", "symbol": token["symbol"], "address": token["address"],
                      "chain": token.get("chain", chains_mod.DEFAULT_CHAIN), "priceUsd": entry_price_usd, "qty": qty,
                      "costUsd": total_cost, **context})
@@ -669,7 +669,7 @@ class TraderEngine:
             else:
                 position["qty"] -= sell_qty
                 position["costUsd"] -= cost_basis_usd
-            self.state["tradesToday"]["count"] += 1
+            self._trades_today()["count"] += 1
             self._emit({"type": "sell", "symbol": position["symbol"], "priceUsd": price_usd, "qty": sell_qty,
                          "proceedsUsd": result["proceedsUsd"], "pnlUsd": round(pnl, 4), "reason": reason,
                          "txHash": result["txHash"], "live": True, "partial": fraction < 1})
@@ -686,7 +686,7 @@ class TraderEngine:
         else:
             position["qty"] -= sell_qty
             position["costUsd"] -= cost_basis_usd
-        self.state["tradesToday"]["count"] += 1
+        self._trades_today()["count"] += 1
         self._emit({"type": "sell", "symbol": position["symbol"], "priceUsd": price_usd, "qty": sell_qty,
                      "proceedsUsd": proceeds, "pnlUsd": round(pnl, 4), "reason": reason, "partial": fraction < 1})
 
@@ -877,9 +877,17 @@ class TraderEngine:
             return f"MAX DRAWDOWN HIT: ${pnl:.2f}"
         return None
 
-    def _cycle(self):
+    def _trades_today(self) -> dict:
+        # Roll the counter over on the first touch of a new UTC day, not only
+        # at the start of a scan: otherwise yesterday's count stays on screen
+        # (and keeps counting) until the next scan runs, and the first scan
+        # after START then appears to zero it.
         if self.state["tradesToday"]["date"] != _today():
             self.state["tradesToday"] = {"date": _today(), "count": 0}
+        return self.state["tradesToday"]
+
+    def _cycle(self):
+        self._trades_today()
 
         self._reconcile_live_positions()
         self._reconcile_pending_live_buys()
@@ -1043,7 +1051,7 @@ class TraderEngine:
                     return
                 if len(self._positions()) >= self.config["maxOpenPositions"]:
                     break
-                if self.state["tradesToday"]["count"] >= self.config["maxDailyTrades"]:
+                if self._trades_today()["count"] >= self.config["maxDailyTrades"]:
                     self._emit({"type": "log", "text": "daily trade cap reached"})
                     break
                 snap = next(s for s in snaps if s["symbol"] == cand["symbol"])
@@ -1132,7 +1140,7 @@ class TraderEngine:
             "realizedPnlUsd": self.state["liveRealizedPnlUsd"] if live else self.state["realizedPnlUsd"],
             "positions": self.state["livePositions"] if live else self.state["positions"],
             "detachedPositions": self.state["detachedLivePositions"],
-            "tradesToday": self.state["tradesToday"]["count"],
+            "tradesToday": self._trades_today()["count"],
             "halted": self.state["halted"],
         }
 

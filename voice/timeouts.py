@@ -50,3 +50,25 @@ async def iter_with_idle_timeout(source, timeout):
             yield await asyncio.wait_for(iterator.__anext__(), timeout=limit())
         except StopAsyncIteration:
             return
+
+
+def describe_disconnect(err: BaseException) -> str:
+    """Why a Live session dropped, for the Event Feed.
+
+    The session's jobs run in a TaskGroup, so a failure surfaces as
+    "unhandled errors in a TaskGroup (1 sub-exception)" and the real cause
+    (e.g. a websocket close code) stays hidden. Name up to three of the
+    exceptions inside, unwrapping nested groups (GEMZ4US, 2026-09-24)."""
+    found = []
+    pending = [err]
+    while pending:
+        e = pending.pop(0)
+        if isinstance(e, BaseExceptionGroup):
+            pending[:0] = e.exceptions
+        else:
+            found.append(e)
+    parts = []
+    for e in found[:3]:
+        text = " ".join(str(e).split())[:200]
+        parts.append(f"{type(e).__name__}: {text}" if text else type(e).__name__)
+    return "; ".join(parts) or str(err)

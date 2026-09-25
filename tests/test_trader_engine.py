@@ -1088,5 +1088,34 @@ class SeraphWalletGateTests(unittest.TestCase):
         self.assertIn("the Seraph transaction gate still applies", source)
 
 
+class TradesTodayRolloverTests(unittest.TestCase):
+    """Item H: yesterday's count was shown (7/20) until the first scan after
+    START zeroed it (0/20). The counter must roll over whenever it is read
+    or incremented, not only at the top of a scan."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
+        self._patcher.start()
+        self.engine = engine_mod.TraderEngine(wallet_status=lambda: {"connected": False})
+        self.engine.state["tradesToday"] = {"date": "2000-01-01", "count": 7}
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_display_shows_zero_for_a_stale_day_before_any_scan(self):
+        self.assertEqual(self.engine.public_state()["tradesToday"], 0)
+
+    def test_increment_on_a_stale_day_starts_from_zero(self):
+        self.engine._trades_today()["count"] += 1
+        self.assertEqual(self.engine.state["tradesToday"], {"date": engine_mod._today(), "count": 1})
+
+    def test_same_day_count_is_kept(self):
+        self.engine.state["tradesToday"] = {"date": engine_mod._today(), "count": 7}
+        self.assertEqual(self.engine.public_state()["tradesToday"], 7)
+        self.assertEqual(self.engine._trades_today()["count"], 7)
+
+
 if __name__ == "__main__":
     unittest.main()

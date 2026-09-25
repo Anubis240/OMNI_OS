@@ -303,7 +303,7 @@ class Assistant:
                 wanted = isinstance(err, Reconnect) or (isinstance(err, ExceptionGroup) and err.subgroup(Reconnect))
                 if not wanted:
                     traceback.print_exc()
-                    self.ui.write_log(f"SYS: Connection lost ({err}) — reconnecting.")
+                    self.ui.write_log(f"SYS: Connection lost ({timeouts.describe_disconnect(err)}) — reconnecting.")
             self.session = None
             await self._summarize_conversation()
             if self._speaker is not None:

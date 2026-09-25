@@ -155,5 +155,23 @@ class IterWithIdleTimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(collected, [1])
 
 
+class DescribeDisconnectTests(unittest.TestCase):
+    """GEMZ4US 2026-09-24: "Connection lost (unhandled errors in a TaskGroup
+    (1 sub-exception))" named the wrapper, never the cause."""
+
+    def test_names_the_exception_inside_the_task_group(self):
+        err = ExceptionGroup("unhandled errors in a TaskGroup", [ConnectionError("received 1011 (internal error) keepalive ping timeout")])
+        self.assertEqual(timeouts.describe_disconnect(err), "ConnectionError: received 1011 (internal error) keepalive ping timeout")
+
+    def test_unwraps_nested_groups_and_caps_at_three(self):
+        inner = ExceptionGroup("inner", [ValueError("a"), KeyError("b")])
+        err = ExceptionGroup("outer", [inner, RuntimeError("c"), OSError("d")])
+        self.assertEqual(timeouts.describe_disconnect(err), "ValueError: a; KeyError: 'b'; RuntimeError: c")
+
+    def test_plain_exception_and_empty_message(self):
+        self.assertEqual(timeouts.describe_disconnect(TimeoutError()), "TimeoutError")
+        self.assertEqual(timeouts.describe_disconnect(OSError("gone")), "OSError: gone")
+
+
 if __name__ == "__main__":
     unittest.main()
