@@ -7,8 +7,8 @@ that have gone stale. Inspired by the Hermes Agent skill catalog's
 `meeting-action-items`/`document-to-action-items` skills — see the
 2026-09-09 conversation with the user for context.
 
-Companion-namespace aware the same way main.py's own "save_memory" tool
-branch is: the caller (main.py::_execute_tool) resolves self._companion's
+Companion-namespace aware the same way voice/dispatch.py's own "save_memory" tool
+branch is: the caller (voice/dispatch.py::ToolRouter.run) resolves the active companion's
 memory_namespace and passes it in explicitly, since that's the only place
 the active companion is known — this module has no access to it otherwise.
 """
@@ -104,7 +104,7 @@ def extract_action_items(parameters: dict, player=None, namespace: str | None = 
     profile.remember(updates, namespace=namespace)
     if player:
         try:
-            player.write_log(f"[ActionItems] Filed {len(lines)} item(s) under '{source}'")
+            player.post(f"[ActionItems] Filed {len(lines)} item(s) under '{source}'")
         except Exception:
             pass
     return f"Found {len(lines)} action item(s), filed under \"{source}\":\n" + "\n".join(lines)

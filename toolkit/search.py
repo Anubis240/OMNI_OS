@@ -39,11 +39,11 @@ def lookup(question: str) -> str:
 
 @register(
     "web_search",
-    "Searches the web for any information. Set mode to 'compare' with a list of "
+    "Look something up on the web. Set mode to 'compare' with a list of "
     "items to compare them on one aspect.",
     {
         "query": S("What to search for"),
-        "mode": S("search (default) or compare"),
+        "mode": S("'search' (the default) or 'compare'"),
         "items": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "Things to compare"},
         "aspect": S("What to compare them on, e.g. price, specs, reviews"),
     },

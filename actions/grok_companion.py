@@ -1,6 +1,6 @@
 """Turn-based conversation driver for grok_agent-backend companions — same
 public shape as actions/codex_companion.py (send/forget_session/
-get_status), so main.py can dispatch to it identically. Drives xAI's Grok
+get_status), so voice/session.py can dispatch to it identically. Drives xAI's Grok
 Build CLI directly via subprocess.
 
 CONFIDENCE NOTE: unlike codex_companion.py (verified against OpenAI's own

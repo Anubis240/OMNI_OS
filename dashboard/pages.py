@@ -434,7 +434,7 @@ APP_HTML = """<!DOCTYPE html>
       // same moment the mic was open for a new attempt got picked up and
       // transcribed as new "user" input, echoing Omni's own prior wording
       // back at it. Belt-and-suspenders fix matching the desktop app's own
-      // guard (_listen_audio there skips capture while jarvis_speaking) —
+      // guard (voice/audio.py holds the mic while the reply is playing) —
       // don't send mic frames while a scheduled chunk is still playing,
       // plus a short tail to cover speaker/mic pickup decay.
       if (playCtx && playCtx.currentTime < nextPlayTime + 0.3) return;
@@ -455,8 +455,8 @@ APP_HTML = """<!DOCTYPE html>
       } else if (!micDropReported) {
         // N30 (2026-09-23): frames past the buffer cap above were being
         // dropped completely silently — no client-side error, and nothing
-        // for the server-side drop-reason logging (main.py's
-        // _relay_phone_audio, added 2026-09-21) to see either, since these
+        // for the server-side drop-reason logging (voice/phone.py's
+        // _voice(), added 2026-09-21) to see either, since these
         // frames never reach the server at all. That's the likely
         // explanation for GEMZ4US's 3/3 repro showing "zero trace of the
         // logging I added last time" — the loss was happening upstream of

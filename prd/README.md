@@ -6,7 +6,7 @@
 
 ## System Overview
 
-Omni-OS (internally "Kondux") is a JARVIS-style desktop voice assistant for Windows, built on PyQt6 and Google's **Gemini Live** realtime API. A user talks (or types) to an animated on-screen HUD; Gemini streams back voice, and the assistant can act in the world through ~23 built-in tools (open apps, control the browser, manage files, control the OS, search the web, generate images, book flights, process uploaded files, etc.) plus an open-ended catalog of 30 third-party service integrations (Gmail, Slack, GitHub, Notion, Discord, Google Drive, Dropbox, Jira, Zoom, and more) that the user connects with their own credentials.
+Omni-OS (internally "Kondux") is a desktop voice assistant for Windows, built on PyQt6 and Google's **Gemini Live** realtime API. A user talks (or types) to an animated on-screen HUD; Gemini streams back voice, and the assistant can act in the world through ~23 built-in tools (open apps, control the browser, manage files, control the OS, search the web, generate images, book flights, process uploaded files, etc.) plus an open-ended catalog of 30 third-party service integrations (Gmail, Slack, GitHub, Notion, Discord, Google Drive, Dropbox, Jira, Zoom, and more) that the user connects with their own credentials.
 
 Beyond the core assistant, three larger subsystems are bolted onto the same shell:
 
@@ -62,4 +62,4 @@ All user data lives locally under the app's per-user data directory (`core/app_p
 
 ### Uncertainty flagged
 - The exact **live vs. planned** split for the Integrations catalog could not be confirmed from `core/settings_store.py::INTEGRATION_CATALOG` alone — every one of its 30 entries is currently marked `implemented: True` in the code read for this PRD. `[TBC]` whether a separate "coming soon" list exists elsewhere in the UI layer beyond what `IntegrationsPanel` renders from this same catalog.
-- Whether a `forget_memory`-equivalent tool is exposed to Gemini itself is unconfirmed — `memory_manager.forget()` exists as a Python function, but no matching entry was found in `main.py`'s `TOOL_DECLARATIONS` (only `save_memory` is). `[TBC]`.
+- Whether a `forget_memory`-equivalent tool is exposed to Gemini itself is unconfirmed — `memory/profile.py::forget_fact()` exists as a Python function, but no matching tool is declared in `voice/dispatch.py` (only `save_memory` is). `[TBC]`.

@@ -38,7 +38,7 @@ def _ps_quote(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def _schedule_windows(when: datetime, task: str, message: str) -> None:
+def _via_task_scheduler(when: datetime, task: str, message: str) -> None:
     script = _reminder_dir() / f"{task}.ps1"
     script.write_text(
         "$ErrorActionPreference = 'SilentlyContinue'\n"
@@ -71,7 +71,7 @@ def _schedule_windows(when: datetime, task: str, message: str) -> None:
         raise RuntimeError((done.stderr or done.stdout).strip() or "Task Scheduler refused the task")
 
 
-def _schedule_mac(when: datetime, task: str, message: str) -> None:
+def _via_launchd(when: datetime, task: str, message: str) -> None:
     label = f"io.kondux.omnios.{task}"
     agent = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
     agent.parent.mkdir(parents=True, exist_ok=True)
@@ -95,7 +95,7 @@ def shlex_quote(text: str) -> str:
     return shlex.quote(text)
 
 
-def _schedule_linux(when: datetime, task: str, message: str) -> None:
+def _via_systemd_or_at(when: datetime, task: str, message: str) -> None:
     notify = ["notify-send", "-u", "normal", _TITLE, message]
     if shutil.which("systemd-run"):
         done = subprocess.run(["systemd-run", "--user", f"--unit={task}",
@@ -116,11 +116,11 @@ def _schedule_linux(when: datetime, task: str, message: str) -> None:
 def schedule(when: datetime, message: str) -> None:
     task = f"OmniOS-Reminder-{when:%Y%m%d-%H%M%S}"
     if sys.platform == "win32":
-        _schedule_windows(when, task, message)
+        _via_task_scheduler(when, task, message)
     elif sys.platform == "darwin":
-        _schedule_mac(when, task, message)
+        _via_launchd(when, task, message)
     else:
-        _schedule_linux(when, task, message)
+        _via_systemd_or_at(when, task, message)
 
 
 @register(

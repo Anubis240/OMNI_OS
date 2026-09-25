@@ -9,7 +9,7 @@ from PyQt6.QtGui import QDesktopServices, QFont
 from PyQt6.QtWidgets import QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from core.app_paths import get_data_dir, get_os_name
-from gui.theme import C
+from gui.theme import Tone
 
 KEY_PAGE = "https://aistudio.google.com/api-keys?project=gen-lang-client-0368720913"
 
@@ -46,19 +46,19 @@ class KeyPrompt(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setObjectName("keyPrompt")
-        self.setStyleSheet(f"#keyPrompt {{ background: {C.PANEL_BG}; border: 1px solid {C.PRI}; border-radius: 16px; }}")
+        self.setStyleSheet(f"#keyPrompt {{ background: {Tone.SURFACE}; border: 1px solid {Tone.ACCENT}; border-radius: 16px; }}")
         col = QVBoxLayout(self)
         col.setContentsMargins(28, 22, 28, 22)
         col.setSpacing(10)
 
         title = QLabel("Welcome to Omni-OS")
         title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent; border: none;")
+        title.setStyleSheet(f"color: {Tone.ACCENT}; background: transparent; border: none;")
         col.addWidget(title)
         intro = QLabel("Omni runs on your own Google Gemini API key. Paste it below — it's stored "
                        "only on this computer.")
         intro.setWordWrap(True)
-        intro.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        intro.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent; border: none;")
         col.addWidget(intro)
 
         self._field = QLineEdit()
@@ -71,7 +71,7 @@ class KeyPrompt(QWidget):
 
         link = QPushButton("Get a free key from Google AI Studio ↗")
         link.setCursor(Qt.CursorShape.PointingHandCursor)
-        link.setStyleSheet(f"QPushButton {{ color: {C.ACC2}; background: transparent; border: none; text-align: left; }}"
+        link.setStyleSheet(f"QPushButton {{ color: {Tone.CYAN}; background: transparent; border: none; text-align: left; }}"
                            f"QPushButton:hover {{ text-decoration: underline; }}")
         link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(KEY_PAGE)))
         col.addWidget(link)
@@ -81,15 +81,15 @@ class KeyPrompt(QWidget):
         go.setFixedHeight(38)
         go.setCursor(Qt.CursorShape.PointingHandCursor)
         go.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        go.setStyleSheet(f"QPushButton {{ background: {C.PRI}; color: #000; border: none; border-radius: 10px; }}"
-                         f"QPushButton:hover {{ background: {C.ACC}; }}")
+        go.setStyleSheet(f"QPushButton {{ background: {Tone.ACCENT}; color: #000; border: none; border-radius: 10px; }}"
+                         f"QPushButton:hover {{ background: {Tone.AMBER}; }}")
         go.clicked.connect(self._submit)
         col.addWidget(go)
 
     def _restyle(self, error: bool) -> None:
-        edge = C.RED if error else C.BORDER
-        self._field.setStyleSheet(f"QLineEdit {{ background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {edge};"
-                                  f" border-radius: 8px; padding: 4px 10px; }} QLineEdit:focus {{ border-color: {C.PRI}; }}")
+        edge = Tone.ALERT if error else Tone.EDGE
+        self._field.setStyleSheet(f"QLineEdit {{ background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {edge};"
+                                  f" border-radius: 8px; padding: 4px 10px; }} QLineEdit:focus {{ border-color: {Tone.ACCENT}; }}")
 
     def _submit(self) -> None:
         key = self._field.text().strip()

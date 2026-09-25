@@ -32,6 +32,6 @@ def _log(message: str, player=None) -> None:
     print(f"[Trader] {message}")
     if player:
         try:
-            player.write_log(f"SYS: {message}")
+            player.post(f"SYS: {message}")
         except Exception:
             pass

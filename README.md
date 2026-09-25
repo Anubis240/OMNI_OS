@@ -1,8 +1,8 @@
 # Omni-OS
 
-**A real-time voice AI assistant that can hear, see, understand, and control your computer — and delegate work to a team of its own sub-agents.**
+**Talk to your PC and it does the work — and hands the bigger jobs to a team of AI sub-agents you can watch.**
 
-Omni-OS is a local-first, JARVIS-style desktop assistant built on Google's Gemini models
+Omni-OS is a local-first desktop voice assistant built on Google's Gemini models
 for real-time voice, vision, and system control. On top of that it runs a **multi-companion
 system**: your main assistant can create and manage its own named sub-agents (e.g. "Bob",
 "Ivy"), each backed by the Claude Agent SDK, to handle coding and project work — visualized
@@ -23,17 +23,17 @@ software, not a hosted subscription; your usage bills directly to your own accou
 | Feature | Description |
 |---|---|
 | 🎙️ Real-time Voice | Low-latency conversational voice, powered by Gemini — no wake word, just a one-click always-listening toggle |
-| 🖥️ System Control | Launch apps, manage files, run terminal commands |
-| 🧩 Autonomous Tasks | Planner/executor loop for complex, multi-step goals |
-| 👁️ Visual Awareness | Live screen capture and webcam vision |
+| 🖥️ PC Control | Opens apps, handles files and folders, changes system settings, drives the browser |
+| 🧩 Background Jobs | Longer jobs run in the background with Gemini function calling over the same tools |
+| 👁️ Screen & Camera | Ask about whatever is on screen or in front of the webcam |
 | 🤖 Multi-Companion System | Switch between multiple assistant personas, each with its own voice, memory, and system prompt |
 | 🕸️ World View | A live node-graph of your sub-agents (Bob, Ivy, ...) showing status, with create/edit/delete controls |
 | 🔗 Integrations Tab | Connect 30+ services (GitHub, Slack, Notion, Google Workspace, Microsoft 365, Jira, Zoom, Dropbox, and more) as callable tools |
 | 🧑‍💻 Claude Code Delegation | Sub-agents run on the Claude Agent SDK — uses your existing logged-in Claude Code CLI subscription if present, or an Anthropic API key |
-| 🧠 Persistent Memory | Remembers your projects, preferences, and context across sessions, namespaced per companion |
+| 🧠 Memory | Each companion keeps its own notes about you between sessions |
 | 💹 Trader Panel (optional add-on) | Live crypto trading with Guardian pre-trade risk checks |
 | ⚙️ Settings Panel | Manage API keys, companions, MCP connections, integrations, and skills from the UI |
-| ⌨️ Hybrid Input | Switch freely between typed and spoken input |
+| ⌨️ Type or Talk | The same conversation takes typed messages and voice |
 
 ---
 
@@ -43,8 +43,8 @@ software, not a hosted subscription; your usage bills directly to your own accou
 |---|---|
 | OS | Native release targets: Windows 10/11 x64; macOS 15+ Intel or Apple Silicon; Ubuntu 22.04+ desktop-compatible Linux x64 |
 | Python | Not needed for packaged releases; 3.11 or 3.12 for source development |
-| Microphone | Required for voice interaction |
-| API Key | Gemini API key (free tier available) |
+| Microphone | Any input device Windows/macOS/Linux can record from (not needed for typed use) |
+| Gemini key | Your own key from Google AI Studio; the free tier works |
 
 ---
 

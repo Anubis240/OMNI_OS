@@ -10,8 +10,8 @@ Unlike the JS version (an Electron main-process singleton talking to a
 renderer over IPC), this is a plain class: the caller (trader_panel.py)
 supplies an `emit` callback instead of an IPC channel, and drives
 start()/stop() from Qt. cycle() runs on a background thread — never the
-Qt main thread — same pattern main.py uses for other slow actions
-(run_in_executor), just via a plain threading.Thread here since this
+Qt main thread — same pattern the voice session uses for slow tools
+(asyncio.to_thread), just via a plain threading.Thread here since this
 module has no asyncio dependency.
 """
 

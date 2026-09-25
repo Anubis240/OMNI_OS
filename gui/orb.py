@@ -13,7 +13,7 @@ from PyQt6.QtCore import QPointF, QTimer, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
-from gui.theme import C, lerp_hex, qcol
+from gui.theme import Tone, lerp_hex, with_alpha
 
 _POINTS = 900
 _TILT = math.radians(16)        # the spin axis leans a little toward the viewer
@@ -34,7 +34,6 @@ class OrbView(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(300, 300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.state = "STARTING"
         self.speaking = False
         self.muted = False
 
@@ -46,7 +45,7 @@ class OrbView(QWidget):
         self._size_goal = 1.0
         self._glow_goal = 0.35
         self._next_goal_at = 0.0
-        self._color = self._color_from = self._color_to = C.PRI
+        self._color = self._color_from = self._color_to = Tone.ACCENT
         self._fade_started = 0.0
 
         timer = QTimer(self)
@@ -93,16 +92,16 @@ class OrbView(QWidget):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), qcol(C.BG))
+        painter.fillRect(self.rect(), with_alpha(Tone.CANVAS))
         w, h = self.width(), self.height()
         cx, cy, side = w / 2, h / 2, min(w, h)
 
-        painter.setPen(QPen(qcol(C.PRI_GHO), 1))
+        painter.setPen(QPen(with_alpha(Tone.ACCENT_WASH), 1))
         for x in range(20, w, 40):
             for y in range(20, h, 40):
                 painter.drawPoint(x, y)
 
-        tint = QColor(C.MUTED_C if self.muted else self._color)
+        tint = QColor(Tone.ALERT if self.muted else self._color)
         glow = QRadialGradient(QPointF(cx, cy), side * 0.52)
         glow.setColorAt(0.35, QColor(tint.red(), tint.green(), tint.blue(), int(70 * self._glow)))
         glow.setColorAt(1.0, QColor(tint.red(), tint.green(), tint.blue(), 0))

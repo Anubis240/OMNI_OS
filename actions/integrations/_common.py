@@ -14,6 +14,6 @@ def log(service: str, message: str, player=None) -> None:
     print(f"[{service}] {message}")
     if player:
         try:
-            player.write_log(f"SYS: [{service}] {message}")
+            player.post(f"SYS: [{service}] {message}")
         except Exception:
             pass

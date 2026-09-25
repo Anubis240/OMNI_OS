@@ -1,6 +1,6 @@
 """Turn-based conversation driver for blackbox_agent-backend companions —
 same public shape as actions/codex_companion.py (send/forget_session/
-get_status), so main.py can dispatch to it identically. Drives the
+get_status), so voice/session.py can dispatch to it identically. Drives the
 Blackbox AI CLI directly via subprocess.
 
 CONFIDENCE NOTE — lowest of the four new CLI backends added 2026-09-09.

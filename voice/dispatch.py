@@ -111,18 +111,18 @@ class ToolRouter:
         name, args = call.name, dict(call.args or {})
         print(f"[tool] {name} {args}")
         self.busy = True
-        self.a.ui.set_state("THINKING")
+        self.a.ui.show_thinking()
         silent = False
         try:
             result, silent = await self._run(name, args)
         except Exception as err:
             traceback.print_exc()
             result = f"{name} failed: {err}"
-            self.a.ui.write_log(f"ERR: {name} — {str(err)[:120]}")
+            self.a.ui.post(f"ERR: {name} — {str(err)[:120]}")
         finally:
             self.busy = False
-            if not self.a.ui.muted:
-                self.a.ui.set_state("LISTENING")
+            if not self.a.ui.mic_muted:
+                self.a.ui.show_listening()
         response = {"result": result or "Done."}
         if silent:
             response["silent"] = True

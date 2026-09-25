@@ -116,8 +116,7 @@ _SAFETY_FINISH_REASONS = {"SAFETY", "IMAGE_SAFETY", "FinishReason.SAFETY", "Fini
 
 # Local, offline safety net — added 2026-09-06 after research confirmed
 # every generation-side option (Gemini's own image models, OpenAI's GPT
-# Image, the DALL-E option the original Open-Jarvis fork this project
-# started from once had — deprecated/removed from OpenAI's API entirely as
+# Image, and DALL-E — deprecated/removed from OpenAI's API entirely as
 # of May 2026 anyway) gates its real safety filtering behind billing, so it
 # only protects users who pay. This runs the same way for every user
 # regardless of which backend answered or whether they have billing at
@@ -348,6 +347,6 @@ def _log(message: str, player=None) -> None:
     print(f"[ImageGen] {message}")
     if player:
         try:
-            player.write_log(f"SYS: {message}")
+            player.post(f"SYS: {message}")
         except Exception:
             pass

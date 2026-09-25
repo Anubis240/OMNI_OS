@@ -34,14 +34,14 @@ class PhoneBridge:
             print(f"[phone] dashboard unavailable: {err}")
             return
         server = DashboardServer()
-        server.set_connect_callback(lambda: (ui.write_log("SYS: Phone connected via Remote Dashboard."),
+        server.set_connect_callback(lambda: (ui.post("SYS: Phone connected via Remote Dashboard."),
                                              ui.notify_phone_connected()))
-        server.set_disconnect_callback(lambda: (ui.write_log("SYS: Phone disconnected from Remote Dashboard."),
+        server.set_disconnect_callback(lambda: (ui.post("SYS: Phone disconnected from Remote Dashboard."),
                                                 ui.notify_phone_disconnected()))
         server.set_trader_state_callback(ui.get_trader_state)
         server.set_trader_action_callback(ui.run_trader_action)
-        server.set_error_callback(lambda msg: ui.write_log(f"SYS: Remote Dashboard {msg}"))
-        server.set_warning_callback(lambda msg: ui.write_log(f"SYS: Remote Dashboard {msg}"))
+        server.set_error_callback(lambda msg: ui.post(f"SYS: Remote Dashboard {msg}"))
+        server.set_warning_callback(lambda msg: ui.post(f"SYS: Remote Dashboard {msg}"))
         self.server = server
         asyncio.create_task(server.serve())
         asyncio.create_task(self._typed_messages())
@@ -50,11 +50,11 @@ class PhoneBridge:
     def pairing(self):
         """(url, key, auto-login url) for the pairing QR, or None with the reason logged."""
         if self.server is None:
-            self.a.ui.write_log('SYS: Remote Dashboard unavailable — install fastapi, "uvicorn[standard]" and qrcode[pil].')
+            self.a.ui.post('SYS: Remote Dashboard unavailable — install fastapi, "uvicorn[standard]" and qrcode[pil].')
             return None
         if not self.server.running:
             why = self.server.start_error or "it hasn't started yet — try again in a moment."
-            self.a.ui.write_log(f"SYS: Remote Dashboard isn't running: {why}")
+            self.a.ui.post(f"SYS: Remote Dashboard isn't running: {why}")
             return None
         key, url = self.server.new_key(), self.server.get_url()
         return url, key, f"{url}/auto-login?key={key}"
@@ -87,15 +87,15 @@ class PhoneBridge:
                         break
                     await asyncio.sleep(0.1)
                 if self.a.session is None:
-                    self.a.ui.write_log(f"SYS: Phone message dropped (no active session): {text}")
+                    self.a.ui.post(f"SYS: Phone message dropped (no active session): {text}")
                     continue
                 # Echo it to every connected client: typed turns have no input
                 # transcription, so nothing else would show them.
                 await self.server.broadcast({"type": "you", "text": text})
-                self.a.ui.write_log(f"[Phone]: {text}")
+                self.a.ui.post(f"[Phone]: {text}")
                 await self.a.send_text(text)
             except Exception as err:
-                self.a.ui.write_log(f"SYS: Phone message failed ({err}).")
+                self.a.ui.post(f"SYS: Phone message failed ({err}).")
 
     async def _voice(self) -> None:
         """Phone mic PCM → the live session, same path as the PC mic.
@@ -118,13 +118,13 @@ class PhoneBridge:
                         await asyncio.wait_for(self.a.session.send_realtime_input(audio_stream_end=True),
                                                timeout=timeouts.SEND)
                     except Exception as err:
-                        self.a.ui.write_log(f"SYS: Phone audio_stream_end signal failed — {err}")
+                        self.a.ui.post(f"SYS: Phone audio_stream_end signal failed — {err}")
                 self.talking = False
                 continue
             self.talking = True
-            if self.a.ui.muted:
+            if self.a.ui.mic_muted:
                 continue
             problem = self.a.queue_audio(chunk)
             if problem and problem != last_problem:
-                self.a.ui.write_log(f"SYS: Phone audio dropped — {problem}.")
+                self.a.ui.post(f"SYS: Phone audio dropped — {problem}.")
             last_problem = problem

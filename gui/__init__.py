@@ -7,6 +7,6 @@
   gauges.py   the small metric bars in the status card
   pairing.py  the phone pairing card (QR + key)
   firstrun.py the first-launch API key prompt
-  window.py   MainWindow — layout, sidebar, panels
+  window.py   OmniWindow — layout, sidebar, panels
   facade.py   OmniUI — the thread-safe surface the voice assistant talks to
 """

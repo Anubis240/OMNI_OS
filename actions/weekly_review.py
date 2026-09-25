@@ -2,15 +2,14 @@
 notes, wishes) and flags entries that look stalled — nothing touched in a
 while. Deterministic, no LLM call of its own: returns a plain-text digest
 and leaves narrating it conversationally to whichever Gemini Live companion
-called the tool, the same way list_desktop()/get_desktop_stats() hand back
-plain formatted text in actions/desktop.py. Reads the same memory store
+called the tool. Reads the same memory store
 actions/action_items.py files commitments into, so an item extracted from a
 meeting a few days ago naturally shows up here later as either recent or
 stalled. Inspired by the Hermes Agent skill catalog's
 `weekly-review-planning` skill — see the 2026-09-09 conversation with the
 user for context.
 
-Companion-namespace aware the same way main.py's own "save_memory" tool
+Companion-namespace aware the same way voice/dispatch.py's own "save_memory" tool
 branch is — see actions/action_items.py's module docstring for why the
 namespace is passed in by the caller rather than looked up here.
 """

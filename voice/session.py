@@ -55,7 +55,7 @@ class Assistant:
         self._transcript: list[str] = []                  # this connection's turns, for the summary
         self._connections = 0
 
-        ui.on_text_command = self._typed
+        ui.on_typed_text = self._typed
         ui.on_voice_change = lambda _name: self.request_reconnect()
         ui.on_companions_changed = self.request_reconnect
         ui.on_remote_clicked = self.phone.pairing
@@ -88,9 +88,9 @@ class Assistant:
                 timeout=timeouts.SEND)
             return True
         except asyncio.TimeoutError:
-            self.ui.write_log("SYS: Lost the connection sending a message — reconnecting.")
+            self.ui.post("SYS: Lost the connection sending a message — reconnecting.")
         except Exception as err:
-            self.ui.write_log(f"SYS: Failed to send ({err}) — reconnecting.")
+            self.ui.post(f"SYS: Failed to send ({err}) — reconnecting.")
         self.request_reconnect()
         return False
 
@@ -117,7 +117,7 @@ class Assistant:
         return f"{agent['name']} is on it — I'll tell you when it's done."
 
     async def close(self) -> None:
-        self.ui.write_log("SYS: Shutdown requested.")
+        self.ui.post("SYS: Closing Omni-OS.")
         await self._summarize_conversation()
         self.speak("Goodbye.")
         threading.Timer(1.5, lambda: os._exit(0)).start()
@@ -137,26 +137,26 @@ class Assistant:
             asyncio.run_coroutine_threadsafe(self.send_text(text), self.loop)
 
     async def _agent_reply(self, companion, send, text):
-        self.ui.write_log(f"SYS: {companion['name']} is thinking…")
-        self.ui.write_log(f"{companion['name']}: {await send(companion, text)}")
+        self.ui.post(f"SYS: {companion['name']} is thinking…")
+        self.ui.post(f"{companion['name']}: {await send(companion, text)}")
 
     async def _delegated(self, companion, send, task):
-        self.ui.write_log(f"SYS: {companion['name']} started: {task[:80]}")
+        self.ui.post(f"SYS: {companion['name']} started: {task[:80]}")
         result = await send(companion, task)
-        self.ui.write_log(f"{companion['name']}: {result}")
+        self.ui.post(f"{companion['name']}: {result}")
         self.speak(f"{companion['name']} finished: {result[:300]}")
 
     # --- speaking state -------------------------------------------------
     def _speaking_changed(self, speaking: bool) -> None:
         if speaking:
             if not self.tools.busy:
-                self.ui.set_state("SPEAKING")
-        elif not self.ui.muted:
-            self.ui.set_state("LISTENING")
+                self.ui.show_speaking()
+        elif not self.ui.mic_muted:
+            self.ui.show_listening()
 
     def _mic_open(self) -> bool:
         speaking = self._speaker is not None and self._speaker.speaking
-        return (self.ui.always_listening and not self.ui.muted
+        return (self.ui.always_listening and not self.ui.mic_muted
                 and not speaking and not self.phone.talking)
 
     # --- the per-connection jobs ---------------------------------------
@@ -168,7 +168,7 @@ class Assistant:
                     self.session.send_realtime_input(audio=types.Blob(data=pcm, mime_type="audio/pcm;rate=16000")),
                     timeout=timeouts.SEND)
             except asyncio.TimeoutError:
-                self.ui.write_log("SYS: Lost the connection sending voice input — reconnecting.")
+                self.ui.post("SYS: Lost the connection sending voice input — reconnecting.")
                 raise Reconnect()
 
     async def _watch_for_reconnect(self) -> None:
@@ -210,14 +210,14 @@ class Assistant:
                     if msg.tool_call:
                         await self._answer_tools(msg.tool_call.function_calls)
             except asyncio.TimeoutError:
-                self.ui.write_log(f"SYS: no response from Gemini for {timeouts.REPLY_IDLE}s — reconnecting.")
+                self.ui.post(f"SYS: no response from Gemini for {timeouts.REPLY_IDLE}s — reconnecting.")
                 raise Reconnect()
 
     def _record(self, who: str, pieces: list[str], wire_type: str) -> None:
         text = " ".join(p for p in pieces if p).strip()
         if not text:
             return
-        self.ui.write_log(f"{who}: {text}")
+        self.ui.post(f"{who}: {text}")
         self._transcript.append(f"{who}: {text}")
         if self.dashboard is not None:
             asyncio.create_task(self.dashboard.broadcast({"type": wire_type, "text": text}))
@@ -230,16 +230,16 @@ class Assistant:
             except asyncio.TimeoutError:
                 # The worker thread can't be killed, but the session must not wait on it.
                 self.tools.busy = False
-                if not self.ui.muted:
-                    self.ui.set_state("LISTENING")
-                self.ui.write_log(f"SYS: '{call.name}' didn't respond in time — cancelled, try again.")
+                if not self.ui.mic_muted:
+                    self.ui.show_listening()
+                self.ui.post(f"SYS: '{call.name}' didn't respond in time — cancelled, try again.")
                 replies.append(types.FunctionResponse(id=call.id, name=call.name,
                                                       response={"error": "Tool call timed out"}))
         try:
             await asyncio.wait_for(self.session.send_tool_response(function_responses=replies),
                                    timeout=timeouts.SEND)
         except asyncio.TimeoutError:
-            self.ui.write_log("SYS: Lost the connection sending a tool result back — reconnecting.")
+            self.ui.post("SYS: Lost the connection sending a tool result back — reconnecting.")
             raise Reconnect()
 
     # --- connection lifecycle ------------------------------------------
@@ -277,7 +277,7 @@ class Assistant:
         self.phone.start()
         while True:
             try:
-                self.ui.set_state("THINKING")
+                self.ui.show_thinking()
                 model, config = await self._connect_config()
                 try:
                     async with (timeouts.connect_with_timeout(client.aio.live.connect(model=model, config=config),
@@ -287,28 +287,28 @@ class Assistant:
                         self._outbox = asyncio.Queue(maxsize=10)
                         self._speaker = audio.Speaker(self._speaking_changed, timeouts.PLAYBACK_TAIL)
                         self._connections += 1
-                        self.ui.set_state("LISTENING")
-                        self.ui.write_log("SYS: OMNI-OS online." if self._connections == 1
+                        self.ui.show_listening()
+                        self.ui.post("SYS: OMNI-OS online." if self._connections == 1
                                           else f"SYS: Reconnected (session #{self._connections}).")
                         jobs.create_task(self._send_audio())
                         jobs.create_task(audio.capture(lambda pcm: self.queue_audio(pcm), self._mic_open,
-                                                       self.ui.write_log))
+                                                       self.ui.post))
                         jobs.create_task(self._receive())
                         jobs.create_task(self._speaker.run(lambda: self.ui.speech_muted,
                                                            self.phone.mirror_audio))
                         jobs.create_task(self._watch_for_reconnect())
                 except asyncio.TimeoutError:
-                    self.ui.write_log(f"SYS: connection handshake timed out after {timeouts.CONNECT}s — retrying.")
+                    self.ui.post(f"SYS: connection handshake timed out after {timeouts.CONNECT}s — retrying.")
             except Exception as err:
                 wanted = isinstance(err, Reconnect) or (isinstance(err, ExceptionGroup) and err.subgroup(Reconnect))
                 if not wanted:
                     traceback.print_exc()
-                    self.ui.write_log(f"SYS: Connection lost ({timeouts.describe_disconnect(err)}) — reconnecting.")
+                    self.ui.post(f"SYS: Connection lost ({timeouts.describe_disconnect(err)}) — reconnecting.")
             self.session = None
             await self._summarize_conversation()
             if self._speaker is not None:
                 self._speaker.stop_speaking()
-            self.ui.set_state("THINKING")
+            self.ui.show_thinking()
             await asyncio.sleep(3)
 
 

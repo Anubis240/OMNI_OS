@@ -10,28 +10,26 @@ from PyQt6.QtWidgets import QComboBox
 from core.app_paths import get_data_dir
 
 
-class C:
-    """Near-black surfaces with one warm orange accent. Plain hex strings so
-    they work both in style sheets and through qcol()."""
-    BG = "#000000"
-    PANEL = PANEL_BG = BAR_BG = "#0a0a0c"
-    PANEL2 = PANEL2_BG = "#111114"
-    BORDER = "#2a2a2e"
-    BORDER_A = "#1c1c1f"
-    BORDER_B = "#ff8c42"
-    PRI = "#ff8c42"
-    PRI_DIM = "#b35a1f"
-    PRI_GHO = PRI_GHO_BG = "#1a0f08"
-    ACC = "#e9c46a"
-    ACC2 = "#48cae4"
-    GREEN = "#06d6a0"
-    GREEN_D = "#049268"
-    RED = MUTED_C = "#ef476f"
-    TEXT = "#f0f0f0"
-    TEXT_MED = TEXT_HELP = "#9e9e9e"   # ~7.4:1 on PANEL — use for any text that matters
-    TEXT_DIM = "#575757"               # ~2.7:1 — placeholders and decoration only
+class Tone:
+    """Omni's colours: near-black surfaces and one warm orange accent. Plain
+    hex strings, so they work in style sheets and through with_alpha()."""
+    CANVAS = "#000000"
+    SURFACE = "#0a0a0c"
+    RAISED = "#111114"
+    EDGE = "#2a2a2e"
+    EDGE_SOFT = "#1c1c1f"
+    EDGE_HOT = "#ff8c42"
+    ACCENT = "#ff8c42"
+    ACCENT_DEEP = "#b35a1f"
+    ACCENT_WASH = "#1a0f08"
+    AMBER = "#e9c46a"
+    CYAN = "#48cae4"
+    OK = "#06d6a0"
+    ALERT = "#ef476f"
+    INK = "#f0f0f0"
+    INK_SOFT = "#9e9e9e"    # ~7.4:1 on SURFACE — use for any text that matters
+    INK_FAINT = "#575757"   # ~2.7:1 — placeholders and decoration only
     WHITE = "#ffffff"
-    DARK = "#000000"
 
 
 # One accent per companion, assigned by position in the companion list.
@@ -43,10 +41,11 @@ def companion_color(companion_id: str, companions: list[dict]) -> str:
     for index, companion in enumerate(companions):
         if companion.get("id") == companion_id:
             return COMPANION_HUES[index % len(COMPANION_HUES)]
-    return C.PRI
+    return Tone.ACCENT
 
 
-def qcol(hex_color: str, alpha: int = 255) -> QColor:
+def with_alpha(hex_color: str, alpha: int = 255) -> QColor:
+    """`hex_color` as a QColor with the given 0–255 opacity."""
     color = QColor(hex_color)
     color.setAlpha(alpha)
     return color

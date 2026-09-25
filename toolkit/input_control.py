@@ -185,11 +185,11 @@ def _do(action: str, args: dict) -> str:
         "action": S("type | smart_type | click | double_click | right_click | move | hotkey | press | "
                     "scroll | copy | paste | clear_field | wait | screenshot | focus_window | "
                     "screen_find | screen_click | user_data"),
-        "text": S("Text to type or paste"),
+        "text": S("What to type (or paste, for long text)"),
         "x": I("Screen X"), "y": I("Screen Y"),
         "keys": S("Key combination, e.g. ctrl+shift+t"),
         "key": S("Single key, e.g. enter"),
-        "direction": S("up | down | left | right"),
+        "direction": S("Scroll or arrow direction: up, down, left or right"),
         "amount": I("Scroll steps (default 3)"),
         "seconds": N("Seconds to wait (max 30)"),
         "title": S("Part of the window title for focus_window"),

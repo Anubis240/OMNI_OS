@@ -2,7 +2,7 @@
 
 Each module in this package describes one tool the live model can call: a
 Gemini function schema plus a `run(args, ctx)` handler, registered with
-`@register`. main.py never names individual tools — it builds its tool list
+`@register`. The voice session never names individual tools — it builds its tool list
 from `schemas()` and dispatches through `get()`.
 
 Importing this package imports every tool module so they all register.

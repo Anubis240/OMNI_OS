@@ -29,8 +29,8 @@ def _base_dir() -> Path:
 
 SETTINGS_PATH = _base_dir() / "config" / "settings.json"
 
-# Single source of truth for the hardcoded Gemini Live model fallback — main.py
-# uses it as LIVE_MODEL, settings_panel.py reads it to show the actually-
+# Single source of truth for the hardcoded Gemini Live model fallback — the voice
+# session connects with it, settings_panel.py reads it to show the actually-
 # resolved model in Settings (a tester asked to verify Omni's own self-report
 # independently rather than trust it — see the [YOUR CURRENT MODEL] prompt fix).
 DEFAULT_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
@@ -91,8 +91,8 @@ DEFAULT_SETTINGS = {
     "trader": {"enabled": False},  # optional crypto trading panel add-on, off by default
     "live_model": "",   # Gemini Live model override for the default "Omni" identity
                         # (a companion's own "model" field still wins over this — see
-                        # main.py::_build_config()); empty means use the hardcoded
-                        # LIVE_MODEL fallback in main.py. Settings → Companions.
+                        # voice/prompt.py::build()); empty means use the hardcoded
+                        # DEFAULT_LIVE_MODEL fallback above. Settings → Companions.
     "dashboard_port": 8000,  # Remote Dashboard listen port — configurable because the
                              # original Seraph Guardian app this was forked from defaults
                              # to the same port, so running both at once conflicts.
@@ -101,12 +101,12 @@ DEFAULT_SETTINGS = {
                          # backend: "gemini_live" (realtime voice) | "claude_agent" |
                          # "codex_agent" | "opencode_agent" | "openhands_agent" |
                          # "grok_agent" | "blackbox_agent" (all turn-based text/tools,
-                         # different CLI each — main.py's _AGENT_BACKENDS/
-                         # _agent_send_fn() dispatch on this).
+                         # different CLI each — voice/prompt.py's AGENT_BACKENDS and
+                         # voice/session.py's _agent_sender() dispatch on this).
                          # system_prompt only needs to define the persona/identity — the
                          # shared tool-routing/safety rules (core/shared_rules.txt) are
-                         # always appended automatically by main.py::_build_config().
-                         # Empty by default: _build_config() falls back to the original
+                         # always appended automatically by voice/prompt.py::build().
+                         # Empty by default: build() falls back to the original
                          # single-companion behavior (core/prompt.txt, unnamespaced memory,
                          # self.ui.voice) whenever there's no active companion configured.
                          # specialty: short one-line description of what a claude_agent
@@ -114,7 +114,7 @@ DEFAULT_SETTINGS = {
                          # World view and given to the lead companion so its
                          # delegate_to_agent tool call can pick the right sub-agent.
                          # Not meaningful for gemini_live companions (nothing routes to
-                         # those — see main.py::_build_config()'s sub-agent directory).
+                         # those — see voice/prompt.py::build()'s sub-agent directory).
     "active_companion_id": "",
     "integrations": {},  # {catalog_id: {field_key: value, ..., "enabled": bool}}
                          # Keyed by INTEGRATION_CATALOG id. Only present once a
@@ -138,7 +138,7 @@ BUILTIN_COMPANIONS = []  # no built-in personas — Omni (core/prompt.txt) is th
 #                    and the actual flow land in a later batch (see
 #                    `implemented`).
 # implemented: whether actions/integrations/<id>.py exists and is wired into
-# main.py's tool registration yet. The UI only offers "Connect" on entries
+# the tool registry yet. The UI only offers "Connect" on entries
 # where this is True — everything else shows as "Coming soon" rather than
 # accepting credentials nothing will ever use.
 INTEGRATION_CATALOG = [
@@ -407,7 +407,7 @@ def resolve_key_placeholders(text: str, settings: dict | None = None) -> str:
 
 def format_skills_for_prompt(settings: dict | None = None) -> str:
     """Formats the user's enabled custom skills into the same [SKILLS...]
-    block main.py's _build_config() appends to the Gemini Live system
+    block voice/prompt.py::build() appends to the Gemini Live system
     prompt — shared here so every actions/*_companion.py Text-backend
     module can append it to its own identity too (2026-09-14 report,
     GEMZ4US Section D2: a skill like a custom reply-suffix only ever

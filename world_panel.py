@@ -3,10 +3,10 @@ and its sub-agents (claude_agent-backend companions), shown as a node graph
 with live idle/running status.
 
 Delegation itself happens through the delegate_to_agent tool (see
-main.py::_delegate_to_agent / _run_delegation); this panel is purely the
+voice/session.py::Assistant.delegate); this panel is purely the
 visualization plus where new sub-agents get created. Swapped into the
 center stack exactly like TraderPanel/SettingsPanel/IntegrationsPanel.
-`from gui.theme import C, COMPANION_HUES` is a deferred import for the same reason
+`from gui.theme import Tone, COMPANION_HUES` is a deferred import for the same reason
 those other panels do it.
 """
 
@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
 from core import settings_store
 
 # One id -> (forget_session, get_status) pair per agent-backend companion
-# type — mirrors main.py's own _AGENT_BACKENDS/_agent_send_fn dispatch (see
+# type — mirrors voice/session.py's _agent_sender() dispatch (see
 # that module's comment for why every backend shares this same shape).
 # Centralized here instead of repeated per call site since this panel needs
 # both functions, at three different call sites, for all six backends.
@@ -54,7 +54,7 @@ def _forget_session_everywhere(companion_id: str) -> None:
 
 
 # All six agent-CLI backends eligible as a delegate_to_agent sub-agent target
-# (mirrors main.py's _AGENT_BACKENDS — gemini_live can never be a delegation
+# (mirrors voice/prompt.py's AGENT_BACKENDS — gemini_live can never be a delegation
 # target, so it's deliberately excluded). Plain string literals rather than
 # reusing _agent_backend_fns().keys() so listing sub-agents in the graph
 # doesn't trigger that function's deferred per-backend imports.
@@ -67,10 +67,10 @@ _SUB_AGENT_BACKENDS = (
 class WorldPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        from gui.theme import C, COMPANION_HUES
-        self._C = C
+        from gui.theme import Tone, COMPANION_HUES
+        self._tone = Tone
         self._hues = COMPANION_HUES
-        self.on_companion_added = None  # wired by MainWindow._ensure_world_panel() to trigger a live reconnect
+        self.on_companion_added = None  # wired by OmniWindow._ensure_world_panel() to trigger a live reconnect
         self._build_ui()
 
         self._status_tmr = QTimer(self)
@@ -78,19 +78,19 @@ class WorldPanel(QWidget):
         self._status_tmr.start(1500)
 
     def _build_ui(self):
-        C = self._C
+        Tone = self._tone
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
         outer.setSpacing(10)
 
         title = QLabel("◎ WORLD")
         title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        title.setStyleSheet(f"color: {Tone.ACCENT}; background: transparent;")
         outer.addWidget(title)
 
         subtitle = QLabel("Your lead companion and its sub-agents, at a glance.")
         subtitle.setFont(QFont("Segoe UI", 8))
-        subtitle.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        subtitle.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
         outer.addWidget(subtitle)
 
         scroll = QScrollArea()
@@ -98,7 +98,7 @@ class WorldPanel(QWidget):
         scroll.setStyleSheet("background: transparent; border: none;")
         outer.addWidget(scroll, stretch=1)
 
-        self._canvas = _GraphCanvas(C, self._hues)
+        self._canvas = _GraphCanvas(Tone, self._hues)
         self._canvas.add_clicked.connect(self._open_add_dialog)
         self._canvas.edit_requested.connect(self._open_edit_dialog)
         self._canvas.delete_requested.connect(self._delete_companion)
@@ -124,7 +124,7 @@ class WorldPanel(QWidget):
         self._canvas.set_data(lead_name, sub_agents, all_companions, lead_id=lead["id"] if lead else None)
 
     def _open_add_dialog(self):
-        dlg = _AddSubAgentDialog(self._C, None, self)
+        dlg = _AddSubAgentDialog(self._tone, None, self)
         if dlg.exec():
             self.refresh()
             if self.on_companion_added:
@@ -136,7 +136,7 @@ class WorldPanel(QWidget):
         if companion is None:
             return
         is_lead = companion_id == (settings.get("active_companion_id") or "")
-        dlg = _AddSubAgentDialog(self._C, companion, self, is_lead=is_lead)
+        dlg = _AddSubAgentDialog(self._tone, companion, self, is_lead=is_lead)
         if dlg.exec():
             # identity (or backend) changed — start its next turn fresh.
             # Harmless no-op in whichever module it didn't actually use.
@@ -146,7 +146,7 @@ class WorldPanel(QWidget):
                 self.on_companion_added()
 
     def _delete_companion(self, companion_id: str):
-        C = self._C
+        Tone = self._tone
         settings = settings_store.load_settings()
         companion = next((c for c in settings["companions"] if c["id"] == companion_id), None)
         name = companion["name"] if companion else "this sub-agent"
@@ -164,9 +164,9 @@ class WorldPanel(QWidget):
             # its own buttons, just never reported since deleting a
             # sub-agent wasn't tested that session. See _on_reset's comment
             # for the root-cause explanation.
-            f"QMessageBox {{ background: {C.PANEL_BG}; }} "
-            f"QLabel {{ color: {C.TEXT}; background: transparent; }} "
-            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; "
+            f"QMessageBox {{ background: {Tone.SURFACE}; }} "
+            f"QLabel {{ color: {Tone.INK}; background: transparent; }} "
+            f"QPushButton {{ color: {Tone.INK}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE_SOFT}; "
             f"border-radius: 4px; padding: 4px 14px; }}"
         )
         if box.exec() != QMessageBox.StandardButton.Yes:
@@ -195,9 +195,9 @@ class _GraphCanvas(QWidget):
     TOP_MARGIN = 24
     TRUNK_GAP = 56
 
-    def __init__(self, C, hues, parent=None):
+    def __init__(self, Tone, hues, parent=None):
         super().__init__(parent)
-        self._C = C
+        self._tone = Tone
         self._hues = hues
         self.setStyleSheet("background: transparent;")
         self._lead_card: _NodeCard | None = None
@@ -214,8 +214,8 @@ class _GraphCanvas(QWidget):
         self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._add_btn.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._add_btn.setStyleSheet(f"""
-            QPushButton {{ color: {C.PRI}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER}; border-radius: 17px; }}
-            QPushButton:hover {{ border: 1px solid {C.PRI}; }}
+            QPushButton {{ color: {Tone.ACCENT}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE}; border-radius: 17px; }}
+            QPushButton:hover {{ border: 1px solid {Tone.ACCENT}; }}
         """)
         self._add_btn.setToolTip("Add a sub-agent")
         self._add_btn.clicked.connect(self.add_clicked)
@@ -226,11 +226,11 @@ class _GraphCanvas(QWidget):
         # sub-agent — only ticks while something is actually running, so an
         # idle World view isn't burning cycles on an invisible animation.
         self._dash_phase = 0.0
-        self._anim_tmr = QTimer(self)
-        self._anim_tmr.timeout.connect(self._advance_animation)
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.timeout.connect(self._advance_animation)
 
     def set_data(self, lead_name: str, sub_agents: list[dict], all_companions: list[dict], lead_id: str | None = None):
-        C = self._C
+        Tone = self._tone
         count_txt = f"{len(sub_agents)} sub-agent{'s' if len(sub_agents) != 1 else ''}"
         # 2026-09-15 report (GEMZ4US finding #35): the lead card never got
         # an edit affordance because it was always built with companion_id
@@ -245,7 +245,7 @@ class _GraphCanvas(QWidget):
                 self._lead_card.deleteLater()
             self._lead_id = lead_id
             self._lead_card = _NodeCard(
-                lead_name, "lead companion", count_txt, C.PRI, C, lead_id, self,
+                lead_name, "lead companion", count_txt, Tone.ACCENT, Tone, lead_id, self,
                 draggable=False, show_delete=False,
             )
             self._lead_card.edit_clicked.connect(self.edit_requested)
@@ -268,7 +268,7 @@ class _GraphCanvas(QWidget):
             subtitle = comp.get("specialty") or "sub-agent"
             card = self._sub_cards.get(cid)
             if card is None:
-                card = _NodeCard(comp["name"], subtitle, "", color, C, cid, self)
+                card = _NodeCard(comp["name"], subtitle, "", color, Tone, cid, self)
                 card.resize(self.NODE_W, self.NODE_H)
                 card.dragged.connect(self._on_card_dragged)
                 card.edit_clicked.connect(self.edit_requested)
@@ -330,10 +330,10 @@ class _GraphCanvas(QWidget):
             card.set_status(status)
             any_running = any_running or status == "running"
 
-        if any_running and not self._anim_tmr.isActive():
-            self._anim_tmr.start(50)
-        elif not any_running and self._anim_tmr.isActive():
-            self._anim_tmr.stop()
+        if any_running and not self._pulse_timer.isActive():
+            self._pulse_timer.start(50)
+        elif not any_running and self._pulse_timer.isActive():
+            self._pulse_timer.stop()
             self.update()
 
     def _advance_animation(self):
@@ -343,9 +343,9 @@ class _GraphCanvas(QWidget):
         self.update()
 
     def _draw_grid(self, painter: QPainter):
-        C = self._C
+        Tone = self._tone
         spacing = 28
-        color = QColor(C.BORDER)
+        color = QColor(Tone.EDGE)
         color.setAlpha(160)
         pen = QPen(color)
         pen.setWidth(1)
@@ -396,13 +396,13 @@ class _NodeCard(QFrame):
     edit_clicked = pyqtSignal(str)
     delete_clicked = pyqtSignal(str)
 
-    def __init__(self, name: str, subtitle: str, extra: str, color: str, C, companion_id: str | None,
+    def __init__(self, name: str, subtitle: str, extra: str, color: str, Tone, companion_id: str | None,
                  parent=None, *, draggable: bool = True, show_delete: bool = True):
         super().__init__(parent)
         self.color = color
         self.is_running = False
         self.companion_id = companion_id
-        self._C = C
+        self._tone = Tone
         self._draggable = draggable
         self._drag_offset: QPoint | None = None
         if draggable:
@@ -429,19 +429,19 @@ class _NodeCard(QFrame):
         name_col.setSpacing(0)
         self._name_lbl = QLabel(name)
         self._name_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._name_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent; border: none;")
+        self._name_lbl.setStyleSheet(f"color: {Tone.INK}; background: transparent; border: none;")
         name_col.addWidget(self._name_lbl)
         self._sub_lbl = QLabel(subtitle)
         self._sub_lbl.setFont(QFont("Segoe UI", 7))
-        self._sub_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        self._sub_lbl.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent; border: none;")
         self._sub_lbl.setWordWrap(True)
         name_col.addWidget(self._sub_lbl)
         top.addLayout(name_col, stretch=1)
 
         if companion_id is not None:
-            icon_specs = [("✎", C.TEXT_MED, lambda: self.edit_clicked.emit(self.companion_id))]
+            icon_specs = [("✎", Tone.INK_SOFT, lambda: self.edit_clicked.emit(self.companion_id))]
             if show_delete:
-                icon_specs.append(("×", C.RED, lambda: self.delete_clicked.emit(self.companion_id)))
+                icon_specs.append(("×", Tone.ALERT, lambda: self.delete_clicked.emit(self.companion_id)))
             for glyph, color, cb in icon_specs:
                 btn = QPushButton(glyph)
                 btn.setFixedSize(18, 18)
@@ -449,7 +449,7 @@ class _NodeCard(QFrame):
                 btn.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
                 btn.setStyleSheet(
                     f"QPushButton {{ color: {color}; background: transparent; border: none; }}"
-                    f"QPushButton:hover {{ color: {C.TEXT}; }}"
+                    f"QPushButton:hover {{ color: {Tone.INK}; }}"
                 )
                 btn.clicked.connect(cb)
                 top.addWidget(btn)
@@ -458,25 +458,25 @@ class _NodeCard(QFrame):
 
         self._status_lbl = QLabel("○ IDLE")
         self._status_lbl.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-        self._status_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        self._status_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent; border: none;")
         lay.addWidget(self._status_lbl)
 
         self._extra_lbl = None
         if extra:
             sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-            sep.setStyleSheet(f"border: none; border-top: 1px solid {C.BORDER};")
+            sep.setStyleSheet(f"border: none; border-top: 1px solid {Tone.EDGE};")
             lay.addWidget(sep)
             self._extra_lbl = QLabel(extra)
             self._extra_lbl.setFont(QFont("Segoe UI", 7))
-            self._extra_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+            self._extra_lbl.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent; border: none;")
             lay.addWidget(self._extra_lbl)
         else:
             lay.addStretch()
 
     def _apply_border(self, color: str, width: int = 1):
-        C = self._C
+        Tone = self._tone
         self.setStyleSheet(
-            f"QFrame {{ background: {C.PANEL2_BG}; border: {width}px solid {color}; border-radius: 12px; }}"
+            f"QFrame {{ background: {Tone.RAISED}; border: {width}px solid {color}; border-radius: 12px; }}"
         )
 
     def update_content(self, name: str, subtitle_or_extra: str):
@@ -487,14 +487,14 @@ class _NodeCard(QFrame):
             self._sub_lbl.setText(subtitle_or_extra)
 
     def set_status(self, status: str):
-        C = self._C
+        Tone = self._tone
         self.is_running = status == "running"
         if self.is_running:
             self._status_lbl.setText("● RUNNING")
-            self._status_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: none;")
+            self._status_lbl.setStyleSheet(f"color: {Tone.OK}; background: transparent; border: none;")
         else:
             self._status_lbl.setText("○ IDLE")
-            self._status_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+            self._status_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent; border: none;")
             self._apply_border(self.color)
 
     def pulse(self, phase: float):
@@ -503,9 +503,9 @@ class _NodeCard(QFrame):
         if not self.is_running:
             return
         from gui.theme import lerp_hex
-        C = self._C
+        Tone = self._tone
         t = 0.5 + 0.5 * math.sin(phase * 0.12)
-        glow = lerp_hex(self.color, C.WHITE, t * 0.5)
+        glow = lerp_hex(self.color, Tone.WHITE, t * 0.5)
         self._apply_border(glow, width=2)
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -541,37 +541,37 @@ class _AddSubAgentDialog(QDialog):
     adjust for that case; is_lead is always False for actual sub-agents,
     matching the existing behavior exactly."""
 
-    def __init__(self, C, companion: dict | None, parent=None, *, is_lead: bool = False):
+    def __init__(self, Tone, companion: dict | None, parent=None, *, is_lead: bool = False):
         super().__init__(parent)
-        self._C = C
+        self._tone = Tone
         self._companion = companion
         self._is_lead = is_lead
         self.setWindowTitle("Edit companion" if is_lead else ("Edit sub-agent" if companion else "Add a sub-agent"))
         self.setFixedWidth(360)
-        self.setStyleSheet(f"QDialog {{ background: {C.PANEL_BG}; }}")
+        self.setStyleSheet(f"QDialog {{ background: {Tone.SURFACE}; }}")
         self._build_ui()
 
     def _style_input(self, inp: QLineEdit):
-        C = self._C
+        Tone = self._tone
         inp.setFont(QFont("Segoe UI", 9))
-        inp.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;")
+        inp.setStyleSheet(f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px 6px;")
 
     def _labeled(self, lay, text: str):
-        C = self._C
+        Tone = self._tone
         lbl = QLabel(text)
         lbl.setFont(QFont("Segoe UI", 8))
-        lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(lbl)
 
     def _build_ui(self):
-        C = self._C
+        Tone = self._tone
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
 
         title = QLabel("Edit companion" if self._is_lead else ("Edit sub-agent" if self._companion else "New sub-agent"))
         title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        title.setStyleSheet(f"color: {Tone.ACCENT}; background: transparent;")
         lay.addWidget(title)
 
         if self._is_lead:
@@ -585,7 +585,7 @@ class _AddSubAgentDialog(QDialog):
                 note_text += " Saving resets its conversation — it starts fresh under the new identity/backend next time it's given a task."
         note = QLabel(note_text)
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -611,7 +611,7 @@ class _AddSubAgentDialog(QDialog):
         self._backend.addItem("Blackbox", userData="blackbox_agent")
         self._backend.setFont(QFont("Segoe UI", 9))
         self._backend.setStyleSheet(
-            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
+            f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px 6px;"
         )
         lay.addWidget(self._backend)
 
@@ -631,7 +631,7 @@ class _AddSubAgentDialog(QDialog):
         self._prompt = QTextEdit()
         self._prompt.setFixedHeight(90)
         self._prompt.setFont(QFont("Segoe UI", 9))
-        self._prompt.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px;")
+        self._prompt.setStyleSheet(f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px;")
         lay.addWidget(self._prompt)
 
         if self._companion:
@@ -644,7 +644,7 @@ class _AddSubAgentDialog(QDialog):
 
         self._status_lbl = QLabel("")
         self._status_lbl.setFont(QFont("Segoe UI", 8))
-        self._status_lbl.setStyleSheet(f"color: {C.RED}; background: transparent;")
+        self._status_lbl.setStyleSheet(f"color: {Tone.ALERT}; background: transparent;")
         self._status_lbl.setWordWrap(True)
         lay.addWidget(self._status_lbl)
 
@@ -652,8 +652,8 @@ class _AddSubAgentDialog(QDialog):
         btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(f"""
-            QPushButton {{ color: {C.GREEN}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 6px 12px; }}
-            QPushButton:hover {{ border: 1px solid {C.GREEN}; }}
+            QPushButton {{ color: {Tone.OK}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 6px 12px; }}
+            QPushButton:hover {{ border: 1px solid {Tone.OK}; }}
         """)
         btn.clicked.connect(self._on_submit)
         lay.addWidget(btn)

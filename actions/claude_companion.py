@@ -3,9 +3,9 @@ distinct from actions/claude_agent.py's one-shot task-delegation tool.
 
 A gemini_live companion gets a realtime voice session; a claude_agent
 companion has no equivalent (no bidirectional audio API on the Anthropic
-side — see main.py::_resolve_active_companion's docstring), so its
+side), so its
 interaction surface is the same typed-text input box every companion
-already has (see gui/window.py's on_text_command), routed here instead of into a
+already has (see gui/window.py's on_typed_text), routed here instead of into a
 Gemini Live session.
 """
 

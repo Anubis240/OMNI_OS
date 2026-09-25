@@ -58,7 +58,7 @@ _ASKS = {
     "review": "Review this code: list real bugs and risks first, then worthwhile improvements.",
     "fix": "Return a corrected version of this file that fixes its bugs, then list what you changed.",
     "document": "Return this code with clear docstrings and comments added.",
-    "test": "Write unit tests for this code.",
+    "test": "Write a set of unit tests covering this code.",
     "fix_text": "Correct the spelling, grammar and style of this text and return the corrected text.",
     "reformat": "Reformat this into a clean, well-structured document.",
     "to_bullet": "Turn this into a concise bullet-point summary.",
@@ -364,7 +364,7 @@ def _default_action(kind: str | None) -> str:
     },
 )
 def file_processor(args: dict, ctx: ToolContext) -> str:
-    raw = (args.get("file_path") or "").strip() or (ctx.current_file or "")
+    raw = (args.get("file_path") or "").strip() or (ctx.attached_file or "")
     if not raw:
         return "Which file? Drop one on the window or give me its path."
     path = Path(raw).expanduser()
@@ -373,7 +373,7 @@ def file_processor(args: dict, ctx: ToolContext) -> str:
     kind = _KIND.get(path.suffix.lower())
     action = (args.get("action") or "").strip().lower()
     instruction = (args.get("instruction") or "").strip()
-    ctx.log(f"[FileProcessor] {path.name} → {action or instruction[:30] or 'auto'}")
+    ctx.log(f"[documents] {path.name} → {action or instruction[:30] or 'auto'}")
 
     try:
         if action == "run" and kind == "code":

@@ -7,8 +7,8 @@ instead of the hardcoded developer-machine paths it originally shipped
 with.
 
 Swapped into the center stack exactly like TraderPanel (see
-MainWindow.open_settings_panel()) — same mechanic, own file, no cross-
-import between the two panels. `from gui.theme import C` is a deferred import for
+OmniWindow.open_settings_panel()) — same mechanic, own file, no cross-
+import between the two panels. `from gui.theme import Tone` is a deferred import for
 the same reason trader_panel.py does it: avoids a circular import at
 module-load time since gui/window.py only imports this lazily, on first click.
 """
@@ -51,8 +51,8 @@ class SettingsPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from gui.theme import C
-        self._C = C
+        from gui.theme import Tone
+        self._tone = Tone
         self.settings = settings_store.load_settings()
 
         self._mcp_rows: dict[str, dict] = {}
@@ -64,8 +64,8 @@ class SettingsPanel(QWidget):
 
         self._status_sig.connect(self._show_status)
         self.on_companions_changed = None  # callable: () -> None — wired by
-                                             # gui/window.py (MainWindow._panel) to
-                                             # MainWindow._notify_companions_changed,
+                                             # gui/window.py (OmniWindow._panel) to
+                                             # OmniWindow._notify_companions_changed,
                                              # same callback World Panel already uses
                                              # to force an immediate reconnect after
                                              # a companion change (see
@@ -75,14 +75,14 @@ class SettingsPanel(QWidget):
     # ---------- layout ----------
 
     def _build_ui(self):
-        C = self._C
+        Tone = self._tone
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
         outer.setSpacing(10)
 
         title = QLabel("⚙ SETTINGS")
         title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        title.setStyleSheet(f"color: {Tone.ACCENT}; background: transparent;")
         outer.addWidget(title)
 
         self._status_lbl = QLabel("")
@@ -117,45 +117,45 @@ class SettingsPanel(QWidget):
         col.addStretch()
 
     def _section(self, title: str) -> tuple[QWidget, QVBoxLayout]:
-        C = self._C
+        Tone = self._tone
         wrap = QWidget()
-        wrap.setStyleSheet(f"background: {C.PANEL_BG}; border: 1px solid {C.BORDER}; border-radius: 2px;")
+        wrap.setStyleSheet(f"background: {Tone.SURFACE}; border: 1px solid {Tone.EDGE}; border-radius: 2px;")
         lay = QVBoxLayout(wrap)
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(8)
         hdr = QLabel(title)
         hdr.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.setStyleSheet(f"color: {Tone.ACCENT}; background: transparent;")
         lay.addWidget(hdr)
         return wrap, lay
 
     def _labeled_input(self, lay: QVBoxLayout, label: str, placeholder: str = "",
                         password: bool = False) -> QLineEdit:
-        C = self._C
+        Tone = self._tone
         lbl = QLabel(label)
         lbl.setFont(QFont("Segoe UI", 8))
         # GEMZ4US, 2026-09-18 (Part 4/C): "difficult to read at a glance
         # even at close viewing distance" — same fix applied to the
         # Trader Config panel's own field labels.
-        lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(lbl)
         inp = QLineEdit()
         inp.setPlaceholderText(placeholder)
         inp.setFont(QFont("Segoe UI", 9))
-        inp.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;")
+        inp.setStyleSheet(f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px 6px;")
         if password:
             inp.setEchoMode(QLineEdit.EchoMode.Password)
         lay.addWidget(inp)
         return inp
 
     def _make_button(self, label: str, cb, color: str | None = None) -> QPushButton:
-        C = self._C
+        Tone = self._tone
         btn = QPushButton(label)
         btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        c = color or C.PRI
+        c = color or Tone.ACCENT
         btn.setStyleSheet(f"""
-            QPushButton {{ color: {c}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 6px 12px; }}
+            QPushButton {{ color: {c}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 6px 12px; }}
             QPushButton:hover {{ border: 1px solid {c}; }}
         """)
         btn.clicked.connect(cb)
@@ -164,7 +164,7 @@ class SettingsPanel(QWidget):
     # ---------- Trader panel ----------
 
     def _build_trader_section(self) -> QWidget:
-        C = self._C
+        Tone = self._tone
         wrap, lay = self._section("TRADER PANEL")
 
         note = QLabel(
@@ -173,13 +173,13 @@ class SettingsPanel(QWidget):
             "the trader panel's own command bar — never by voice."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
         self._trader_enabled = QCheckBox("Enable trader panel")
         self._trader_enabled.setFont(QFont("Segoe UI", 9))
-        self._trader_enabled.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        self._trader_enabled.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
         self._trader_enabled.setChecked(bool(self.settings["trader"].get("enabled")))
         lay.addWidget(self._trader_enabled)
 
@@ -194,7 +194,7 @@ class SettingsPanel(QWidget):
 
     def _build_companions_section(self) -> QWidget:
         wrap, lay = self._section("COMPANIONS")
-        C = self._C
+        Tone = self._tone
         note = QLabel(
             "Add alternate personas with their own name and instructions. Only one is "
             "active at a time. A Voice companion drives the live voice session (takes "
@@ -206,7 +206,7 @@ class SettingsPanel(QWidget):
             "Omni's default identity is used."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -229,7 +229,7 @@ class SettingsPanel(QWidget):
         )
         resolved_lbl = QLabel(f"Currently resolves to: {resolved_model}")
         resolved_lbl.setFont(QFont("Segoe UI", 8))
-        resolved_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        resolved_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         resolved_lbl.setWordWrap(True)
         lay.addWidget(resolved_lbl)
 
@@ -243,13 +243,13 @@ class SettingsPanel(QWidget):
         from gui.theme import VOICES, load_saved_voice, NoScrollComboBox
         default_voice_lbl = QLabel("Default voice (used when no companion is active)")
         default_voice_lbl.setFont(QFont("Segoe UI", 8))
-        default_voice_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        default_voice_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(default_voice_lbl)
         self._default_voice = NoScrollComboBox()
         self._default_voice.addItems(VOICES)
         self._default_voice.setFont(QFont("Segoe UI", 9))
         self._default_voice.setStyleSheet(
-            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
+            f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px 6px;"
         )
         current_voice_idx = self._default_voice.findText(load_saved_voice())
         if current_voice_idx >= 0:
@@ -258,7 +258,7 @@ class SettingsPanel(QWidget):
         lay.addWidget(self._make_button("SAVE", self._on_save_default_voice))
 
         sep0 = QFrame(); sep0.setFrameShape(QFrame.Shape.HLine)
-        sep0.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
+        sep0.setStyleSheet(f"color: {Tone.EDGE}; margin: 4px 0;")
         lay.addWidget(sep0)
 
         self._companions_list_layout = QVBoxLayout()
@@ -267,26 +267,26 @@ class SettingsPanel(QWidget):
         self._refresh_companions_list()
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
+        sep.setStyleSheet(f"color: {Tone.EDGE}; margin: 4px 0;")
         lay.addWidget(sep)
 
         add_lbl = QLabel("Add a companion")
         add_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        add_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        add_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(add_lbl)
 
         self._new_companion_name = self._labeled_input(lay, "Name", "e.g. Nova")
 
         backend_lbl = QLabel("Interaction mode")
         backend_lbl.setFont(QFont("Segoe UI", 8))
-        backend_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        backend_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(backend_lbl)
         from gui.theme import NoScrollComboBox
         self._new_companion_backend = NoScrollComboBox()
         # display text -> backend id. Voice uses the live Gemini session (voice
         # field below applies); the two Text options each use their own
         # turn-based CLI conversation (typed input only — see
-        # main.py::_on_text_command/_agent_send_fn) and ignore voice.
+        # voice/session.py) and ignore voice.
         self._new_companion_backend.addItem("Voice (real-time)", userData="gemini_live")
         self._new_companion_backend.addItem("Text (Claude-powered)", userData="claude_agent")
         self._new_companion_backend.addItem("Text (Codex-powered)", userData="codex_agent")
@@ -296,32 +296,32 @@ class SettingsPanel(QWidget):
         self._new_companion_backend.addItem("Text (Blackbox-powered)", userData="blackbox_agent")
         self._new_companion_backend.setFont(QFont("Segoe UI", 9))
         self._new_companion_backend.setStyleSheet(
-            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
+            f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px 6px;"
         )
         lay.addWidget(self._new_companion_backend)
 
         from gui.theme import VOICES
         voice_lbl = QLabel("Voice (used only for the Voice interaction mode)")
         voice_lbl.setFont(QFont("Segoe UI", 8))
-        voice_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        voice_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(voice_lbl)
         self._new_companion_voice = NoScrollComboBox()
         self._new_companion_voice.addItems(VOICES)
         self._new_companion_voice.setFont(QFont("Segoe UI", 9))
         self._new_companion_voice.setStyleSheet(
-            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px 6px;"
+            f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px 6px;"
         )
         lay.addWidget(self._new_companion_voice)
 
         prompt_lbl = QLabel("System prompt — defines this companion's identity and behavior")
         prompt_lbl.setFont(QFont("Segoe UI", 8))
-        prompt_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        prompt_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(prompt_lbl)
         self._new_companion_prompt = QTextEdit()
         self._new_companion_prompt.setFont(QFont("Segoe UI", 9))
         self._new_companion_prompt.setFixedHeight(100)
         self._new_companion_prompt.setStyleSheet(
-            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px;"
+            f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px;"
         )
         lay.addWidget(self._new_companion_prompt)
 
@@ -333,16 +333,16 @@ class SettingsPanel(QWidget):
         if servers:
             mcp_lbl = QLabel("MCP tools this companion can use")
             mcp_lbl.setFont(QFont("Segoe UI", 8))
-            mcp_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            mcp_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
             lay.addWidget(mcp_lbl)
             for server in servers:
                 cb = QCheckBox(server["name"])
                 cb.setFont(QFont("Segoe UI", 8))
-                cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+                cb.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
                 lay.addWidget(cb)
                 self._companion_mcp_checks[server["id"]] = cb
 
-        lay.addWidget(self._make_button("+ ADD COMPANION", self._on_add_companion, C.GREEN))
+        lay.addWidget(self._make_button("+ ADD COMPANION", self._on_add_companion, Tone.OK))
         return wrap
 
     def _refresh_companions_list(self):
@@ -350,7 +350,7 @@ class SettingsPanel(QWidget):
             item = self._companions_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        C = self._C
+        Tone = self._tone
         companions = self.settings["companions"]
         active_id = self.settings.get("active_companion_id") or ""
 
@@ -363,7 +363,7 @@ class SettingsPanel(QWidget):
         is_default_active = not active_id
         default_lbl = QLabel(("★ " if is_default_active else "") + "Omni (default)")
         default_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold if is_default_active else QFont.Weight.Normal))
-        default_lbl.setStyleSheet(f"color: {C.PRI if is_default_active else C.TEXT}; background: transparent;")
+        default_lbl.setStyleSheet(f"color: {Tone.ACCENT if is_default_active else Tone.INK}; background: transparent;")
         drlay.addWidget(default_lbl, stretch=1)
         if not is_default_active:
             drlay.addWidget(self._make_button("SET ACTIVE", self._on_use_default_companion))
@@ -372,7 +372,7 @@ class SettingsPanel(QWidget):
         if not companions:
             empty = QLabel("No additional companions added yet.")
             empty.setFont(QFont("Segoe UI", 8))
-            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            empty.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
             self._companions_list_layout.addWidget(empty)
             return
 
@@ -397,7 +397,7 @@ class SettingsPanel(QWidget):
             }.get(comp.get("backend"), comp.get("backend", "?"))
             lbl = QLabel(("★ " if is_active else "") + f"{comp['name']}  —  {backend_label}")
             lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold if is_active else QFont.Weight.Normal))
-            lbl.setStyleSheet(f"color: {C.PRI if is_active else C.TEXT}; background: transparent;")
+            lbl.setStyleSheet(f"color: {Tone.ACCENT if is_active else Tone.INK}; background: transparent;")
             lbl.setWordWrap(True)
             rlay.addWidget(lbl, stretch=1)
             if not is_active:
@@ -406,7 +406,7 @@ class SettingsPanel(QWidget):
                 )
                 rlay.addWidget(set_active_btn)
             remove_btn = self._make_button(
-                "REMOVE", lambda _c=False, cid=comp["id"]: self._on_remove_companion(cid), C.RED
+                "REMOVE", lambda _c=False, cid=comp["id"]: self._on_remove_companion(cid), Tone.ALERT
             )
             rlay.addWidget(remove_btn)
             self._companions_list_layout.addWidget(row)
@@ -419,7 +419,7 @@ class SettingsPanel(QWidget):
         # happened to reconnect anyway, which could be minutes or never in a
         # stable session. World Panel already had a proven fix for exactly
         # this shape of problem (on_companion_added -> immediate reconnect,
-        # see main.py::_on_companions_changed) — reused here instead of
+        # see voice/session.py, which reconnects on on_companions_changed) — reused here instead of
         # inventing a second mechanism.
         self.settings["active_companion_id"] = companion_id
         self._refresh_companions_list()
@@ -480,13 +480,13 @@ class SettingsPanel(QWidget):
         2026-09-11 report (GEMZ4US, Section B2): a companion deleted via the
         World Panel appeared to "survive" in Settings until removed there
         directly. Root cause — this panel is constructed once and reused
-        for the app's whole lifetime (see gui/window.py (MainWindow._panel)),
+        for the app's whole lifetime (see gui/window.py (OmniWindow._panel)),
         caching `self.settings` in memory at construction time; the World
         Panel's own delete path correctly writes to disk and notifies
-        main.py to reconnect, but had no way to tell an already-open
+        the voice session to reconnect, but had no way to tell an already-open
         Settings panel its cached dict just went stale. The deletion was
         never lost — Settings just hadn't re-read the file. Called every
-        time this panel is shown (MainWindow._toggle_settings_panel)."""
+        time this panel is shown (OmniWindow._toggle_settings_panel)."""
         self.settings = settings_store.load_settings()
         self._refresh_companions_list()
         # 2026-09-12/14 reports (GEMZ4US Section E1, finding #31): the
@@ -514,10 +514,10 @@ class SettingsPanel(QWidget):
             # permanent (World Panel's own delete already had this exact
             # dialog, matching the Fusion+dark-mode QMessageBox styling
             # fix already established in trader_panel.py/world_panel.py).
-            f"QMessageBox {{ background: {self._C.PANEL_BG}; }} "
-            f"QLabel {{ color: {self._C.TEXT}; background: transparent; }} "
-            f"QPushButton {{ color: {self._C.TEXT}; background: {self._C.PANEL2_BG}; "
-            f"border: 1px solid {self._C.BORDER_A}; border-radius: 4px; padding: 4px 14px; }}"
+            f"QMessageBox {{ background: {self._tone.SURFACE}; }} "
+            f"QLabel {{ color: {self._tone.INK}; background: transparent; }} "
+            f"QPushButton {{ color: {self._tone.INK}; background: {self._tone.RAISED}; "
+            f"border: 1px solid {self._tone.EDGE_SOFT}; border-radius: 4px; padding: 4px 14px; }}"
         )
         if box.exec() != QMessageBox.StandardButton.Yes:
             return
@@ -547,7 +547,7 @@ class SettingsPanel(QWidget):
     # ---------- Claude Code delegation ----------
 
     def _build_claude_section(self) -> QWidget:
-        C = self._C
+        Tone = self._tone
         wrap, lay = self._section("CLAUDE CODE DELEGATION")
 
         note = QLabel(
@@ -556,14 +556,14 @@ class SettingsPanel(QWidget):
             "\"delegate to Claude\" tool just declines politely until this is set up."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
         ca = self.settings["claude_agent"]
         self._claude_enabled = QCheckBox("Enable Claude Code delegation")
         self._claude_enabled.setFont(QFont("Segoe UI", 9))
-        self._claude_enabled.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        self._claude_enabled.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
         self._claude_enabled.setChecked(bool(ca.get("enabled")))
         lay.addWidget(self._claude_enabled)
 
@@ -588,7 +588,7 @@ class SettingsPanel(QWidget):
     # ---------- Codex delegation ----------
 
     def _build_codex_section(self) -> QWidget:
-        C = self._C
+        Tone = self._tone
         wrap, lay = self._section("CODEX DELEGATION")
 
         note = QLabel(
@@ -597,14 +597,14 @@ class SettingsPanel(QWidget):
             "local OpenAI Codex CLI session instead. Off by default."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
         xa = self.settings["codex_agent"]
         self._codex_enabled = QCheckBox("Enable Codex delegation")
         self._codex_enabled.setFont(QFont("Segoe UI", 9))
-        self._codex_enabled.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        self._codex_enabled.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
         self._codex_enabled.setChecked(bool(xa.get("enabled")))
         lay.addWidget(self._codex_enabled)
 
@@ -668,19 +668,19 @@ class SettingsPanel(QWidget):
         that same npm-wrapper distribution pattern, so it isn't invented
         here). Returns the section widget; the four thin wrappers below just
         supply the copy and field names."""
-        C = self._C
+        Tone = self._tone
         wrap, lay = self._section(section_title)
 
         note_lbl = QLabel(note)
         note_lbl.setFont(QFont("Segoe UI", 8))
-        note_lbl.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note_lbl.setWordWrap(True)
         lay.addWidget(note_lbl)
 
         ca = self.settings.get(key, {})
         enabled_cb = QCheckBox(f"Enable {product_name} delegation")
         enabled_cb.setFont(QFont("Segoe UI", 9))
-        enabled_cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        enabled_cb.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
         enabled_cb.setChecked(bool(ca.get("enabled")))
         lay.addWidget(enabled_cb)
         setattr(self, f"_{attr_prefix}_enabled", enabled_cb)
@@ -773,7 +773,7 @@ class SettingsPanel(QWidget):
     # ---------- Remote Dashboard ----------
 
     def _build_remote_dashboard_section(self) -> QWidget:
-        C = self._C
+        Tone = self._tone
         wrap, lay = self._section("REMOTE DASHBOARD")
 
         note = QLabel(
@@ -787,7 +787,7 @@ class SettingsPanel(QWidget):
             "(unrelated to Omni's own identity), which defaults to the same port."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -795,7 +795,7 @@ class SettingsPanel(QWidget):
         self._dashboard_port.setText(str(self.settings.get("dashboard_port", 8000)))
         lay.addWidget(self._make_button("SAVE (restart required)", self._on_save_dashboard_port))
 
-        lay.addWidget(self._make_button("REGENERATE CERTIFICATE (restart required)", self._on_regenerate_cert, C.RED))
+        lay.addWidget(self._make_button("REGENERATE CERTIFICATE (restart required)", self._on_regenerate_cert, Tone.ALERT))
         return wrap
 
     def _on_save_dashboard_port(self):
@@ -860,13 +860,13 @@ class SettingsPanel(QWidget):
 
     def _build_api_keys_section(self) -> QWidget:
         wrap, lay = self._section("API KEYS")
-        C = self._C
+        Tone = self._tone
         note = QLabel(
             "For custom MCP servers or skills you add below that need their own key, "
             "or a companion set to the Claude backend below."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -878,7 +878,7 @@ class SettingsPanel(QWidget):
         lay.addWidget(self._make_button("SAVE", self._on_save_api_keys))
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
+        sep.setStyleSheet(f"color: {Tone.EDGE}; margin: 4px 0;")
         lay.addWidget(sep)
 
         custom_lbl = QLabel(
@@ -886,7 +886,7 @@ class SettingsPanel(QWidget):
             "server's API Key field as {{NAME}} and it's substituted in automatically."
         )
         custom_lbl.setFont(QFont("Segoe UI", 8))
-        custom_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        custom_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         custom_lbl.setWordWrap(True)
         lay.addWidget(custom_lbl)
 
@@ -897,7 +897,7 @@ class SettingsPanel(QWidget):
 
         self._new_custom_key_name = self._labeled_input(lay, "Name", "e.g. PERPLEXITY_KEY")
         self._new_custom_key_value = self._labeled_input(lay, "Value", "", password=True)
-        lay.addWidget(self._make_button("+ ADD KEY", self._on_add_custom_key, C.GREEN))
+        lay.addWidget(self._make_button("+ ADD KEY", self._on_add_custom_key, Tone.OK))
         return wrap
 
     def _on_save_api_keys(self):
@@ -912,12 +912,12 @@ class SettingsPanel(QWidget):
             item = self._custom_keys_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        C = self._C
+        Tone = self._tone
         custom_keys = self.settings.get("custom_api_keys", [])
         if not custom_keys:
             empty = QLabel("No custom keys added.")
             empty.setFont(QFont("Segoe UI", 8))
-            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            empty.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
             self._custom_keys_list_layout.addWidget(empty)
             return
         for key in custom_keys:
@@ -927,9 +927,9 @@ class SettingsPanel(QWidget):
             rlay.setContentsMargins(0, 0, 0, 0)
             name_lbl = QLabel(f"{key['name']} — ••••••••")
             name_lbl.setFont(QFont("Segoe UI", 8))
-            name_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+            name_lbl.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
             rlay.addWidget(name_lbl, stretch=1)
-            remove_btn = self._make_button("REMOVE", lambda _c=False, kid=key["id"]: self._on_remove_custom_key(kid), C.RED)
+            remove_btn = self._make_button("REMOVE", lambda _c=False, kid=key["id"]: self._on_remove_custom_key(kid), Tone.ALERT)
             rlay.addWidget(remove_btn)
             self._custom_keys_list_layout.addWidget(row)
 
@@ -959,10 +959,10 @@ class SettingsPanel(QWidget):
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         box.setDefaultButton(QMessageBox.StandardButton.No)
         box.setStyleSheet(
-            f"QMessageBox {{ background: {self._C.PANEL_BG}; }} "
-            f"QLabel {{ color: {self._C.TEXT}; background: transparent; }} "
-            f"QPushButton {{ color: {self._C.TEXT}; background: {self._C.PANEL2_BG}; "
-            f"border: 1px solid {self._C.BORDER_A}; border-radius: 4px; padding: 4px 14px; }}"
+            f"QMessageBox {{ background: {self._tone.SURFACE}; }} "
+            f"QLabel {{ color: {self._tone.INK}; background: transparent; }} "
+            f"QPushButton {{ color: {self._tone.INK}; background: {self._tone.RAISED}; "
+            f"border: 1px solid {self._tone.EDGE_SOFT}; border-radius: 4px; padding: 4px 14px; }}"
         )
         if box.exec() != QMessageBox.StandardButton.Yes:
             return
@@ -975,10 +975,10 @@ class SettingsPanel(QWidget):
 
     def _build_mcp_section(self) -> QWidget:
         wrap, lay = self._section("MCP SERVERS")
-        C = self._C
+        Tone = self._tone
         note = QLabel("Tools from servers added here become available for Omni to call, alongside its built-in tools.")
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -988,18 +988,18 @@ class SettingsPanel(QWidget):
         self._refresh_mcp_list()
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
+        sep.setStyleSheet(f"color: {Tone.EDGE}; margin: 4px 0;")
         lay.addWidget(sep)
 
         add_lbl = QLabel("Add a server")
         add_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        add_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        add_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(add_lbl)
 
         self._new_mcp_name = self._labeled_input(lay, "Name", "my-server")
         self._new_mcp_url = self._labeled_input(lay, "URL", "https://example.com/mcp")
         self._new_mcp_key = self._labeled_input(lay, "API key (optional)", "", password=True)
-        lay.addWidget(self._make_button("+ ADD SERVER", self._on_add_mcp_server, C.GREEN))
+        lay.addWidget(self._make_button("+ ADD SERVER", self._on_add_mcp_server, Tone.OK))
         return wrap
 
     def _refresh_mcp_list(self):
@@ -1007,12 +1007,12 @@ class SettingsPanel(QWidget):
             item = self._mcp_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        C = self._C
+        Tone = self._tone
         servers = self.settings["mcp_servers"]
         if not servers:
             empty = QLabel("No custom MCP servers configured.")
             empty.setFont(QFont("Segoe UI", 8))
-            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            empty.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
             self._mcp_list_layout.addWidget(empty)
             return
         for server in servers:
@@ -1022,10 +1022,10 @@ class SettingsPanel(QWidget):
             rlay.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(f"{server['name']}  —  {server['url']}")
             lbl.setFont(QFont("Segoe UI", 8))
-            lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+            lbl.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
             lbl.setWordWrap(True)
             rlay.addWidget(lbl, stretch=1)
-            remove_btn = self._make_button("REMOVE", lambda _c=False, sid=server["id"]: self._on_remove_mcp_server(sid), C.RED)
+            remove_btn = self._make_button("REMOVE", lambda _c=False, sid=server["id"]: self._on_remove_mcp_server(sid), Tone.ALERT)
             rlay.addWidget(remove_btn)
             self._mcp_list_layout.addWidget(row)
 
@@ -1067,14 +1067,14 @@ class SettingsPanel(QWidget):
 
     def _build_skills_section(self) -> QWidget:
         wrap, lay = self._section("SKILLS")
-        C = self._C
+        Tone = self._tone
         note = QLabel(
             "Named blocks of extra instructions, appended to the active companion's "
             "system prompt when enabled. Like every other setting on this page, changes "
             "take effect on the next reconnect, not mid-conversation."
         )
         note.setFont(QFont("Segoe UI", 8))
-        note.setStyleSheet(f"color: {C.TEXT_HELP}; background: transparent;")
+        note.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         note.setWordWrap(True)
         lay.addWidget(note)
 
@@ -1084,32 +1084,32 @@ class SettingsPanel(QWidget):
         self._refresh_skills_list()
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
+        sep.setStyleSheet(f"color: {Tone.EDGE}; margin: 4px 0;")
         lay.addWidget(sep)
 
         add_lbl = QLabel("Add a skill")
         add_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        add_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        add_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(add_lbl)
 
         self._new_skill_name = self._labeled_input(lay, "Name", "e.g. house-style")
         content_lbl = QLabel("Instructions")
         content_lbl.setFont(QFont("Segoe UI", 8))
-        content_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        content_lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
         lay.addWidget(content_lbl)
         self._new_skill_content = QTextEdit()
         self._new_skill_content.setFont(QFont("Segoe UI", 9))
         self._new_skill_content.setFixedHeight(80)
-        self._new_skill_content.setStyleSheet(f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 5px;")
+        self._new_skill_content.setStyleSheet(f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 5px;")
         lay.addWidget(self._new_skill_content)
         btn_row = QHBoxLayout()
         # GEMZ4US 2026-09-10: "no way to view or edit a saved skill's
         # instructions" — clicking EDIT on a row below loads it into this
         # same form and flips this button into an in-place update instead
         # of an append; _on_cancel_skill_edit backs out without saving.
-        self._skill_save_btn = self._make_button("+ ADD SKILL", self._on_save_skill, C.GREEN)
+        self._skill_save_btn = self._make_button("+ ADD SKILL", self._on_save_skill, Tone.OK)
         btn_row.addWidget(self._skill_save_btn)
-        self._skill_cancel_btn = self._make_button("CANCEL", self._on_cancel_skill_edit, C.TEXT_MED)
+        self._skill_cancel_btn = self._make_button("CANCEL", self._on_cancel_skill_edit, Tone.INK_SOFT)
         self._skill_cancel_btn.setVisible(False)
         btn_row.addWidget(self._skill_cancel_btn)
         lay.addLayout(btn_row)
@@ -1120,12 +1120,12 @@ class SettingsPanel(QWidget):
             item = self._skills_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        C = self._C
+        Tone = self._tone
         skills = self.settings["skills"]
         if not skills:
             empty = QLabel("No skills added.")
             empty.setFont(QFont("Segoe UI", 8))
-            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            empty.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
             self._skills_list_layout.addWidget(empty)
             return
         for skill in skills:
@@ -1135,7 +1135,7 @@ class SettingsPanel(QWidget):
             rlay.setContentsMargins(0, 0, 0, 0)
             cb = QCheckBox(skill["name"])
             cb.setFont(QFont("Segoe UI", 8))
-            cb.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+            cb.setStyleSheet(f"color: {Tone.INK}; background: transparent;")
             cb.setChecked(bool(skill.get("enabled")))
             # GEMZ4US 2026-09-10: clicking the skill's name (to see its
             # instructions) silently toggled it off instead of showing them —
@@ -1145,9 +1145,9 @@ class SettingsPanel(QWidget):
                           "change its instructions.")
             cb.toggled.connect(lambda checked, sid=skill["id"]: self._on_toggle_skill(sid, checked))
             rlay.addWidget(cb, stretch=1)
-            edit_btn = self._make_button("EDIT", lambda _c=False, sid=skill["id"]: self._on_edit_skill(sid), C.ACC2)
+            edit_btn = self._make_button("EDIT", lambda _c=False, sid=skill["id"]: self._on_edit_skill(sid), Tone.CYAN)
             rlay.addWidget(edit_btn)
-            remove_btn = self._make_button("REMOVE", lambda _c=False, sid=skill["id"]: self._on_remove_skill(sid), C.RED)
+            remove_btn = self._make_button("REMOVE", lambda _c=False, sid=skill["id"]: self._on_remove_skill(sid), Tone.ALERT)
             rlay.addWidget(remove_btn)
             self._skills_list_layout.addWidget(row)
 
@@ -1200,7 +1200,7 @@ class SettingsPanel(QWidget):
         # replies. Root cause: this is the same tool-declaration-staleness
         # class already fixed for Integrations (see integrations_panel.py),
         # just for the system_instruction as a whole instead of just tools —
-        # _build_config() (main.py) only reads settings["skills"] once per
+        # voice/prompt.py::build() only reads settings["skills"] once per
         # connection, at connect time. Toggling a skill mid-session was never
         # going to change the live Gemini session's system prompt; nothing
         # was broken, it just gave zero indication a reconnect was needed —
@@ -1227,6 +1227,6 @@ class SettingsPanel(QWidget):
             self._status_sig.emit(message, False)
 
     def _show_status(self, message: str, is_error: bool):
-        C = self._C
+        Tone = self._tone
         self._status_lbl.setText(message)
-        self._status_lbl.setStyleSheet(f"color: {C.RED if is_error else C.GREEN}; background: transparent;")
+        self._status_lbl.setStyleSheet(f"color: {Tone.ALERT if is_error else Tone.OK}; background: transparent;")

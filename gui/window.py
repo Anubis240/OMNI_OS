@@ -1,4 +1,4 @@
-"""MainWindow — the Omni-OS desktop window.
+"""OmniWindow — the Omni-OS desktop window.
 
 Layout: an icon sidebar on the left; the rest is a stack showing either the
 orb or one of the full panels (trader, settings, integrations, world). Over
@@ -30,7 +30,7 @@ from gui.gauges import Gauge
 from gui.orb import OrbView
 from gui.pairing import PairingCard
 from gui.sysinfo import sampler
-from gui.theme import C, companion_color, load_saved_voice
+from gui.theme import Tone, companion_color, load_saved_voice
 
 SIDEBAR = 64
 TOP_BAR = 56
@@ -56,9 +56,9 @@ def _icon_button(glyph: str, tip: str, size: int = 40) -> QPushButton:
     return btn
 
 
-def _flat_style(color: str, hover: str = C.PRI) -> str:
+def _flat_style(color: str, hover: str = Tone.ACCENT) -> str:
     return (f"QPushButton {{ color: {color}; background: transparent; border: none; border-radius: 20px; }}"
-            f"QPushButton:hover {{ background: {C.PANEL2_BG}; color: {hover}; }}")
+            f"QPushButton:hover {{ background: {Tone.RAISED}; color: {hover}; }}")
 
 
 def _card(parent: QWidget, width: int) -> QWidget:
@@ -66,24 +66,33 @@ def _card(parent: QWidget, width: int) -> QWidget:
     w.setFixedWidth(width)
     w.setObjectName("card")
     w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-    w.setStyleSheet(f"#card {{ background: {C.PANEL_BG}; border: 1px solid {C.BORDER}; border-radius: 14px; }}")
+    w.setStyleSheet(f"#card {{ background: {Tone.SURFACE}; border: 1px solid {Tone.EDGE}; border-radius: 14px; }}")
     return w
 
 
-def _text(text: str, size: int = 8, color: str = C.TEXT_MED, bold: bool = False) -> QLabel:
+def _text(text: str, size: int = 8, color: str = Tone.INK_SOFT, bold: bool = False) -> QLabel:
     lbl = QLabel(text)
     lbl.setFont(QFont("Segoe UI", size, QFont.Weight.Bold if bold else QFont.Weight.Normal))
     lbl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
     return lbl
 
 
-class MainWindow(QMainWindow):
+# The status pill's word and colour for each thing the assistant can be doing.
+_ACTIVITY_PILL = {
+    "starting": ("STARTING", Tone.INK_SOFT),
+    "listening": ("LISTENING", Tone.OK),
+    "thinking": ("THINKING", Tone.CYAN),
+    "speaking": ("SPEAKING", Tone.AMBER),
+}
+
+
+class OmniWindow(QMainWindow):
     # Everything a worker thread asks of the window goes through a signal,
     # so Qt runs it on the GUI thread. (Building widgets off the GUI thread —
     # e.g. opening the trader panel by voice — was the likely cause of the
     # long freezes in Bug 11.)
     log_line = pyqtSignal(str)
-    state_changed = pyqtSignal(str)
+    activity_changed = pyqtSignal(str)
     open_trader_requested = pyqtSignal()
     question_asked = pyqtSignal(object)
 
@@ -96,7 +105,7 @@ class MainWindow(QMainWindow):
         self.move((screen.width() - 980) // 2, (screen.height() - 700) // 2)
 
         # Hooks the voice assistant fills in.
-        self.on_text_command = None
+        self.on_typed_text = None
         self.on_voice_change = None
         self.on_companions_changed = None
         self.on_remote_clicked = None
@@ -106,7 +115,8 @@ class MainWindow(QMainWindow):
         self.mic_muted = False
         self.speech_muted = False
         self.always_listening = False
-        self.current_file: str | None = None
+        self.attached_file: str | None = None
+        self._activity = "starting"
         self.voice = load_saved_voice()
         self.ready = firstrun.has_api_key()
         self._launched_at = time.time()
@@ -119,11 +129,11 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
 
         self.log_line.connect(self.chat.post)
-        self.state_changed.connect(self._apply_state)
+        self.activity_changed.connect(self._set_activity)
         self.open_trader_requested.connect(self.show_trader)
         self.question_asked.connect(self._ask)
 
-        for key, action in (("F4", self.toggle_mic), ("F5", self.toggle_speech), ("F11", self._toggle_fullscreen)):
+        for key, action in (("F4", self.toggle_mic), ("F5", self.toggle_speech), ("F11", self._flip_fullscreen)):
             QShortcut(QKeySequence(key), self).activated.connect(action)
 
         sampler.start()
@@ -138,7 +148,7 @@ class MainWindow(QMainWindow):
     # --- building ------------------------------------------------------------
     def _build(self) -> None:
         root = QWidget()
-        root.setStyleSheet(f"background: {C.BG};")
+        root.setStyleSheet(f"background: {Tone.CANVAS};")
         self.setCentralWidget(root)
         row = QHBoxLayout(root)
         row.setContentsMargins(0, 0, 0, 0)
@@ -160,7 +170,7 @@ class MainWindow(QMainWindow):
         self._status = self._status_card(root)
         self._chat = self._chat_card(root)
         self._switcher = self._companion_switcher(root)
-        self._credit = _text("© KONDUX", 7, C.TEXT_DIM)
+        self._credit = _text("© KONDUX", 7, Tone.INK_FAINT)
         self._credit.setParent(root)
         self._credit.adjustSize()
         self._place_floaters()
@@ -170,14 +180,14 @@ class MainWindow(QMainWindow):
     def _sidebar(self) -> QWidget:
         bar = QWidget()
         bar.setFixedWidth(SIDEBAR)
-        bar.setStyleSheet(f"background: {C.PANEL_BG}; border-right: 1px solid {C.BORDER};")
+        bar.setStyleSheet(f"background: {Tone.SURFACE}; border-right: 1px solid {Tone.EDGE};")
         col = QVBoxLayout(bar)
         col.setContentsMargins(12, 14, 12, 12)
         col.setSpacing(8)
 
         home = _icon_button("Ω", "Home")
         home.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-        home.setStyleSheet(_flat_style(C.PRI))
+        home.setStyleSheet(_flat_style(Tone.ACCENT))
         home.clicked.connect(self.show_home)
         col.addWidget(home)
         col.addSpacing(8)
@@ -192,16 +202,16 @@ class MainWindow(QMainWindow):
         col.addSpacing(6)
 
         self._trader_btn = _icon_button("◈", "Trader panel")
-        self._trader_btn.setStyleSheet(_flat_style(C.ACC2))
+        self._trader_btn.setStyleSheet(_flat_style(Tone.CYAN))
         self._trader_btn.clicked.connect(lambda: self._toggle_panel("trader"))
         col.addWidget(self._trader_btn)
         for glyph, tip, action in (("⛓", "Remote control", self._open_pairing),
                                    ("▦", "Integrations", lambda: self._toggle_panel("integrations")),
                                    ("◎", "World", lambda: self._toggle_panel("world")),
                                    ("⚙", "Settings", lambda: self._toggle_panel("settings")),
-                                   ("⛶", "Fullscreen [F11]", self._toggle_fullscreen)):
+                                   ("⛶", "Fullscreen [F11]", self._flip_fullscreen)):
             btn = _icon_button(glyph, tip)
-            btn.setStyleSheet(_flat_style(C.TEXT_MED))
+            btn.setStyleSheet(_flat_style(Tone.INK_SOFT))
             btn.clicked.connect(action)
             col.addWidget(btn)
         col.addStretch()
@@ -212,7 +222,7 @@ class MainWindow(QMainWindow):
         bar.setStyleSheet("background: transparent;")
         row = QHBoxLayout(bar)
         row.setContentsMargins(20, 12, 20, 0)
-        row.addWidget(_text("OMNI_OS", 13, C.PRI, bold=True))
+        row.addWidget(_text("OMNI_OS", 13, Tone.ACCENT, bold=True))
         row.addStretch()
         self._listen_btn = QPushButton()
         self._listen_btn.setFixedHeight(32)
@@ -228,7 +238,7 @@ class MainWindow(QMainWindow):
         self._state_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self._state_pill)
         row.addSpacing(10)
-        self._clock = _text("", 13, C.TEXT, bold=True)
+        self._clock = _text("", 13, Tone.INK, bold=True)
         row.addWidget(self._clock)
         self._refresh_state_pill()
         return bar
@@ -239,29 +249,29 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(14, 12, 14, 12)
         col.setSpacing(4)
 
-        self._metrics = QWidget()
-        m = QVBoxLayout(self._metrics)
+        self._gauge_box = QWidget()
+        m = QVBoxLayout(self._gauge_box)
         m.setContentsMargins(0, 0, 0, 0)
         m.setSpacing(2)
-        m.addWidget(_text("SYSTEM", 8, C.TEXT_MED, bold=True))
+        m.addWidget(_text("SYSTEM", 8, Tone.INK_SOFT, bold=True))
         self._gauges = {name: Gauge(name, color) for name, color in
-                        (("CPU", C.PRI), ("MEM", C.ACC2), ("NET", C.GREEN), ("GPU", C.ACC), ("TEMP", C.RED))}
+                        (("CPU", Tone.ACCENT), ("MEM", Tone.CYAN), ("NET", Tone.OK), ("GPU", Tone.AMBER), ("TEMP", Tone.ALERT))}
         for gauge in self._gauges.values():
             m.addWidget(gauge)
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet(f"color: {C.BORDER};")
+        line.setStyleSheet(f"color: {Tone.EDGE};")
         m.addWidget(line)
-        self._uptime = _text("UP  00:00", 8, C.GREEN, bold=True)
+        self._uptime = _text("UP  00:00", 8, Tone.OK, bold=True)
         self._processes = _text("PROC  —")
         m.addWidget(self._uptime)
         m.addWidget(self._processes)
         m.addWidget(_text("OS  " + {"Windows": "WIN", "Darwin": "macOS"}.get(platform.system(), platform.system().upper()),
-                          8, C.ACC2))
+                          8, Tone.CYAN))
         version = get_app_version()
         if version:   # so testers can tell builds apart (GEMZ4US 2026-09-20)
             m.addWidget(_text(f"v{version}"))
-        col.addWidget(self._metrics)
+        col.addWidget(self._gauge_box)
 
         # The trader panel mounts its config controls here (set_left_panel_extra).
         self._extra_box = QWidget()
@@ -283,8 +293,8 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(14, 12, 14, 10)
         col.setSpacing(8)
         head = QHBoxLayout()
-        head.addWidget(_text("●", 8, C.GREEN))
-        self._chat_title = _text("OMNI", 9, C.TEXT, bold=True)
+        head.addWidget(_text("●", 8, Tone.OK))
+        self._chat_title = _text("OMNI", 9, Tone.INK, bold=True)
         head.addWidget(self._chat_title)
         head.addStretch()
         col.addLayout(head)
@@ -296,26 +306,26 @@ class MainWindow(QMainWindow):
         attach.setToolTip("Attach a file")
         attach.setFixedSize(30, 30)
         attach.setCursor(Qt.CursorShape.PointingHandCursor)
-        attach.setStyleSheet(f"QPushButton {{ color: {C.TEXT_MED}; background: {C.PANEL2_BG}; border: none; border-radius: 15px; font-size: 16px; }}"
-                             f"QPushButton:hover {{ color: {C.PRI}; }}")
+        attach.setStyleSheet(f"QPushButton {{ color: {Tone.INK_SOFT}; background: {Tone.RAISED}; border: none; border-radius: 15px; font-size: 16px; }}"
+                             f"QPushButton:hover {{ color: {Tone.ACCENT}; }}")
         attach.clicked.connect(self._pick_file)
         entry.addWidget(attach)
         self._entry = QLineEdit()
         self._entry.setPlaceholderText("Message Omni…")
         self._entry.setFixedHeight(34)
-        self._entry.setStyleSheet(f"QLineEdit {{ background: {C.PANEL2_BG}; color: {C.WHITE}; border: 1px solid {C.BORDER};"
-                                  f" border-radius: 17px; padding: 3px 14px; }} QLineEdit:focus {{ border-color: {C.PRI}; }}")
+        self._entry.setStyleSheet(f"QLineEdit {{ background: {Tone.RAISED}; color: {Tone.WHITE}; border: 1px solid {Tone.EDGE};"
+                                  f" border-radius: 17px; padding: 3px 14px; }} QLineEdit:focus {{ border-color: {Tone.ACCENT}; }}")
         self._entry.returnPressed.connect(self._submit_text)
         entry.addWidget(self._entry, 1)
         send = QPushButton("↑")
         send.setFixedSize(34, 34)
         send.setCursor(Qt.CursorShape.PointingHandCursor)
-        send.setStyleSheet(f"QPushButton {{ background: {C.PRI}; color: #000; border: none; border-radius: 17px; font-weight: bold; }}"
-                           f"QPushButton:hover {{ background: {C.ACC}; }}")
+        send.setStyleSheet(f"QPushButton {{ background: {Tone.ACCENT}; color: #000; border: none; border-radius: 17px; font-weight: bold; }}"
+                           f"QPushButton:hover {{ background: {Tone.AMBER}; }}")
         send.clicked.connect(self._submit_text)
         entry.addWidget(send)
         col.addLayout(entry)
-        note = _text("AI-generated · double-check anything important", 6, C.TEXT_DIM)
+        note = _text("AI-generated · double-check anything important", 6, Tone.INK_FAINT)
         note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         col.addWidget(note)
         return card
@@ -328,13 +338,13 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(0, 0, 0, 0)
         for glyph, step in (("‹", -1), (None, 0), ("›", 1)):
             if glyph is None:
-                self._companion_name = _text("OMNI", 11, C.PRI, bold=True)
+                self._companion_name = _text("OMNI", 11, Tone.ACCENT, bold=True)
                 self._companion_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._companion_name.setMinimumWidth(150)
                 row.addWidget(self._companion_name)
                 continue
             btn = _icon_button(glyph, "Previous companion" if step < 0 else "Next companion", 28)
-            btn.setStyleSheet(_flat_style(C.TEXT_MED))
+            btn.setStyleSheet(_flat_style(Tone.INK_SOFT))
             btn.clicked.connect(lambda _=False, s=step: self._switch_companion(s))
             row.addWidget(btn)
         return box
@@ -380,22 +390,14 @@ class MainWindow(QMainWindow):
             pass
 
     def _refresh_state_pill(self) -> None:
-        orb = self.orb
-        if orb.muted:
-            text, color = "MUTED", C.MUTED_C
-        elif orb.speaking:
-            text, color = "SPEAKING", C.ACC
-        elif orb.state == "LISTENING":
-            text, color = "LISTENING", C.GREEN
-        else:
-            text, color = orb.state, C.ACC2 if orb.state == "THINKING" else C.TEXT_MED
+        text, color = ("MUTED", Tone.ALERT) if self.mic_muted else _ACTIVITY_PILL[self._activity]
         self._state_pill.setText(text)
-        self._state_pill.setStyleSheet(f"color: {color}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER};"
+        self._state_pill.setStyleSheet(f"color: {color}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE};"
                                        f" border-radius: 13px; padding: 4px 14px;")
 
-    def _apply_state(self, state: str) -> None:
-        self.orb.state = state
-        self.orb.speaking = state == "SPEAKING"
+    def _set_activity(self, activity: str) -> None:
+        self._activity = activity
+        self.orb.speaking = activity == "speaking"
         self._refresh_state_pill()
 
     # --- mic / speech / listening ------------------------------------------------
@@ -403,15 +405,15 @@ class MainWindow(QMainWindow):
         for btn, muted, on_glyph in ((self._mic_btn, self.mic_muted, "🎙"), (self._speech_btn, self.speech_muted, "🔊")):
             btn.setText("🔇" if muted else on_glyph)   # same slashed icon for "off" on both (GEMZ4US Part 8)
             btn.setStyleSheet(
-                f"QPushButton {{ color: {C.MUTED_C}; background: {C.PANEL2_BG}; border: 1px solid {C.MUTED_C}; border-radius: 20px; }}"
-                if muted else _flat_style(C.TEXT_MED, C.GREEN))
+                f"QPushButton {{ color: {Tone.ALERT}; background: {Tone.RAISED}; border: 1px solid {Tone.ALERT}; border-radius: 20px; }}"
+                if muted else _flat_style(Tone.INK_SOFT, Tone.OK))
 
     def toggle_mic(self) -> None:
         self.mic_muted = not self.mic_muted
         self.orb.muted = self.mic_muted
         self._style_mute_buttons()
-        self._apply_state("MUTED" if self.mic_muted else "LISTENING")
-        self.chat.post("SYS: Microphone muted." if self.mic_muted else "SYS: Microphone on.")
+        self._set_activity("listening")
+        self.chat.post("SYS: Mic off — press F4 to turn it back on." if self.mic_muted else "SYS: Mic on.")
 
     def toggle_speech(self) -> None:
         self.speech_muted = not self.speech_muted
@@ -423,9 +425,9 @@ class MainWindow(QMainWindow):
         on = self.always_listening
         self._listen_btn.setText("●  LISTENING" if on else "○  CLICK TO LISTEN")
         self._listen_btn.setStyleSheet(
-            f"QPushButton {{ color: {C.PRI if on else C.TEXT_MED}; background: {C.PRI_GHO_BG if on else C.PANEL2_BG};"
-            f" border: 1px solid {C.PRI if on else C.BORDER}; border-radius: 16px; padding: 4px 18px; }}"
-            f"QPushButton:hover {{ color: {C.PRI}; }}")
+            f"QPushButton {{ color: {Tone.ACCENT if on else Tone.INK_SOFT}; background: {Tone.ACCENT_WASH if on else Tone.RAISED};"
+            f" border: 1px solid {Tone.ACCENT if on else Tone.EDGE}; border-radius: 16px; padding: 4px 18px; }}"
+            f"QPushButton:hover {{ color: {Tone.ACCENT}; }}")
 
     def toggle_listening(self) -> None:
         self.always_listening = not self.always_listening
@@ -435,34 +437,35 @@ class MainWindow(QMainWindow):
             threading.Thread(target=self.on_always_listening_toggled, args=(self.always_listening,), daemon=True).start()
 
     # --- text and files -------------------------------------------------------
+    def _hand_to_assistant(self, message: str) -> None:
+        """Typed input goes to the assistant off the GUI thread; it may block."""
+        if self.on_typed_text:
+            threading.Thread(target=self.on_typed_text, args=(message,), daemon=True).start()
+
     def _submit_text(self) -> None:
-        text = self._entry.text().strip()
-        if not text:
-            return
+        typed = self._entry.text().strip()
         self._entry.clear()
-        self.chat.post(f"You: {text}")
-        if self.on_text_command:
-            threading.Thread(target=self.on_text_command, args=(text,), daemon=True).start()
+        if typed:
+            self.chat.post(f"You: {typed}")
+            self._hand_to_assistant(typed)
 
     def _pick_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Attach a file for Omni", str(Path.home()))
         if not path:
             return
-        self.current_file = path
+        self.attached_file = path
         info = Path(path)
         size_kb = info.stat().st_size / 1024
         size = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
         self.chat.post(f"FILE: {info.name} ({size}) attached")
-        if self.on_text_command:
-            note = (f"[FILE ATTACHED] {path} ({size}). Let the user know you have {info.name} and ask what "
-                    f"they'd like done with it; use file_processor for whatever they choose.")
-            threading.Thread(target=self.on_text_command, args=(note,), daemon=True).start()
+        self._hand_to_assistant(f"[FILE ATTACHED] {path} ({size}). Let the user know you have {info.name} and ask "
+                                f"what they'd like done with it; use file_processor for whatever they choose.")
 
     # --- companions ---------------------------------------------------------------
     def _tint_for_active_companion(self, animate: bool) -> None:
         settings = settings_store.load_settings()
         active = settings.get("active_companion_id") or ""
-        color = companion_color(active, settings.get("companions", [])) if active else C.PRI
+        color = companion_color(active, settings.get("companions", [])) if active else Tone.ACCENT
         (self.orb.animate_companion_switch if animate else self.orb.set_tint)(color)
 
     def _refresh_companion_name(self) -> None:
@@ -524,7 +527,7 @@ class MainWindow(QMainWindow):
     def _status_mode(self, mode: str) -> None:
         """'home': metrics; 'trader_config': the trader's config controls; 'hidden'."""
         self._status.setVisible(mode != "hidden")
-        self._metrics.setVisible(mode == "home")
+        self._gauge_box.setVisible(mode == "home")
         self._extra_scroll.setVisible(mode == "trader_config")
 
     def _toggle_trader_config(self) -> None:
@@ -622,8 +625,8 @@ class MainWindow(QMainWindow):
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         box.setDefaultButton(QMessageBox.StandardButton.No)
         # Styled explicitly: Fusion + Windows dark mode leaves a stock box unreadable.
-        box.setStyleSheet(f"QMessageBox {{ background: {C.PANEL_BG}; }} QLabel {{ color: {C.TEXT}; }}"
-                          f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER};"
+        box.setStyleSheet(f"QMessageBox {{ background: {Tone.SURFACE}; }} QLabel {{ color: {Tone.INK}; }}"
+                          f"QPushButton {{ color: {Tone.INK}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE};"
                           f" border-radius: 6px; padding: 4px 14px; }}")
         question.yes = box.exec() == QMessageBox.StandardButton.Yes
         question.answered.set()
@@ -636,7 +639,7 @@ class MainWindow(QMainWindow):
         return question.answered.wait(wait) and question.yes
 
     # --- window chrome ---------------------------------------------------------
-    def _toggle_fullscreen(self) -> None:
+    def _flip_fullscreen(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
     def changeEvent(self, event):

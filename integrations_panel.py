@@ -1,9 +1,9 @@
 """IntegrationsPanel — the Zoey-OS-style "connect your tools" grid.
 
 Swapped into the center stack exactly like TraderPanel/SettingsPanel (see
-MainWindow._toggle_integrations_panel()). Reads/writes
+OmniWindow._toggle_integrations_panel()). Reads/writes
 core.settings_store.INTEGRATION_CATALOG + settings["integrations"]; the
-actual API calls live in actions/integrations/. `from gui.theme import C` is a
+actual API calls live in actions/integrations/. `from gui.theme import Tone` is a
 deferred import for the same reason trader_panel.py/settings_panel.py do it.
 """
 
@@ -87,8 +87,8 @@ class IntegrationsPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from gui.theme import C
-        self._C = C
+        from gui.theme import Tone
+        self._tone = Tone
         self.settings = settings_store.load_settings()
         self._search = ""
         self._category = "All Categories"
@@ -101,19 +101,19 @@ class IntegrationsPanel(QWidget):
     # ---------- layout ----------
 
     def _build_ui(self):
-        C = self._C
+        Tone = self._tone
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
         outer.setSpacing(10)
 
         title = QLabel("◈ INTEGRATIONS")
         title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        title.setStyleSheet(f"color: {Tone.ACCENT}; background: transparent;")
         outer.addWidget(title)
 
         subtitle = QLabel("Connect your tools — Omni will handle the rest.")
         subtitle.setFont(QFont("Segoe UI", 8))
-        subtitle.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        subtitle.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
         outer.addWidget(subtitle)
 
         self._status_lbl = QLabel("")
@@ -128,7 +128,7 @@ class IntegrationsPanel(QWidget):
         self._search_input.setPlaceholderText("Search integrations…")
         self._search_input.setFont(QFont("Segoe UI", 9))
         self._search_input.setStyleSheet(
-            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; "
+            f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; "
             f"border-radius: 15px; padding: 6px 12px;"
         )
         self._search_input.textChanged.connect(self._on_filter_changed)
@@ -140,7 +140,7 @@ class IntegrationsPanel(QWidget):
         self._category_combo.addItems(categories)
         self._category_combo.setFont(QFont("Segoe UI", 9))
         self._category_combo.setStyleSheet(
-            f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; "
+            f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; "
             f"border-radius: 1px; padding: 5px 10px;"
         )
         self._category_combo.currentTextChanged.connect(self._on_filter_changed)
@@ -195,16 +195,16 @@ class IntegrationsPanel(QWidget):
         return bool(saved and saved.get("enabled"))
 
     def _build_card(self, entry: dict) -> QWidget:
-        C = self._C
+        Tone = self._tone
         implemented = entry.get("implemented", False)
         connected = implemented and self._is_connected(entry)
 
         card = QFrame()
         card.setFixedSize(150, 92)
-        border = C.GREEN if connected else "transparent"
+        border = Tone.OK if connected else "transparent"
         card.setStyleSheet(f"""
-            QFrame {{ background: {C.PANEL2_BG}; border: 1px solid {border}; border-radius: 10px; }}
-            QFrame:hover {{ border: 1px solid {C.PRI if implemented else "transparent"}; }}
+            QFrame {{ background: {Tone.RAISED}; border: 1px solid {border}; border-radius: 10px; }}
+            QFrame:hover {{ border: 1px solid {Tone.ACCENT if implemented else "transparent"}; }}
         """)
         if implemented:
             card.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -219,32 +219,32 @@ class IntegrationsPanel(QWidget):
         # QLabel is itself a QFrame subclass, so the card's own `QFrame {
         # border: ... }` rule cascades down and boxes every label below
         # unless each one explicitly opts out with border: none.
-        badge = _icon_badge_pixmap(entry["id"], 30, C.WHITE)
+        badge = _icon_badge_pixmap(entry["id"], 30, Tone.WHITE)
         if badge is not None:
             icon.setPixmap(badge)
             icon.setStyleSheet("background: transparent; border: none;")
         else:
             icon.setText(entry["name"][0].upper())
             icon.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-            icon_bg = C.PRI if connected else C.BORDER_A
-            icon.setStyleSheet(f"background: {icon_bg}; color: {C.DARK if connected else C.TEXT_MED}; border: none; border-radius: 15px;")
+            icon_bg = Tone.ACCENT if connected else Tone.EDGE_SOFT
+            icon.setStyleSheet(f"background: {icon_bg}; color: {Tone.CANVAS if connected else Tone.INK_SOFT}; border: none; border-radius: 15px;")
         lay.addWidget(icon)
 
         name = QLabel(entry["name"])
         name.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        name.setStyleSheet(f"color: {C.TEXT}; background: transparent; border: none;")
+        name.setStyleSheet(f"color: {Tone.INK}; background: transparent; border: none;")
         name.setWordWrap(True)
         lay.addWidget(name)
 
         if not implemented:
             status = "Coming soon"
-            color = C.TEXT_DIM
+            color = Tone.INK_FAINT
         elif connected:
             status = "Connected"
-            color = C.GREEN
+            color = Tone.OK
         else:
             status = "Not connected"
-            color = C.TEXT_DIM
+            color = Tone.INK_FAINT
         status_lbl = QLabel(status)
         status_lbl.setFont(QFont("Segoe UI", 7))
         status_lbl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
@@ -257,7 +257,7 @@ class IntegrationsPanel(QWidget):
         return card
 
     def _open_connect_dialog(self, entry: dict):
-        dlg = _ConnectDialog(entry, self.settings, self._C, self)
+        dlg = _ConnectDialog(entry, self.settings, self._tone, self)
         dlg.saved.connect(self._on_dialog_saved)
         dlg.exec()
 
@@ -277,27 +277,27 @@ class IntegrationsPanel(QWidget):
             self.on_integration_changed()
 
     def _show_status(self, message: str, is_error: bool):
-        C = self._C
+        Tone = self._tone
         self._status_lbl.setText(message)
-        self._status_lbl.setStyleSheet(f"color: {C.RED if is_error else C.GREEN}; background: transparent;")
+        self._status_lbl.setStyleSheet(f"color: {Tone.ALERT if is_error else Tone.OK}; background: transparent;")
 
 
 class _ConnectDialog(QDialog):
     saved = pyqtSignal(str, bool, bool)  # (message, is_error, needs_reconnect)
 
-    def __init__(self, entry: dict, settings: dict, C, parent=None):
+    def __init__(self, entry: dict, settings: dict, Tone, parent=None):
         super().__init__(parent)
         self._entry = entry
         self._settings = settings
-        self._C = C
+        self._tone = Tone
         self._inputs: dict[str, QLineEdit] = {}
         self.setWindowTitle(f"Connect {entry['name']}")
         self.setFixedWidth(360)
-        self.setStyleSheet(f"QDialog {{ background: {C.PANEL_BG}; }}")
+        self.setStyleSheet(f"QDialog {{ background: {Tone.SURFACE}; }}")
         self._build_ui()
 
     def _build_ui(self):
-        C = self._C
+        Tone = self._tone
         entry = self._entry
         conn_id = entry.get("family", entry["id"])
         saved = self._settings.get("integrations", {}).get(conn_id, {})
@@ -308,7 +308,7 @@ class _ConnectDialog(QDialog):
 
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
-        badge = _icon_badge_pixmap(entry["id"], 28, C.WHITE)
+        badge = _icon_badge_pixmap(entry["id"], 28, Tone.WHITE)
         if badge is not None:
             icon_lbl = QLabel()
             icon_lbl.setPixmap(badge)
@@ -316,7 +316,7 @@ class _ConnectDialog(QDialog):
             title_row.addWidget(icon_lbl)
         title = QLabel(entry["name"])
         title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        title.setStyleSheet(f"color: {Tone.ACCENT}; background: transparent;")
         title_row.addWidget(title)
         title_row.addStretch()
         lay.addLayout(title_row)
@@ -340,7 +340,7 @@ class _ConnectDialog(QDialog):
                 + ("already connected." if connected else "not connected yet.")
             )
             msg.setFont(QFont("Segoe UI", 9))
-            msg.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+            msg.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent; border: none;")
             msg.setWordWrap(True)
             lay.addWidget(msg)
 
@@ -354,16 +354,16 @@ class _ConnectDialog(QDialog):
                 # of the intended dict) — the leading `_checked=False` absorbs
                 # it so `fe` keeps the captured value.
                 lambda _checked=False, fe=family_entry: self._open_family_dialog(fe),
-                color=None if connected else C.GREEN,
+                color=None if connected else Tone.OK,
             )
             btn_row.addWidget(open_family_btn)
             lay.addLayout(btn_row)
             return
 
         if entry.get("help"):
-            help_lbl = QLabel(_linkify_help(entry["help"], C.ACC2))
+            help_lbl = QLabel(_linkify_help(entry["help"], Tone.CYAN))
             help_lbl.setFont(QFont("Segoe UI", 8))
-            help_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            help_lbl.setStyleSheet(f"color: {Tone.INK_FAINT}; background: transparent;")
             help_lbl.setWordWrap(True)
             help_lbl.setTextFormat(Qt.TextFormat.RichText)
             help_lbl.setOpenExternalLinks(True)
@@ -373,13 +373,13 @@ class _ConnectDialog(QDialog):
         for field in entry.get("fields", []):
             lbl = QLabel(field["label"])
             lbl.setFont(QFont("Segoe UI", 8))
-            lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            lbl.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent;")
             lay.addWidget(lbl)
 
             inp = QLineEdit()
             inp.setFont(QFont("Segoe UI", 9))
             inp.setStyleSheet(
-                f"background: {C.PANEL2_BG}; color: {C.TEXT}; border: 1px solid {C.BORDER_A}; "
+                f"background: {Tone.RAISED}; color: {Tone.INK}; border: 1px solid {Tone.EDGE_SOFT}; "
                 f"border-radius: 1px; padding: 5px 6px;"
             )
             if field.get("secret"):
@@ -403,23 +403,23 @@ class _ConnectDialog(QDialog):
         btn_row.addWidget(save_btn)
 
         if entry.get("connect_action"):
-            connect_btn = self._button("CONNECT", self._on_connect, color=C.GREEN)
+            connect_btn = self._button("CONNECT", self._on_connect, color=Tone.OK)
             btn_row.addWidget(connect_btn)
 
         if saved.get("enabled"):
-            disc_btn = self._button("DISCONNECT", self._on_disconnect, color=C.RED)
+            disc_btn = self._button("DISCONNECT", self._on_disconnect, color=Tone.ALERT)
             btn_row.addWidget(disc_btn)
 
         lay.addLayout(btn_row)
 
     def _button(self, label: str, cb, color: str | None = None) -> QPushButton:
-        C = self._C
+        Tone = self._tone
         btn = QPushButton(label)
         btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        c = color or C.PRI
+        c = color or Tone.ACCENT
         btn.setStyleSheet(f"""
-            QPushButton {{ color: {c}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; border-radius: 1px; padding: 6px 12px; }}
+            QPushButton {{ color: {c}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE_SOFT}; border-radius: 1px; padding: 6px 12px; }}
             QPushButton:hover {{ border: 1px solid {c}; }}
         """)
         btn.clicked.connect(cb)
@@ -448,7 +448,7 @@ class _ConnectDialog(QDialog):
         settings_store.save_settings(settings)
         self._settings = settings
         # Background added 2026-09-10 — found via GEMZ4US's report that
-        # main.py::_build_config() (which reads
+        # voice/prompt.py::build() (which reads
         # integration_registry.get_active_tool_declarations()) only runs
         # once per Gemini Live connection, same as the companion-switch
         # confirmation already says below. Without a reconnect, connecting
@@ -470,7 +470,7 @@ class _ConnectDialog(QDialog):
         else:
             self.saved.emit(f"{self._entry['name']} saved.", False, False)
             self._status_lbl.setText("Saved. Click Connect to finish linking your account.")
-            self._status_lbl.setStyleSheet(f"color: {self._C.GREEN}; background: transparent;")
+            self._status_lbl.setStyleSheet(f"color: {self._tone.OK}; background: transparent;")
 
     def _on_connect(self):
         conn_id = self._entry.get("family", self._entry["id"])
@@ -481,7 +481,7 @@ class _ConnectDialog(QDialog):
         settings_store.save_settings(settings)
 
         self._status_lbl.setText("Opening your browser to complete sign-in…")
-        self._status_lbl.setStyleSheet(f"color: {self._C.ACC2}; background: transparent;")
+        self._status_lbl.setStyleSheet(f"color: {self._tone.CYAN}; background: transparent;")
 
         from actions.integrations.connectors import CONNECT_ACTIONS
         action = CONNECT_ACTIONS[self._entry["connect_action"]]
@@ -524,6 +524,6 @@ class _ConnectDialog(QDialog):
         (Google Account / Microsoft Account) so the user lands on the real
         OAuth setup instead of a dead end."""
         self.accept()
-        dlg = _ConnectDialog(family_entry, self._settings, self._C, self.parent())
+        dlg = _ConnectDialog(family_entry, self._settings, self._tone, self.parent())
         dlg.saved.connect(self.saved)
         dlg.exec()

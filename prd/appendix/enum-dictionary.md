@@ -29,7 +29,7 @@ Any non-`gemini_live` backend is eligible as a `delegate_to_agent` sub-agent tar
 - `specialty`: shown in the World graph and in the lead companion's sub-agent directory; not meaningful for `gemini_live` companions.
 
 ## Memory Categories
-`memory/memory_manager.py` (via `save_memory` tool description in `main.py`):
+`memory/profile.py` (via the `save_memory` tool description in `voice/dispatch.py`):
 | Category | Contains |
 |---|---|
 | `identity` | name, age, birthday, city, job, language, nationality |

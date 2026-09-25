@@ -64,8 +64,8 @@ The always-open home screen of Omni-OS: a fullscreen, near-black HUD showing an 
 | Dependency | Trigger | Notes |
 |---|---|---|
 | Gemini Live `BidiGenerateContent` WS | App launch, companion switch, settings change requiring reconnect | See [api-inventory.md](../appendix/api-inventory.md) |
-| `ToolRouter.run` (voice/dispatch.py) → one of ~23 built-in tools, active MCP servers, or active Integrations | Any Gemini tool call | Dispatch table lives in `main.py`; each tool's own module documents its side effects |
-| `save_memory` (Gemini-initiated tool call) | Gemini decides a fact is worth remembering | Writes to the active companion's memory namespace — see `memory/memory_manager.py` |
+| `ToolRouter.run` (voice/dispatch.py) → one of ~23 built-in tools, active MCP servers, or active Integrations | Any Gemini tool call | Dispatch lives in `voice/dispatch.py` and the `toolkit/` registry; each tool's own module documents its side effects |
+| `save_memory` (Gemini-initiated tool call) | Gemini decides a fact is worth remembering | Writes to the active companion's memory namespace — see `memory/profile.py` |
 
 ## Page Relationships
 - **To:** Settings, Integrations, World, Trader, Remote Dashboard pairing overlay (all opened from the sidebar).

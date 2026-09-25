@@ -1,6 +1,6 @@
 """Turn-based conversation driver for openhands_agent-backend companions —
 same public shape as actions/codex_companion.py (send/forget_session/
-get_status), so main.py can dispatch to it identically. Drives the
+get_status), so voice/session.py can dispatch to it identically. Drives the
 OpenHands CLI (docs.openhands.dev) directly via subprocess + its
 `--headless --json` mode.
 
@@ -127,6 +127,6 @@ def _run_openhands(companion: dict, text: str, ca: dict) -> str:
 
 def forget_session(companion_id: str) -> None:
     """No-op — this backend keeps no cross-turn state to forget (see module
-    docstring). Exists only so main.py/settings_panel.py/world_panel.py can
+    docstring). Exists only so voice/session.py/settings_panel.py/world_panel.py can
     call it unconditionally, same as every other companion backend."""
     pass

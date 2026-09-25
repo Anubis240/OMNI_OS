@@ -1,6 +1,6 @@
 """Turn-based conversation driver for codex_agent-backend companions —
 same public shape as actions/claude_companion.py (send/forget_session/
-get_status), so main.py can dispatch to either one identically. Drives
+get_status), so voice/session.py can dispatch to either one identically. Drives
 OpenAI's Codex CLI directly via subprocess + its `--json` NDJSON event
 stream, since there's no Codex equivalent of the (Anthropic-specific)
 claude_agent_sdk package claude_companion.py uses.

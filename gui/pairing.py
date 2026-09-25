@@ -11,12 +11,12 @@ from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from gui.theme import C
+from gui.theme import Tone
 
 KEY_LIFETIME = 600   # seconds
 
 
-def _label(text: str, size: int = 9, color: str = C.TEXT_MED, bold: bool = False) -> QLabel:
+def _label(text: str, size: int = 9, color: str = Tone.INK_SOFT, bold: bool = False) -> QLabel:
     lbl = QLabel(text)
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lbl.setWordWrap(True)
@@ -46,7 +46,7 @@ class PairingCard(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setObjectName("pairingCard")
-        self.setStyleSheet(f"#pairingCard {{ background: {C.PANEL_BG}; border: 1px solid {C.PRI}; border-radius: 16px; }}")
+        self.setStyleSheet(f"#pairingCard {{ background: {Tone.SURFACE}; border: 1px solid {Tone.ACCENT}; border-radius: 16px; }}")
         self.request_new_key = None    # set by the window: () -> (url, key, login_url) | None
         self._grab: QPoint | None = None
         self._expires = 0.0
@@ -54,7 +54,7 @@ class PairingCard(QWidget):
         col = QVBoxLayout(self)
         col.setContentsMargins(22, 16, 22, 16)
         col.setSpacing(6)
-        col.addWidget(_label("CONNECT YOUR PHONE", 11, C.PRI, bold=True))
+        col.addWidget(_label("CONNECT YOUR PHONE", 11, Tone.ACCENT, bold=True))
         self._qr = QLabel()
         self._qr.setFixedSize(180, 180)
         self._qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -64,11 +64,11 @@ class PairingCard(QWidget):
         row.addStretch()
         col.addLayout(row)
         col.addWidget(_label("Point your phone's camera at the code.", 8))
-        col.addWidget(_label("…or open this address and type the key:", 8, C.TEXT_DIM))
-        self._address = _label("", 8, C.ACC2)
+        col.addWidget(_label("…or open this address and type the key:", 8, Tone.INK_FAINT))
+        self._address = _label("", 8, Tone.CYAN)
         self._address.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         col.addWidget(self._address)
-        self._key = _label("", 26, C.ACC, bold=True)
+        self._key = _label("", 26, Tone.AMBER, bold=True)
         col.addWidget(self._key)
         self._status = _label("", 8)
         col.addWidget(self._status)
@@ -81,8 +81,8 @@ class PairingCard(QWidget):
             btn.setFixedHeight(30)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-            btn.setStyleSheet(f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER}; border-radius: 8px; }}"
-                              f"QPushButton:hover {{ border-color: {C.PRI}; color: {C.PRI}; }}")
+            btn.setStyleSheet(f"QPushButton {{ color: {Tone.INK}; background: {Tone.RAISED}; border: 1px solid {Tone.EDGE}; border-radius: 8px; }}"
+                              f"QPushButton:hover {{ border-color: {Tone.ACCENT}; color: {Tone.ACCENT}; }}")
             btn.clicked.connect(action)
             buttons.addWidget(btn)
         col.addLayout(buttons)
@@ -94,11 +94,11 @@ class PairingCard(QWidget):
     def _show_key(self, url: str, key: str, login_url: str) -> None:
         self._address.setText(url)
         self._key.setText(key)
-        self._key.setStyleSheet(f"color: {C.ACC}; background: transparent; border: none; letter-spacing: 8px;")
+        self._key.setStyleSheet(f"color: {Tone.AMBER}; background: transparent; border: none; letter-spacing: 8px;")
         pix = _qr_pixmap(login_url or url, 176)
         if pix is None:
             self._qr.setText("QR unavailable\n(install qrcode)")
-            self._qr.setStyleSheet(f"color: {C.TEXT_MED}; background: {C.PANEL2_BG}; border-radius: 10px;")
+            self._qr.setStyleSheet(f"color: {Tone.INK_SOFT}; background: {Tone.RAISED}; border-radius: 10px;")
         else:
             self._qr.setPixmap(pix)
             self._qr.setStyleSheet("background: white; border-radius: 10px;")
@@ -112,7 +112,7 @@ class PairingCard(QWidget):
             self.dismiss()
             return
         self._status.setText(f"Key valid for {left // 60}:{left % 60:02d}")
-        self._status.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        self._status.setStyleSheet(f"color: {Tone.INK_SOFT}; background: transparent; border: none;")
 
     def _renew(self) -> None:
         fresh = self.request_new_key() if self.request_new_key else None
@@ -127,17 +127,17 @@ class PairingCard(QWidget):
         self._qr.clear()
         self._qr.setText(mark)
         self._qr.setFont(QFont("Segoe UI", 56, QFont.Weight.Bold))
-        self._qr.setStyleSheet(f"color: {color}; background: {C.PANEL2_BG}; border-radius: 10px;")
+        self._qr.setStyleSheet(f"color: {color}; background: {Tone.RAISED}; border-radius: 10px;")
         self._status.setText(detail)
         self._status.setStyleSheet(f"color: {color}; background: transparent; border: none;")
 
     def mark_connected(self) -> None:
-        self._status_banner("CONNECTED", "Phone connected — Omni is ready.", C.GREEN, "✓")
+        self._status_banner("CONNECTED", "Phone connected — Omni is ready.", Tone.OK, "✓")
 
     def mark_disconnected(self) -> None:
         """The phone's connection really dropped — say so rather than keep
         showing a stale 'connected' state."""
-        self._status_banner("DISCONNECTED", "The phone disconnected — press NEW KEY to pair again.", C.RED, "✕")
+        self._status_banner("DISCONNECTED", "The phone disconnected — press NEW KEY to pair again.", Tone.ALERT, "✕")
 
     def dismiss(self) -> None:
         self._countdown.stop()

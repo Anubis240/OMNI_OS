@@ -87,14 +87,14 @@ def main() -> None:
     window = OmniUI()
 
     def assistant_thread():
-        window.wait_for_api_key()
+        window.wait_until_ready()
         try:
             asyncio.run(Assistant(window, load_saved_voice).run())
         except KeyboardInterrupt:
             pass
 
     threading.Thread(target=assistant_thread, name="assistant", daemon=True).start()
-    window.root.mainloop()
+    window.run_event_loop()
 
 
 if __name__ == "__main__":

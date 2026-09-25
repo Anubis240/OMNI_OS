@@ -29,7 +29,7 @@ trader/chains.py is imported at module level below — it's pure data, no
 external dependencies. trader/live.py (and the web3 import it needs) is
 deliberately imported lazily inside each function instead, matching
 actions/launch_trader.py's own discipline of never pulling web3/wallet
-code into main.py's always-loaded import graph just because the optional
+code into the app's always-loaded import graph just because the optional
 trader feature exists somewhere in the app — this module has nothing to do
 with the "trader enabled" setting and shouldn't cost anything at startup
 for someone who never touches either feature.

@@ -1,54 +1,70 @@
-﻿sounddevice
+# Omni-OS runtime dependencies, grouped by what uses them.
+
+# --- window, voice and the Gemini session ---
+pyqt6
 google-genai
-pillow
-requests
-beautifulsoup4
-duckduckgo-search
+sounddevice
+pydub
+numpy
+psutil
+
+# --- desktop control (toolkit/) ---
 playwright==1.62.0
 pyautogui
 pyperclip
-pygetwindow; sys_platform == 'win32'
-opencv-python
-numpy
 mss
 Pillow
-psutil
+opencv-python
+send2trash
+plyer
+pygetwindow; sys_platform == 'win32'
+pywinauto; sys_platform == 'win32'
+pywin32; sys_platform == 'win32'
 comtypes; sys_platform == 'win32'
 pycaw; sys_platform == 'win32'
 win10toast; sys_platform == 'win32'
-send2trash
+
+# --- web lookups ---
+requests
+beautifulsoup4
+duckduckgo-search
 youtube-transcript-api
-pywinauto; sys_platform == 'win32'
+
+# --- documents the user hands over ---
+pdfplumber
+PyPDF2
+python-docx
 python-pptx
-pyqt6
+pandas
+
+# --- phone Remote Dashboard ---
 fastapi
 uvicorn[standard]
 qrcode[pil]
 cryptography
-pdfplumber
-PyPDF2
-python-docx
-pandas
-plyer
-pydub
+
+# --- trader (read-only chain calls) ---
 web3
-pywin32; sys_platform == 'win32'
-claude-agent-sdk==0.2.135  # GEMZ4US 2026-09-10: left unpinned, a delegated call's console
-                           # window appeared on Sep 9 but not on two Sep 10 attempts — this
-                           # SDK's own subprocess handling is the likely cause, and two builds
-                           # made close together in time could easily have pulled different
-                           # point releases with different internal behavior. Pinned to the
-                           # version actually built and tested for v1.11.2 (see omni-os.spec's
-                           # own APP_VERSION comment for why bundled versions matter here).
+
+# --- integrations: Google and Microsoft sign-in ---
 google-auth-oauthlib
 google-api-python-client
 msal
-# Local, offline NSFW image classifier for actions/image_generator.py's
-# post-generation safety gate — ships its own ONNX model (no download, no
-# API key, no billing, no network call). Pulls in opencv-python-headless
-# as a transitive dep; confirmed (2026-09-07) that installing it alongside
-# the opencv-python already above does NOT conflict as long as pip resolves
-# both to the same release version (it does, in one combined install) — if
-# a future dependency bump ever skews them apart, that's the first thing to
-# check if cv2 behaves oddly.
+
+# --- sub-agents ---
+# Pinned: GEMZ4US 2026-09-10 saw a delegated call's console window on Sep 9
+# but not on two Sep 10 attempts. Unpinned, two builds made close together
+# could pull different point releases of this SDK, whose own subprocess
+# handling is the likely cause. This is the version built and tested for
+# v1.11.2 (omni-os.spec's APP_VERSION comment explains why bundled versions
+# matter).
+claude-agent-sdk==0.2.135
+
+# --- image safety ---
+# Local, offline NSFW classifier for actions/image_generator.py's
+# post-generation gate; ships its own ONNX model (no download, API key,
+# billing or network call). It pulls in opencv-python-headless, which sits
+# fine next to opencv-python above as long as pip resolves both to the same
+# release in one install (checked 2026-09-07). If cv2 ever misbehaves after
+# a dependency bump, check those two versions first.
 nudenet>=3.4.2

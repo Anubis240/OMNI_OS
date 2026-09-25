@@ -1,6 +1,6 @@
 """Turn-based conversation driver for opencode_agent-backend companions —
 same public shape as actions/codex_companion.py (send/forget_session/
-get_status), so main.py can dispatch to it identically. Drives the OpenCode
+get_status), so voice/session.py can dispatch to it identically. Drives the OpenCode
 CLI (opencode.ai) directly via subprocess.
 
 Flags verified against OpenCode's own CLI docs (opencode.ai/docs/cli/,

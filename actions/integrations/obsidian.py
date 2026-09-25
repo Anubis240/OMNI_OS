@@ -9,8 +9,7 @@ there's nothing to "connect" to beyond knowing where that folder is.
 
 Path safety: every operation resolves its note path relative to the
 configured vault root and refuses anything that escapes it (symlink tricks
-included, via Path.resolve()) — same defensive pattern as
-actions/computer_control.py's _safe_screenshot_path.
+included, via Path.resolve()).
 """
 
 from pathlib import Path

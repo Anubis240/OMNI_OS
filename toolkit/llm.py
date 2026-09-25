@@ -1,6 +1,6 @@
 """One place for tools that need a quick Gemini text/vision call.
 
-The live voice session has its own client in main.py; this is for the
+The live voice session has its own client in voice/session.py; this is for the
 short, one-shot requests tools make (summaries, code, plans, vision).
 """
 

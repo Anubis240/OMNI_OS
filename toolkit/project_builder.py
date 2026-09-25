@@ -159,7 +159,7 @@ def build(description: str, language: str, name: str, timeout: int, ctx: ToolCon
     "and repairs it until it works. Never for an EXISTING project in the user's "
     "files — use claude_agent for those.",
     {
-        "description": S("What the project should do"),
+        "description": S("Plain-language description of the program to build"),
         "language": S("Programming language (default python)"),
         "project_name": S("Optional folder name"),
         "timeout": I("Seconds each test run may take (default 30)"),

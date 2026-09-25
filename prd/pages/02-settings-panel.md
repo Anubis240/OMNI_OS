@@ -43,7 +43,7 @@ Same shape minus `Extra dir` (Codex has no confirmed CLI-level equivalent to `ad
 ### Remote Dashboard Section
 | Field | Type | Notes |
 |---|---|---|
-| Port | Number input | Default 8000; changeable because the original fork this shipped from defaults to the same port |
+| Port | Number input | Default 8000; changeable so it can't clash with the Seraph Guardian desktop app, which also defaults to 8000 |
 | Regenerate certificate | Button | Re-issues the self-signed HTTPS cert used for the LAN dashboard |
 
 ### API Keys Section

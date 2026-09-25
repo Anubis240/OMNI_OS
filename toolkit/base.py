@@ -14,7 +14,7 @@ class ToolContext:
     background task runner, which has no window.
     """
 
-    ui: Any = None                      # JarvisUI, or None when headless
+    ui: Any = None                      # gui.facade.OmniUI, or None when headless
     speak: Callable[[str], None] | None = None
     namespace: str | None = None        # active companion's memory namespace
     dashboard: Any = None
@@ -26,7 +26,7 @@ class ToolContext:
         print(text)
         if self.ui is not None:
             try:
-                self.ui.write_log(text)
+                self.ui.post(text)
             except Exception:
                 pass
 
@@ -38,8 +38,8 @@ class ToolContext:
                 pass
 
     @property
-    def current_file(self) -> str | None:
-        return getattr(self.ui, "current_file", None) if self.ui is not None else None
+    def attached_file(self) -> str | None:
+        return getattr(self.ui, "attached_file", None) if self.ui is not None else None
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class Tool:
     schema: dict
     handler: Callable[[dict, ToolContext], str]
     # Handlers that block (network, subprocess, GUI automation) run in a
-    # worker thread; main.py reads this to decide.
+    # worker thread; voice/dispatch.py reads this to decide.
     blocking: bool = True
 
 

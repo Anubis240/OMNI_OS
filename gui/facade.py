@@ -12,8 +12,8 @@ import time
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
-from gui.theme import C
-from gui.window import MainWindow
+from gui.theme import Tone
+from gui.window import OmniWindow
 
 
 class _Relay(QObject):
@@ -21,32 +21,26 @@ class _Relay(QObject):
     phone_disconnected = pyqtSignal()
 
 
-class _EventLoop:
-    """`window.root.mainloop()` — starts the Qt event loop."""
-    def __init__(self, app: QApplication):
-        self._app = app
-
-    def mainloop(self) -> None:
-        self._app.exec()
-
-
 class OmniUI:
     def __init__(self):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
         # Fusion under Windows dark mode draws unreadable tooltips unless styled.
-        self._app.setStyleSheet(f"QToolTip {{ color: {C.TEXT}; background-color: {C.PANEL_BG};"
-                                f" border: 1px solid {C.BORDER_A}; padding: 4px 6px; }}")
-        self._win = MainWindow()
+        self._app.setStyleSheet(f"QToolTip {{ color: {Tone.INK}; background-color: {Tone.SURFACE};"
+                                f" border: 1px solid {Tone.EDGE_SOFT}; padding: 4px 6px; }}")
+        self._win = OmniWindow()
         self._relay = _Relay()
         self._relay.phone_connected.connect(self._win.phone_connected)
         self._relay.phone_disconnected.connect(self._win.phone_disconnected)
         self._win.show()
-        self.root = _EventLoop(self._app)
+
+    def run_event_loop(self) -> None:
+        """Hand the calling (main) thread to Qt until the window closes."""
+        self._app.exec()
 
     # --- state the assistant reads -----------------------------------------
     @property
-    def muted(self) -> bool:
+    def mic_muted(self) -> bool:
         return self._win.mic_muted
 
     @property
@@ -58,8 +52,8 @@ class OmniUI:
         return self._win.always_listening
 
     @property
-    def current_file(self) -> str | None:
-        return self._win.current_file
+    def attached_file(self) -> str | None:
+        return self._win.attached_file
 
     @property
     def voice(self) -> str:
@@ -70,7 +64,7 @@ class OmniUI:
         return property(lambda self: getattr(self._win, name),
                         lambda self, fn: setattr(self._win, name, fn))
 
-    on_text_command = _hook("on_text_command")
+    on_typed_text = _hook("on_typed_text")
     on_voice_change = _hook("on_voice_change")
     on_companions_changed = _hook("on_companions_changed")
     on_remote_clicked = _hook("on_remote_clicked")
@@ -79,11 +73,17 @@ class OmniUI:
     del _hook
 
     # --- things the assistant does to the window -------------------------------
-    def write_log(self, text: str) -> None:
+    def post(self, text: str) -> None:
         self._win.log_line.emit(text)
 
-    def set_state(self, state: str) -> None:
-        self._win.state_changed.emit(state)
+    def show_listening(self) -> None:
+        self._win.activity_changed.emit("listening")
+
+    def show_thinking(self) -> None:
+        self._win.activity_changed.emit("thinking")
+
+    def show_speaking(self) -> None:
+        self._win.activity_changed.emit("speaking")
 
     def open_trader_panel(self) -> None:
         self._win.open_trader_requested.emit()
@@ -98,7 +98,8 @@ class OmniUI:
         """Real yes/no dialog; blocks the calling (non-GUI) thread. Times out as 'no'."""
         return self._win.confirm(message)
 
-    def wait_for_api_key(self) -> None:
+    def wait_until_ready(self) -> None:
+        """Block until the first-run prompt has a Gemini key saved."""
         while not self._win.ready:
             time.sleep(0.1)
 
