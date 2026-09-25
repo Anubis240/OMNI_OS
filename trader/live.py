@@ -471,7 +471,8 @@ def check_buy_receipt(chain: str | None, tx_hash: str, token_address: str, owner
     except Exception:
         gas_usd = 0
     cost_usd = trade_size_usd + gas_usd
-    return {"status": "confirmed", "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "txHash": tx_hash}
+    return {"status": "confirmed", "qty": qty, "priceUsd": cost_usd / qty, "fillPriceUsd": trade_size_usd / qty,
+            "costUsd": cost_usd, "txHash": tx_hash}
 
 
 def adopt_from_tx(chain: str | None, tx_hash: str, token_address: str, owner_address: str,
@@ -503,7 +504,8 @@ def adopt_from_tx(chain: str | None, tx_hash: str, token_address: str, owner_add
     except Exception:
         gas_usd = 0
     cost_usd = eth_spent_usd + gas_usd
-    return {"qty": qty, "costUsd": cost_usd, "priceUsd": cost_usd / qty, "txHash": tx_hash}
+    return {"qty": qty, "costUsd": cost_usd, "priceUsd": cost_usd / qty,
+            "fillPriceUsd": eth_spent_usd / qty if eth_spent_usd > 0 else None, "txHash": tx_hash}
 
 
 def _gas_cost_usd(receipt: dict, eth_price_usd: float) -> float:
@@ -599,7 +601,8 @@ def live_buy(token: dict, trade_size_usd: float, max_price_impact_bps: float = 3
     # gasQuoteWei/gasSignedWei are deliberately NOT reported since 1.12.0:
     # the desktop no longer quotes or signs gas locally (the Seraph wallet
     # does, server-side), so there is no local quote to compare against.
-    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "costUsd": cost_usd, "ethPriceUsd": eth_price_usd,
+    return {"txHash": tx_hash, "qty": qty, "priceUsd": cost_usd / qty, "fillPriceUsd": trade_size_usd / qty,
+            "costUsd": cost_usd, "ethPriceUsd": eth_price_usd,
             "dex": quote["dex"], "priceImpactBps": price_impact_bps, "wallet": status["address"]}
 
 
