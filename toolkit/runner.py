@@ -57,7 +57,7 @@ def interpreter_for(path: Path) -> list[str] | None:
 def run_file(path: Path, args: list[str] | None = None, timeout: int = 30) -> RunResult:
     cmd = interpreter_for(path)
     if cmd is None:
-        what = "Python" if path.suffix == ".py" else f"an interpreter for {path.suffix} files"
+        what = "Python" if path.suffix == ".py" else f"a program that runs {path.suffix} files"
         return RunResult(False, f"I can't run this: {what} isn't installed on this computer.")
     try:
         done = subprocess.run(cmd + [str(path)] + list(args or []), cwd=path.parent,

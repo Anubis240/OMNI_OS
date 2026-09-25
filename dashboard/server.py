@@ -234,7 +234,7 @@ class DashboardServer:
                 return HTMLResponse(page.format("<div><h2 style='color:#ef476f'>This code has expired</h2>"
                                                 "<p style='color:#9e9e9e'>Press Remote Control in Omni-OS for a new one.</p></div>"))
             token = self._new_token()
-            await self.broadcast({"type": "sys", "text": "Remote connection established via QR code."})
+            await self.broadcast({"type": "sys", "text": "Phone paired by scanning the QR code."})
             return HTMLResponse(page.format(f"<script>sessionStorage.setItem('seraph_token','{token}');"
                                             "location.replace('/');</script><p>Connecting…</p>"))
 
@@ -392,7 +392,7 @@ class DashboardServer:
 
     async def serve(self) -> None:
         if not _AVAILABLE:
-            self._failed('fastapi/uvicorn not installed — run: pip install fastapi "uvicorn[standard]"')
+            self._failed('the web server packages are missing (fastapi, uvicorn[standard]) — reinstall Omni-OS or pip-install them')
             return
         if net.is_cgnat(self.ip):
             self._warn(f"is using {self.ip}, which looks like a VPN (e.g. Tailscale) address rather than your "

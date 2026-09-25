@@ -39,7 +39,8 @@ _SESSION_TOOLS = {
         "Quietly remembers a lasting personal fact the user mentioned — name, city, job, likes, "
         "people in their life, projects, plans, habits. Don't announce it; don't use it for "
         "one-off requests. Write the value in English whatever language you're speaking.",
-        {"category": S("identity | preferences | projects | relationships | wishes | notes"),
+        {"category": S("Which part of the profile it belongs to: identity (who they are), preferences "
+                          "(likes/dislikes), projects, relationships (people), wishes (plans, wants) or notes (anything else)"),
          "key": S("short snake_case label, e.g. favorite_food"),
          "value": S("the fact, briefly, in English")},
         ["category", "key", "value"]),

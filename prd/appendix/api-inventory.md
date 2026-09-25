@@ -22,33 +22,33 @@
 
 ## 2. Built-in Tool Catalog (`toolkit/*.py` via `toolkit.schemas()`, plus the session tools in `voice/dispatch.py`)
 
-All 23 tools Gemini can call regardless of Integrations/MCP/Skills configuration. Names and descriptions are copied verbatim from source (they double as the actual model-facing prompt text).
+All 23 tools Gemini can call regardless of Integrations/MCP/Skills configuration. Generated from the live schemas; the full descriptions are in the source and double as the model-facing prompt text.
 
-| Tool | Description (as given to Gemini) | Key parameters |
+| Tool | Description (first sentence of what Gemini is given) | Parameters |
 |---|---|---|
-| `open_app` | Opens any application on the computer | `app_name` (required) |
-| `web_search` | Searches the web for any information | `query` (required), `mode`, `items`, `aspect` |
-| `weather_report` | Gives the weather report to user | `city` (required) |
-| `send_message` | Sends a text message via WhatsApp, Telegram, or other messaging platform | `receiver`, `message_text`, `platform` (all required) |
-| `reminder` | Sets a timed reminder using Task Scheduler | `date`, `time`, `message` (all required) |
-| `screen_process` | Captures and analyzes the screen or webcam image | `angle` (screen/camera), `text` (required) |
-| `computer_settings` | Volume, brightness, window mgmt, shortcuts, typing, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tabs, zoom, screenshots, lock, refresh | `action`, `description`, `value` |
-| `browser_control` | Controls any web browser: navigate, search, click, fill forms, scroll, screenshot, tabs, multi-browser | `action` (required, 20 sub-actions), `browser`, `url`, `query`, `selector`, `text`, etc. |
-| `file_controller` | Manages files/folders: list, create, delete, move, copy, rename, read, write, find, disk usage | `action` (required), `path`, `destination`, `new_name`, `content`, `name`, `extension`, `count` |
-| `desktop_control` | Wallpaper (file or URL), current wallpaper, organize, clean, list, stats | `action` (required), `path`, `url`, `mode` |
-| `code_helper` | Writes/edits/explains/runs/builds source code files — never prose | `action` (required), `description`, `language`, `output_path`, `file_path`, `code`, `args`, `timeout` |
-| `dev_agent` | Builds a brand-new project from scratch (plans, writes files, installs deps, opens VS Code, runs/fixes errors) | `description` (required), `language`, `project_name`, `timeout` |
-| `claude_agent` | Delegates to Claude running as a real coding agent with Obsidian-vault + file/tool access, for existing-project work | `request` (required), `timeout` |
-| `agent_task` | Executes complex multi-step tasks needing multiple different tools | `goal` (required), `priority` |
-| `computer_control` | Direct input control: type, click, hotkeys, scroll, move, screenshot, on-screen element finding | `action` (required, 17 sub-actions), `text`, `x`, `y`, `keys`, `key`, etc. |
-| `generate_image` | Generates an image from a text description via AI image generation | `prompt` (required) |
-| `launch_trader` | Opens the Trader panel (does not itself trade) | none |
-| `delegate_to_agent` | Hands a task to a named sub-agent to work on in the background | `agent_name`, `task` (both required) |
-| `share_file` | Gives the user a clickable web link (via the Remote Dashboard) to a local file, instead of a `file://` path | `path` (required) |
-| `close_assistant` | Closes Omni-OS when the user clearly wants to end the session | none |
-| `get_current_time` | The real current date and time (the prompt's own timestamp can be stale after a reconnect) | none |
-| `file_processor` | Acts on an uploaded/dropped file — images, PDFs, docx/txt, CSV/Excel, JSON/XML, code, audio, video, archives, presentations | `file_path`, `action`, `instruction`, `format`, plus type-specific params (width/height/scale/quality/start/end/timestamp/column/value/condition/ascending/save/destination) |
-| `save_memory` | Silently saves an important personal fact to long-term memory | `category`, `key`, `value` (all required) |
+| `save_memory` | Quietly remembers a lasting personal fact the user mentioned — name, city, job, likes, people in their life, projects, plans, habits. | `category` (required), `key` (required), `value` (required) |
+| `get_current_time` | The actual current date and time. | none |
+| `agent_task` | Hands a genuinely multi-step goal (several different tools in sequence, e.g. research something and save a report) to a background worker and returns straight away; yo… | `goal` (required), `priority` |
+| `claude_agent` | Asks Claude (Anthropic), running as a coding agent with access to the user's Obsidian vault and projects. | `request` (required), `timeout` |
+| `generate_image` | Creates an image from a description and shows it to the user. | `prompt` (required) |
+| `launch_trader` | Opens the built-in crypto trader panel. | none |
+| `delegate_to_agent` | Gives a task to one of the listed sub-agents to work on in the background while you keep talking. | `agent_name` (required), `task` (required) |
+| `close_assistant` | Closes Omni-OS. | none |
+| `open_app` | Launches a program installed on this PC by its name (found through the Start menu and known install folders), or opens a web address in the default browser. | `app_name` (required) |
+| `weather_report` | Gets the current weather and today's forecast for a city. | `city` (required) |
+| `web_search` | Look something up on the web. | `query` (required), `mode`, `items`, `aspect` |
+| `send_message` | Sends a text message to a contact through a desktop messaging app (WhatsApp, Telegram, Signal, Discord, Slack or Teams). | `receiver` (required), `message_text` (required), `platform` (required) |
+| `reminder` | Sets a one-off reminder that pops up as a desktop notification at the given date and time, even if Omni-OS is closed by then. | `date` (required), `time` (required), `message` (required) |
+| `file_controller` | Manages files and folders in the user's home: list, create, read, write, delete (to the Recycle Bin), move, copy, rename, find, largest files, disk usage, file info, a… | `action` (required), `path`, `name`, `destination`, `new_name`, `content`, `extension`, `count` |
+| `desktop_control` | Desktop wallpaper and housekeeping: set the wallpaper from a file or image URL, say what the current wallpaper is, sort the desktop into folders, archive loose files,… | `action` (required), `path`, `url`, `mode` |
+| `screen_process` | Looks at the user's screen (or webcam) and answers a question about what's visible. | `angle`, `text` (required) |
+| `computer_control` | Direct mouse and keyboard control: type, click at coordinates, hotkeys, key presses, scrolling, pointer moves, clipboard, screenshots, focusing a window, and finding o… | `action` (required), `text`, `x`, `y`, `keys`, `key`, `direction`, `amount`, `seconds`, `title`, `description`, `field`, `clear_first`, `path` |
+| `computer_settings` | One-shot computer commands: volume (up/down/set/mute), brightness, window management, keyboard shortcuts, typing text, media keys, tabs, zoom, page navigation, screens… | `action`, `value`, `description` |
+| `code_helper` | Works on a single PROGRAMMING source file (Python, JavaScript, HTML, etc.): write new code, edit or optimize an existing file, explain code, run it, build-and-fix unti… | `action` (required), `description`, `language`, `output_path`, `file_path`, `code`, `args`, `timeout` |
+| `dev_agent` | Builds a BRAND NEW small project from scratch: writes the files, installs its packages into the project's own environment, opens it in the editor, and runs and repairs… | `description` (required), `language`, `project_name`, `timeout` |
+| `file_processor` | Does something with a file the user uploaded or dropped on the window (or a named file): summarize/describe/analyze/transcribe/OCR/explain/review it, or transform it —… | `file_path`, `action`, `instruction`, `format`, `width`, `height`, `scale`, `quality`, `start`, `end`, `timestamp`, `column`, `value`, `condition`, `ascending`, `save`, `destination` |
+| `browser_control` | Controls a real browser window: open sites, search, click things by their visible text or label, type into fields, fill forms, scroll, press keys, read the page, manag… | `action` (required), `browser`, `url`, `query`, `engine`, `selector`, `text`, `description`, `fields`, `direction`, `amount`, `key`, `path`, `clear_first` |
+| `share_file` | Gives the user a clickable link to a local file Omni just made (a page, document, image…), so it can be opened from the phone dashboard. | `path` (required) |
 
 Plus three modules appended separately (own `TOOL_DECLARATIONS`, concatenated in `voice/dispatch.py::ToolRouter.declarations()`): **blockchain read-only tools** (`actions/blockchain_readonly.py`), **action-item extraction** (`actions/action_items.py`), and **weekly review** (`actions/weekly_review.py`) — not individually re-verified for this PRD; `[TBC]` for their exact parameter shapes.
 

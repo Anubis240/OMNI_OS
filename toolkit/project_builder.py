@@ -169,7 +169,7 @@ def build(description: str, language: str, name: str, timeout: int, ctx: ToolCon
 def dev_agent(args: dict, ctx: ToolContext) -> str:
     description = (args.get("description") or "").strip()
     if not description:
-        return "Describe the project you want built."
+        return "Tell me what the new program should do and I'll build it."
     ask = getattr(ctx.ui, "confirm_action", None)
     if not (callable(ask) and ask(f"Build a new project (\"{description[:80]}\")? This installs packages "
                                   f"and runs code on your computer.")):

@@ -254,13 +254,13 @@ _ACTIONS = {
 
 @register(
     "file_controller",
-    "Manages files and folders in the user's home: list, create, read, write, "
+    "Works with files and folders under the user's home: list, create, read, write, "
     "delete (to the Recycle Bin), move, copy, rename, find, largest files, disk "
     "usage, file info, and sorting the desktop. Folder keywords like 'desktop' or "
     "'downloads' can start a path.",
     {
         "action": S(" | ".join(_ACTIONS)),
-        "path": S("File/folder path, or a folder keyword: desktop, downloads, documents, pictures, music, videos, home"),
+        "path": S("A full path, or just the name of a standard folder (desktop, downloads, documents, pictures, music, videos, home), optionally followed by a file name"),
         "name": S("File name inside `path` (or the search term for find)"),
         "destination": S("Where to move/copy to"),
         "new_name": S("New name for rename"),

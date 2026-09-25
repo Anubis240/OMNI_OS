@@ -174,10 +174,10 @@ def _pick_action(args: dict, description: str) -> str:
     "poems or other writing — answer those directly.",
     {
         "action": S("write | edit | explain | run | build | optimize | screen_debug | auto (default)"),
-        "description": S("What the code should do, or the change to make"),
+        "description": S("In plain words: the program wanted, or how the existing file should change"),
         "language": S("Programming language (default python)"),
         "output_path": S("Where to save new code"),
-        "file_path": S("Existing file to edit/explain/run/build"),
+        "file_path": S("Path of a source file already on disk, for edit, explain, run or build"),
         "code": S("Code text to explain"),
         "args": S("Command-line arguments for run/build"),
         "timeout": I("Seconds a run may take (default 30)"),

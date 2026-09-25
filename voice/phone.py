@@ -35,9 +35,9 @@ class PhoneBridge:
             print(f"[phone] dashboard unavailable: {err}")
             return
         server = DashboardServer()
-        server.set_connect_callback(lambda: (ui.post("SYS: Phone connected via Remote Dashboard."),
+        server.set_connect_callback(lambda: (ui.post("SYS: Your phone is linked — Remote Dashboard is live."),
                                              ui.notify_phone_connected()))
-        server.set_disconnect_callback(lambda: (ui.post("SYS: Phone disconnected from Remote Dashboard."),
+        server.set_disconnect_callback(lambda: (ui.post("SYS: Your phone has left the Remote Dashboard."),
                                                 ui.notify_phone_disconnected()))
         server.set_trader_state_callback(ui.get_trader_state)
         server.set_trader_action_callback(ui.run_trader_action)

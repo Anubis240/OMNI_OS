@@ -57,9 +57,9 @@ def web_search(args: dict, ctx: ToolContext) -> str:
         return "What should I search for?"
 
     if items:
-        question = (f"Compare {', '.join(items)} on {aspect}. Use current facts and "
+        question = (f"How do {', '.join(items)} stack up against each other for {aspect}? Use current facts and "
                     f"concrete numbers, and end with a one-line verdict.")
-        ctx.log(f"[Search] compare {', '.join(items)} ({aspect})")
+        ctx.log(f"[search] comparing {len(items)} things on {aspect}")
     else:
         question = query
         ctx.log(f"[Search] {query}")

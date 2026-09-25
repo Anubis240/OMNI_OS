@@ -7,23 +7,23 @@ def launch_trader(parameters: dict = None, player=None) -> str:
     RULE)."""
     from core import settings_store
     if not settings_store.load_settings()["trader"]["enabled"]:
-        msg = "The trader panel isn't enabled. Sir can turn it on from the Settings panel."
+        msg = "The trader panel isn't enabled. You can turn it on in the Settings panel."
         _log(msg, player)
         return msg
 
     if player is None:
-        msg = "Sir, I don't have a window to open the trader panel in."
+        msg = "There's no window to open the trader panel in."
         _log(msg, player)
         return msg
 
     try:
         player.open_trader_panel()
     except Exception as e:
-        msg = f"Sir, I couldn't open the trader panel: {e}"
+        msg = f"The trader panel didn't open: {e}"
         _log(msg, player)
         return msg
 
-    msg = "Opening the trader panel, sir."
+    msg = "Opening the trader panel."
     _log(msg, player)
     return msg
 

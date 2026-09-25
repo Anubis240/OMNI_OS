@@ -253,19 +253,19 @@ def generate_image(
     prompt = (params.get("prompt") or "").strip()
 
     if not prompt:
-        msg = "Sir, I need a description of the image you want."
+        msg = "Tell me what the image should show and I'll make it."
         _log(msg, player)
         return msg
 
     if speak:
-        speak("Generating that image now, sir — one moment.")
+        speak("Making that image now — one moment.")
 
     status, image_bytes, detail = _generate_via_gemini(prompt)
 
     if status == "safety_blocked":
         print(f"[ImageGen] Gemini blocked this generation: {detail}")
         msg = (
-            "Sir, that image didn't pass Gemini's own safety filter, so I'm not "
+            "That image didn't pass Gemini's own safety filter, so I'm not "
             "showing it — try rephrasing the request."
         )
         _log(msg, player)
@@ -279,7 +279,7 @@ def generate_image(
         print(f"[ImageGen] Gemini unavailable ({detail}) — falling back to pollinations.ai")
         image_bytes, mime_type, err = _generate_via_pollinations(prompt)
         if err:
-            msg = f"Sir, {err}"
+            msg = f"Image generation failed: {err}"
             _log(msg, player)
             return msg
 
@@ -291,7 +291,7 @@ def generate_image(
             print(f"[ImageGen] Local safety check flagged {flagged} — retrying pollinations.ai (attempt {attempt}/{_LOCAL_SAFETY_MAX_ATTEMPTS})")
             image_bytes, mime_type, err = _generate_via_pollinations(prompt)
             if err:
-                msg = f"Sir, {err}"
+                msg = f"Image generation failed: {err}"
                 _log(msg, player)
                 return msg
             is_safe, flagged = _local_safety_check(image_bytes)
@@ -304,7 +304,7 @@ def generate_image(
     if not is_safe:
         print(f"[ImageGen] Local safety check blocked this image: {flagged}")
         msg = (
-            "Sir, the image that came back didn't pass a local safety check, "
+            "The image that came back didn't pass a local safety check, "
             "so I'm not showing it — try rephrasing the request."
         )
         _log(msg, player)
@@ -318,7 +318,7 @@ def generate_image(
     try:
         dest.write_bytes(image_bytes)
     except Exception as e:
-        msg = f"Sir, I generated the image but couldn't display it: {e}"
+        msg = f"The image was made but couldn't be shown: {e}"
         _log(msg, player)
         return msg
 
@@ -338,7 +338,7 @@ def generate_image(
         except Exception:
             pass
 
-    msg = "Here's your image, sir — let me know if you'd like to save it."
+    msg = "Here's your image — say if you'd like it saved."
     _log(msg, player)
     return msg
 

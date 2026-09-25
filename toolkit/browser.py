@@ -317,7 +317,7 @@ def _as_fields(raw) -> dict:
         "engine": S("google (default) | bing | duckduckgo | yandex"),
         "selector": S("CSS selector, if known"),
         "text": S("Visible text to click, or text to type"),
-        "description": S("Label/placeholder/name of the element for smart_click/smart_type"),
+        "description": S("For smart_click/smart_type: the words on or next to the thing to click or type into"),
         "fields": S('fill_form: JSON object of field label (or CSS selector) → value, e.g. {"Email": "a@b.com"}'),
         "direction": S("up | down"),
         "amount": I("Scroll distance in pixels (default 600)"),

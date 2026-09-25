@@ -87,8 +87,11 @@ class OmniUI:
 
     def set_voice_level(self, level: float) -> None:
         """Loudness (0..1) of the reply audio now playing; drives the orb.
-        Called from the audio thread — a plain float write the orb reads
-        on its next frame."""
+
+        The speaker's device callback calls this once per audio block. It
+        only rebinds one attribute on the orb and never touches a Qt object,
+        so it is safe off the GUI thread; the orb samples the value when it
+        next draws."""
         self._win.orb.voice_level = level
 
     def open_trader_panel(self) -> None:

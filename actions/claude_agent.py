@@ -51,7 +51,7 @@ async def claude_agent(parameters=None, player=None, speak=None) -> str:
     ca = settings["claude_agent"]
     if not ca.get("enabled") or not ca.get("cliPath"):
         return (
-            "Claude Code delegation isn't set up yet. Sir can enable it and point it "
+            "Claude Code delegation isn't set up yet. You can enable it and point it "
             "at a Claude CLI install from the Settings panel."
         )
 
@@ -98,6 +98,6 @@ async def claude_agent(parameters=None, player=None, speak=None) -> str:
     except asyncio.TimeoutError:
         return "Claude agent timed out before finishing."
     except FileNotFoundError:
-        return "Sir, the configured Claude CLI path doesn't exist — check it in Settings."
+        return "The Claude CLI path set in Settings doesn't exist — please check it there."
     except Exception as e:
         return f"Claude agent error: {e}"

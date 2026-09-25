@@ -54,7 +54,7 @@ _ASKS = {
     "ocr": "Extract all of the text exactly as written, keeping the layout where it helps.",
     "extract_text": "Extract all of the text exactly as written.",
     "transcribe": "Transcribe all speech word for word. Mark speaker changes if they're clear.",
-    "explain": "Explain what this code does, in plain language.",
+    "explain": "Walk through what this code does for someone who didn't write it.",
     "review": "Review this code: list real bugs and risks first, then worthwhile improvements.",
     "fix": "Return a corrected version of this file that fixes its bugs, then list what you changed.",
     "document": "Return this code with clear docstrings and comments added.",
@@ -224,7 +224,7 @@ def _table(path: Path, action: str, a: dict) -> str | None:
         return f"Saved as {_write_table(frame, path, 'converted', fmt)}"
     column = a.get("column") or ""
     if column not in frame.columns:
-        return f"There's no column {column!r}. Columns: {', '.join(map(str, frame.columns))}"
+        return f"There's no column {column!r}. The columns are {', '.join(map(str, frame.columns))}."
     if action == "sort":
         out = _write_table(frame.sort_values(column, ascending=a.get("ascending", True) is not False),
                            path, f"sorted by {column}", path.suffix)
@@ -342,8 +342,8 @@ def _default_action(kind: str | None) -> str:
     "named file): summarize/describe/analyze/transcribe/OCR/explain/review it, or "
     "transform it — resize/convert/compress images, PDF to Word or text, "
     "filter/sort/convert CSV and Excel, validate/format JSON, trim/convert media, "
-    "list/extract archives. Call it whenever a file was uploaded and the user asks "
-    "for anything about it.",
+    "list/extract archives. It is the way to act on an attached file; with "
+    "file_path left empty it works on the file attached most recently.",
     {
         "file_path": S("Path to the file; leave empty for the file currently uploaded"),
         "action": S("summarize | describe | analyze | ocr | extract_text | transcribe | explain | review | "
@@ -354,10 +354,10 @@ def _default_action(kind: str | None) -> str:
         "format": S("Target format for convert, e.g. png, mp3, xlsx"),
         "width": I("Resize width"), "height": I("Resize height"), "scale": N("Resize factor, e.g. 0.5"),
         "quality": I("Compression quality"),
-        "start": S("Trim start (seconds or HH:MM:SS)"), "end": S("Trim end"),
+        "start": S("Where the kept part begins, as seconds or HH:MM:SS"), "end": S("Where it ends, same format"),
         "timestamp": S("Video frame time HH:MM:SS"),
         "column": S("Table column for filter/sort"), "value": S("Filter value"),
-        "condition": S("Filter test: equals | contains | gt | lt"),
+        "condition": S("How to compare the column with value: equals, contains, gt (greater than) or lt (less than)"),
         "ascending": B("Sort ascending (default true)"),
         "save": B("Also save long answers to a text file (default true)"),
         "destination": S("Folder to extract an archive into"),

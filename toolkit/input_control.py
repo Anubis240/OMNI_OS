@@ -40,7 +40,7 @@ def locate(description: str) -> tuple[int, int] | None:
     shot.save(buf, format="PNG")
     found = llm.ask_json(
         [llm.image_part(buf.getvalue()),
-         f"Find the UI element described as: {description!r}. Reply with JSON "
+         f"On this screenshot, where is {description!r}? Reply with JSON "
          f"{{\"box_2d\": [ymin, xmin, ymax, xmax]}} on a 0-1000 scale, or "
          f"{{\"box_2d\": null}} if it isn't visible."],
         model=llm.FAST,
@@ -189,11 +189,11 @@ def _do(action: str, args: dict) -> str:
         "x": I("Screen X"), "y": I("Screen Y"),
         "keys": S("Key combination, e.g. ctrl+shift+t"),
         "key": S("Single key, e.g. enter"),
-        "direction": S("Scroll or arrow direction: up, down, left or right"),
+        "direction": S("Which way to scroll or move: up, down, left or right"),
         "amount": I("Scroll steps (default 3)"),
         "seconds": N("Seconds to wait (max 30)"),
         "title": S("Part of the window title for focus_window"),
-        "description": S("What the element looks like, for screen_find/screen_click"),
+        "description": S("For screen_find/screen_click: how the thing looks or what it says, e.g. 'blue Send button'"),
         "field": S("For user_data: a saved identity field such as name, email, city"),
         "clear_first": B("smart_type: clear the field first (default true)"),
         "path": S("Where to save a screenshot"),

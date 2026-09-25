@@ -72,7 +72,7 @@ def grab_camera() -> bytes:
     "camera. Speak its answer to the user.",
     {
         "angle": S("'screen' (default) or 'camera'"),
-        "text": S("The question or instruction about the image"),
+        "text": S("What the user wants to know or have done about what's visible"),
     },
     ["text"],
 )

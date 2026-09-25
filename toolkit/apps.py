@@ -79,7 +79,7 @@ def _open_windows(name: str) -> str | None:
     try:
         app = _best_start_app(wanted)
     except Exception as err:
-        print(f"[open_app] Start menu lookup failed: {err}")
+        print(f"[apps] couldn't read the Start menu app list ({err}); trying known install folders")
         app = None
     if app:
         subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app['AppID']}"])
@@ -124,9 +124,9 @@ def launch(name: str) -> str | None:
 
 @register(
     "open_app",
-    "Opens any application on the computer, or a website by its address. Use this "
-    "whenever the user asks to open, launch, or start an app or site — always call "
-    "it rather than just saying it's open.",
+    "Launches a program installed on this PC by its name (found through the Start "
+    "menu and known install folders), or opens a web address in the default browser. "
+    "Nothing opens unless this tool runs.",
     {"app_name": S("The application's name as the user said it, e.g. 'Spotify', 'Chrome', or a site like 'github.com'")},
     ["app_name"],
 )

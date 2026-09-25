@@ -32,12 +32,12 @@ Any non-`gemini_live` backend is eligible as a `delegate_to_agent` sub-agent tar
 `memory/profile.py` (via the `save_memory` tool description in `voice/dispatch.py`):
 | Category | Contains |
 |---|---|
-| `identity` | name, age, birthday, city, job, language, nationality |
-| `preferences` | favorite food/color/music/film/game/sport, hobbies |
-| `projects` | active projects, goals, things being built |
-| `relationships` | friends, family, partner, colleagues |
-| `wishes` | future plans, things to buy, travel dreams |
-| `notes` | habits, schedule, anything else worth remembering |
+| `identity` | who the user is: name, where they live, work, languages |
+| `preferences` | likes and dislikes, tastes, pastimes |
+| `projects` | what they're working on or building |
+| `relationships` | family, friends and others they mention |
+| `wishes` | plans and things they want |
+| `notes` | routines and anything else worth keeping |
 
 ## Integration `auth_type`
 `core/settings_store.py:94-102`:

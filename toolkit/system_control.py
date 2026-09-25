@@ -310,10 +310,11 @@ def _guess_action(description: str) -> tuple[str, object]:
     "One-shot computer commands: volume (up/down/set/mute), brightness, window "
     "management, keyboard shortcuts, typing text, media keys, tabs, zoom, page "
     "navigation, screenshots, dark mode, Wi-Fi, lock screen, display off, restart "
-    "and shutdown. Use for any single computer control command; never agent_task.",
+    "and shutdown. Each call performs one of these directly; several in a row are "
+    "just several calls here — agent_task is for jobs these controls can't do.",
     {
         "action": S(" | ".join(ACTIONS)),
-        "value": S("Optional value: volume/brightness amount, text to type, key name, repeat count"),
+        "value": S("Extra input some actions take: a level for volume or brightness, the text for typing, a key name, or how many times to repeat"),
         "description": S("If no action fits, what the user wants in plain words"),
     },
 )
