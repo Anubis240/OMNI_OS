@@ -912,7 +912,8 @@ def _describe_disconnect(err: BaseException) -> str:
 # silent for ~50 minutes — Listening on, no "You:" line, no error — until a
 # full Windows restart. Omni can't fix a stuck audio stack, but it can say
 # so instead of a silent listen/stop cycle.
-MIC_SILENCE_WARN_S = 5.0   # listening this long with nothing usable from the mic → say so
+MIC_SILENCE_WARN_S = 5.0   # this long with nothing usable from the mic while listening → say so
+MIC_WARN_REPEAT_S = 60.0   # at most one such notice a minute, even if the mic keeps dropping out
 MIC_DIGITAL_SILENCE = 4    # peak |sample| at or below this: the device is delivering zeros
 SPEECH_PEAK = 1500         # peak |sample| above this counts as someone speaking
 SPEECH_GAP_S = 1.5         # a pause this long starts a new spoken message
@@ -928,14 +929,46 @@ def _peak(samples) -> int:
 def _mic_problem(now: float, listening_since: float | None,
                  last_frame_at: float, last_sound_at: float) -> str | None:
     """Why the PC mic isn't being heard while listening, or None if it's fine
-    (or it's too early to tell)."""
+    (or it's too early to tell).
+
+    Looks at the last MIC_SILENCE_WARN_S seconds, not the whole listening
+    session. GEMZ4US (2026-09-27): muting the mic in Windows ~5 s after
+    Listening started never produced the notice — the mic had delivered
+    sound before the mute, and the old check only asked whether it had
+    ever done so since listening began."""
     if listening_since is None or now - listening_since < MIC_SILENCE_WARN_S:
         return None
-    if last_frame_at < listening_since:
+    recent = now - MIC_SILENCE_WARN_S
+    if last_frame_at < recent:
         return "the microphone isn't delivering any audio"
-    if last_sound_at < listening_since:
+    if last_sound_at < recent:
         return "the microphone is delivering only silence"
     return None
+
+
+class _MicWatch:
+    """When to post the "can't hear this PC" notice: once per dropout, and at
+    most once every MIC_WARN_REPEAT_S, however often the mic drops out."""
+
+    def __init__(self):
+        self.listening_since: float | None = None
+        self.warned = False                    # the current dropout has been reported
+        self.last_warned_at = -MIC_WARN_REPEAT_S
+
+    def check(self, now: float, listening: bool, last_frame_at: float, last_sound_at: float) -> str | None:
+        if not listening:
+            self.listening_since, self.warned = None, False
+            return None
+        if self.listening_since is None:
+            self.listening_since = now
+        problem = _mic_problem(now, self.listening_since, last_frame_at, last_sound_at)
+        if not problem:
+            self.warned = False                # sound is back: a later dropout gets its own notice
+            return None
+        if self.warned or now - self.last_warned_at < MIC_WARN_REPEAT_S:
+            return None
+        self.warned, self.last_warned_at = True, now
+        return problem
 
 
 def _voice_lost_in_disconnect(now: float, speech_started_at: float | None,
@@ -1827,22 +1860,15 @@ class JarvisLive:
                 callback=callback,
             ):
                 print("[JARVIS] 🎤 Mic stream open")
-                listening_since: float | None = None
-                warned = False
+                watch = _MicWatch()
                 while True:
                     await asyncio.sleep(0.25)
-                    if not self.ui.always_listening or self.ui.muted or self._phone_active:
-                        listening_since, warned = None, False
-                        continue
-                    now = time.monotonic()
-                    if listening_since is None:
-                        listening_since = now
-                    problem = _mic_problem(now, listening_since, self._mic_frame_at, self._mic_sound_at)
-                    if problem and not warned:
-                        warned = True
+                    listening = self.ui.always_listening and not self.ui.muted and not self._phone_active
+                    problem = watch.check(time.monotonic(), listening, self._mic_frame_at, self._mic_sound_at)
+                    if problem:
                         self.ui.write_log(
-                            f"SYS: Listening, but {problem} — Omni can't hear this PC. Check the input "
-                            "device in Windows Sound settings; if it persists, restart Windows. Typed "
+                            f"SYS: Listening, but {problem} — Omni can't hear this PC. Check that the input "
+                            "device isn't muted in Windows Sound settings; if it persists, restart Windows. Typed "
                             "input and the phone mic still work.")
         except asyncio.CancelledError:
             raise  # normal shutdown/reconnect path — must propagate

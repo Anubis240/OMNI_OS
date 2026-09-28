@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -20,11 +21,11 @@ import webbrowser
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTextBrowser,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
+    QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from trader import chains as chains_mod
@@ -231,6 +232,123 @@ class McpKeySetupOverlay(QWidget):
 
     def set_storage_warning(self, insecure: bool) -> None:
         self._storage_warn_lbl.setVisible(insecure)
+
+
+def _money(value) -> str:
+    return "" if value is None else f"${float(value):,.2f}"
+
+
+def _short_hash(tx_hash) -> str:
+    return f"{tx_hash[:8]}…{tx_hash[-4:]}" if tx_hash else ""
+
+
+def _price(value) -> str:
+    """A per-token price in plain decimals, about five significant digits
+    ($0.000075, not $7.5e-05)."""
+    if value is None:
+        return ""
+    v = float(value)
+    decimals = 4 if v == 0 or abs(v) >= 1 else min(12, 4 - math.floor(math.log10(abs(v))))
+    return "$" + f"{v:,.{decimals}f}".rstrip("0").rstrip(".")
+
+
+class TradeHistoryDialog(QDialog):
+    """Every trade the app closed, PAPER and LIVE, from trade_history.jsonl —
+    kept across RESET LEDGER and restarts (GEMZ4US's persistent-history
+    suggestion, 2026-09-23/27), with totals and a CSV export."""
+
+    COLUMNS = ("Closed (UTC)", "Mode", "Token", "Qty", "Entry", "Exit", "Cost", "Proceeds", "P&L", "Reason", "Tx")
+
+    def __init__(self, engine, C, parent=None):
+        super().__init__(parent)
+        self.engine = engine
+        self.setWindowTitle("Trade history")
+        self.resize(1080, 540)
+        self.setStyleSheet(
+            f"QDialog {{ background: {C.PANEL_BG}; }} "
+            f"QLabel {{ color: {C.TEXT}; background: transparent; }} "
+            f"QTableWidget {{ background: {C.PANEL2_BG}; color: {C.TEXT}; gridline-color: {C.BORDER}; "
+            f"border: 1px solid {C.BORDER_A}; }} "
+            f"QHeaderView::section {{ background: {C.PANEL_BG}; color: {C.TEXT_MED}; border: 1px solid {C.BORDER}; "
+            f"padding: 3px; }} "
+            f"QPushButton {{ color: {C.TEXT}; background: {C.PANEL2_BG}; border: 1px solid {C.BORDER_A}; "
+            f"border-radius: 4px; padding: 4px 14px; }}"
+        )
+        layout = QVBoxLayout(self)
+
+        records = engine.trade_history()
+        self._totals = QLabel(self._totals_text())
+        self._totals.setFont(QFont("Segoe UI", 9))
+        self._totals.setWordWrap(True)
+        layout.addWidget(self._totals)
+
+        table = QTableWidget(0, len(self.COLUMNS))
+        table.setHorizontalHeaderLabels(self.COLUMNS)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+        for record in reversed(records):          # newest first
+            row = table.rowCount()
+            table.insertRow(row)
+            when = (record.get("at") or "")[:19].replace("T", " ")
+            if record.get("type") == "reset":
+                held = len(record.get("livePositions") or []) + len(record.get("detachedLivePositions") or [])
+                note = "— RESET LEDGER —" + (f" ({held} LIVE/HELD ELSEWHERE position(s) were open)" if held else "")
+                cells = [when, note]
+                table.setSpan(row, 1, 1, len(self.COLUMNS) - 1)
+            else:
+                pnl = float(record.get("pnlUsd") or 0)
+                cells = [when, (record.get("mode") or "").upper(), record.get("symbol") or "",
+                         f"{float(record.get('qty') or 0):.6g}", _price(record.get("entryPriceUsd")),
+                         _price(record.get("exitPriceUsd")), _money(record.get("costUsd")),
+                         _money(record.get("proceedsUsd")), f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.2f}",
+                         (record.get("reason") or "") + (" (partial)" if record.get("partial") else ""),
+                         _short_hash(record.get("txHash"))]
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if record.get("type") == "sell" and col == 8:
+                    item.setForeground(QColor(C.GREEN if pnl >= 0 else C.RED))
+                if record.get("type") == "sell" and col == 10 and record.get("txHash"):
+                    item.setToolTip(record["txHash"])
+                table.setItem(row, col, item)
+        layout.addWidget(table)
+
+        buttons = QHBoxLayout()
+        if not any(r.get("type") == "sell" for r in records):
+            empty = QLabel("No closed trades yet. The history starts with v1.12.11.")
+            empty.setFont(QFont("Segoe UI", 8))
+            buttons.addWidget(empty)
+        buttons.addStretch(1)
+        export = QPushButton("Export CSV…")
+        export.clicked.connect(self._export)
+        buttons.addWidget(export)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def _totals_text(self) -> str:
+        parts = []
+        for mode, t in self.engine.history_totals().items():
+            parts.append(f"{mode.upper()}: {t['trades']} closed trade(s), P&L {'+' if t['pnlUsd'] >= 0 else '-'}"
+                         f"${abs(t['pnlUsd']):,.2f} all time, {'+' if t['sinceResetPnlUsd'] >= 0 else '-'}"
+                         f"${abs(t['sinceResetPnlUsd']):,.2f} since the last RESET LEDGER")
+        return ("   ·   ".join(parts) + "\nKept across RESET LEDGER, restarts and updates. "
+                "\"Since the last reset\" should match REALIZED P&L for trades closed from v1.12.11 on.")
+
+    def _export(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export trade history", "omni-os-trade-history.csv",
+                                              "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            count = self.engine.export_history_csv(path)
+        except OSError as err:
+            QMessageBox.warning(self, "Export failed", str(err))
+            return
+        self._totals.setText(self._totals_text() + f"\nExported {count} trade(s) to {path}")
 
 
 class TraderPanel(QWidget):
@@ -742,6 +860,8 @@ class TraderPanel(QWidget):
 
         save_btn = self._make_button("SAVE CONFIG", self._on_save_config)
         col.addWidget(save_btn)
+        history_btn = self._make_button("TRADE HISTORY", self._on_history)
+        col.addWidget(history_btn)
         reset_btn = self._make_button("RESET LEDGER", self._on_reset)
         col.addWidget(reset_btn)
 
@@ -1768,6 +1888,9 @@ class TraderPanel(QWidget):
         else:
             self._append_feed_text("SYS: config saved")
 
+    def _on_history(self):
+        TradeHistoryDialog(self.engine, self._C, self).exec()
+
     def _on_reset(self):
         # Flagged 2026-09-07: this button sits directly next to SAVE CONFIG
         # and used to fire on a single click, wiping the persisted trade
@@ -1793,8 +1916,9 @@ class TraderPanel(QWidget):
         C = self._C
         box = QMessageBox(self)
         box.setWindowTitle("Reset ledger?")
-        text = ("This permanently wipes the trade history, P&L, and watchlist, and stops "
-                "the trader if it's running — there's no undo.")
+        text = ("This permanently wipes the ledger — balance, open positions, P&L and watchlist — and "
+                "stops the trader if it's running. There's no undo. The TRADE HISTORY list of closed "
+                "trades is kept, with a note of this reset and of anything still open.")
         # GEMZ4US, Finding #29 (2026-09-17): this dialog used to say nothing
         # about LIVE — reset() (see engine.py) wipes livePositions along
         # with the paper ledger unconditionally, so a real, currently-open

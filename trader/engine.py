@@ -149,6 +149,7 @@ HELP_TEXT = (
     "resume &mdash; clear a HALT (e.g. Max Drawdown hit) and rebase the drawdown baseline to current equity, without wiping trade history/P&amp;L/watchlist. RESET LEDGER remains the way to fully wipe everything and start over<br>"
     "adopt &lt;TICKER&gt;:0xTOKEN_ADDR[:0xTXHASH] &mdash; live mode only: record a real on-chain holding the ledger never tracked (a fill that fell through a timeout/RPC hiccup, or a trade made outside the app). 0xTOKEN_ADDR is the TOKEN's own contract address (same as in buy/watch) &mdash; NOT your wallet address, even though the point of this command is recognizing your wallet's holding. With a tx hash, cost basis is exact &mdash; read from that transaction's own ETH spent + gas. Without one, cost basis is approximate &mdash; today's market price, not the real entry price<br>"
     "scan / /scan &mdash; scan right now instead of waiting for the rest of the interval<br>"
+    "history &mdash; closed trades and P&amp;L totals, kept across RESET LEDGER and restarts; the TRADE HISTORY button lists them all and exports CSV<br>"
     "help / /help &mdash; show this list<br>"
     # GEMZ4US, Item F (2026-09-20): "asks Seraph directly" reads as if
     # typing a general question here gets it answered — Seraph is the
@@ -210,6 +211,13 @@ class TraderEngine:
 
     def _journal_file(self) -> Path:
         return self._dir / "journal.jsonl"
+
+    def _history_file(self) -> Path:
+        # Closed trades, append-only. Unlike journal.jsonl, RESET LEDGER
+        # never deletes it (GEMZ4US's persistent-history suggestion,
+        # 2026-09-23/27: no list of closed trades to audit realized P&L
+        # against, and a reset or restart lost the record).
+        return self._dir / "trade_history.jsonl"
 
     def _load_config(self) -> dict:
         saved = {}
@@ -676,6 +684,8 @@ class TraderEngine:
             self._emit({"type": "sell", "symbol": position["symbol"], "priceUsd": price_usd, "qty": sell_qty,
                          "proceedsUsd": result["proceedsUsd"], "pnlUsd": round(pnl, 4), "reason": reason,
                          "txHash": result["txHash"], "live": True, "partial": fraction < 1})
+            self._record_trade(position, "live", sell_qty, price_usd, cost_basis_usd, result["proceedsUsd"], pnl,
+                               reason, fraction < 1, result["txHash"])
             self._maybe_auto_unwrap(position.get("chain"))
             return
 
@@ -692,6 +702,99 @@ class TraderEngine:
         self._trades_today()["count"] += 1
         self._emit({"type": "sell", "symbol": position["symbol"], "priceUsd": price_usd, "qty": sell_qty,
                      "proceedsUsd": proceeds, "pnlUsd": round(pnl, 4), "reason": reason, "partial": fraction < 1})
+        self._record_trade(position, "paper", sell_qty, price_usd, cost_basis_usd, proceeds, pnl, reason, fraction < 1)
+
+    # ---------- trade history ----------
+
+    def _append_history(self, record: dict):
+        try:
+            self._history_file().parent.mkdir(parents=True, exist_ok=True)
+            with self._history_file().open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception as err:
+            # The sell itself already happened; losing its history line
+            # must not look like a failed trade.
+            self._emit({"type": "log", "text": f"trade history not saved: {err}"})
+
+    def _record_trade(self, position: dict, mode: str, qty: float, exit_price_usd: float, cost_usd: float,
+                      proceeds_usd: float, pnl_usd: float, reason: str, partial: bool, tx_hash: str | None = None):
+        self._append_history({
+            "type": "sell", "at": _now_iso(), "mode": mode,
+            "symbol": position["symbol"], "address": position.get("address"), "chain": position.get("chain"),
+            "qty": qty, "entryPriceUsd": position.get("entryPriceUsd"), "exitPriceUsd": exit_price_usd,
+            "costUsd": cost_usd, "proceedsUsd": proceeds_usd, "pnlUsd": pnl_usd,
+            "reason": reason, "partial": partial, "openedAt": position.get("openedAt"), "txHash": tx_hash,
+        })
+
+    def trade_history(self) -> list[dict]:
+        """Every closed trade and ledger reset, oldest first."""
+        try:
+            text = self._history_file().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        records = []
+        for line in text.splitlines():
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                continue    # a line cut short by a crash mid-write
+        return records
+
+    def history_totals(self) -> dict:
+        """Per mode: closed trades and P&L, all time and since the last
+        RESET LEDGER. Since the last reset matches REALIZED P&L, for trades
+        closed from v1.12.11 on (the first version that keeps this history)."""
+        totals = {mode: {"trades": 0, "pnlUsd": 0.0, "sinceResetTrades": 0, "sinceResetPnlUsd": 0.0}
+                  for mode in ("paper", "live")}
+        for record in self.trade_history():
+            if record.get("type") == "reset":
+                for t in totals.values():
+                    t["sinceResetTrades"], t["sinceResetPnlUsd"] = 0, 0.0
+            elif record.get("type") == "sell" and record.get("mode") in totals:
+                t = totals[record["mode"]]
+                pnl = float(record.get("pnlUsd") or 0)
+                t["trades"] += 1
+                t["pnlUsd"] += pnl
+                t["sinceResetTrades"] += 1
+                t["sinceResetPnlUsd"] += pnl
+        return totals
+
+    HISTORY_COLUMNS = ("at", "mode", "symbol", "chain", "address", "qty", "entryPriceUsd", "exitPriceUsd",
+                       "costUsd", "proceedsUsd", "pnlUsd", "reason", "partial", "openedAt", "txHash")
+
+    def export_history_csv(self, path) -> int:
+        """Writes every closed trade to a CSV file; ledger resets appear as
+        rows with mode "reset". Returns the number of trades written."""
+        import csv
+        trades = 0
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(self.HISTORY_COLUMNS)
+            for record in self.trade_history():
+                if record.get("type") == "reset":
+                    writer.writerow([record.get("at"), "reset"] + [""] * (len(self.HISTORY_COLUMNS) - 2))
+                elif record.get("type") == "sell":
+                    writer.writerow(["" if record.get(c) is None else record.get(c) for c in self.HISTORY_COLUMNS])
+                    trades += 1
+        return trades
+
+    def history_summary(self, n: int = 10) -> dict:
+        sells = [r for r in self.trade_history() if r.get("type") == "sell"]
+        if not sells:
+            return {"ok": True, "message": "no closed trades recorded yet &mdash; the history starts with v1.12.11 "
+                                           "and keeps every sell, even across RESET LEDGER and restarts"}
+        lines = []
+        for mode, t in self.history_totals().items():
+            if t["trades"]:
+                lines.append(f"{mode.upper()}: {t['trades']} closed, P&amp;L ${t['pnlUsd']:+.2f} all time, "
+                             f"${t['sinceResetPnlUsd']:+.2f} since the last reset")
+        lines.append(f"last {min(n, len(sells))}:")
+        for r in sells[-n:]:
+            lines.append(f"{r['at'][:16].replace('T', ' ')} UTC &middot; {r['mode'].upper()} &middot; {r['symbol']} &middot; "
+                         f"qty {r['qty']:.4g} &middot; ${r['pnlUsd']:+.2f} &middot; {r.get('reason') or ''}"
+                         + (" (partial)" if r.get("partial") else ""))
+        lines.append("the TRADE HISTORY button shows every trade and exports CSV")
+        return {"ok": True, "message": "<br>".join(lines)}
 
     def _maybe_auto_unwrap(self, chain: str | None):
         """Called after every successful live sell — proceeds always land
@@ -1286,6 +1389,16 @@ class TraderEngine:
         self.stop()
         if self.armed_live:
             self.disarm_live("ledger reset")
+        # The history survives the reset; note it there, with whatever was
+        # still open, so HELD ELSEWHERE entries and open positions aren't
+        # lost without a trace either.
+        keep = ("symbol", "address", "chain", "qty", "entryPriceUsd", "costUsd", "openedAt", "txHash", "wallet")
+        self._append_history({
+            "type": "reset", "at": _now_iso(),
+            "realizedPnlUsd": self.state.get("realizedPnlUsd"), "liveRealizedPnlUsd": self.state.get("liveRealizedPnlUsd"),
+            **{key: [{k: p.get(k) for k in keep if p.get(k) is not None} for p in self.state.get(key) or []]
+               for key in ("positions", "livePositions", "detachedLivePositions")},
+        })
         try:
             self._state_file().unlink()
         except Exception:
@@ -1688,6 +1801,8 @@ class TraderEngine:
             return self.sync_positions()
         if re.match(r"^(resume|clear halt|unhalt)$", lower):
             return self.clear_halt()
+        if re.match(r"^/?(history|trade history|trades)$", lower):
+            return self.history_summary()
 
         m = re.match(r"^unwrap(?:\s+([a-z0-9]+))?$", lower)
         if m:
