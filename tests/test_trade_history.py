@@ -15,8 +15,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from trader import engine as engine_mod
-from trader import live as live_mod
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt6.QtWidgets import QApplication, QTableWidget  # noqa: E402
+
+from trader import engine as engine_mod  # noqa: E402
+from trader import live as live_mod  # noqa: E402
+
+_app = QApplication.instance() or QApplication([])
 
 TOKEN = "0x1111111111111111111111111111111111111111"
 
@@ -121,7 +127,6 @@ class TradeHistoryTests(unittest.TestCase):
 
 class PriceFormatTests(unittest.TestCase):
     def test_plain_decimals(self):
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from trader_panel import _price
         self.assertEqual(_price(7.5e-05), "$0.000075")
         self.assertEqual(_price(0.78022), "$0.78022")
@@ -132,7 +137,6 @@ class PriceFormatTests(unittest.TestCase):
 
 class TradeHistoryDialogTests(unittest.TestCase):
     def setUp(self):
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         self._tmp = Path(tempfile.mkdtemp())
         self._patcher = patch.object(engine_mod, "get_data_dir", return_value=self._tmp)
         self._patcher.start()
@@ -143,8 +147,6 @@ class TradeHistoryDialogTests(unittest.TestCase):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_dialog_lists_trades_newest_first_with_resets(self):
-        from PyQt6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication([])
         from ui import C
         from trader_panel import TradeHistoryDialog
 
@@ -153,13 +155,13 @@ class TradeHistoryDialogTests(unittest.TestCase):
         self.engine._execute_sell(position, 0.2, "take-profit")
         self.engine.reset()
         dialog = TradeHistoryDialog(self.engine, C)
-        table = dialog.findChild(__import__("PyQt6.QtWidgets", fromlist=["QTableWidget"]).QTableWidget)
+        table = dialog.findChild(QTableWidget)
         self.assertEqual(table.rowCount(), 2)
         self.assertIn("RESET LEDGER", table.item(0, 1).text())
         self.assertEqual(table.item(1, 2).text(), "PEPE")
         self.assertIn("PAPER: 1 closed", dialog._totals.text())
-        dialog.close()
-        app.processEvents()
+        dialog.deleteLater()        # freed by Qt, while the app is running, not by garbage collection
+        _app.processEvents()
 
 
 if __name__ == "__main__":
