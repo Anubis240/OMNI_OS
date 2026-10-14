@@ -12,12 +12,20 @@ _append_gate_feed_line) instead — this file tests the two pure,
 QApplication-free pieces of that: _format_event now returns body text
 only (no timestamp), and _feed_timestamp's own format."""
 
+import os
 import re
 import time
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from trader_panel import TraderPanel
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import trader_panel
+from trader import seraph_auth
+from trader_panel import McpKeySetupOverlay, TraderPanel
 
 
 class FormatEventBodyOnlyTests(unittest.TestCase):
@@ -37,6 +45,16 @@ class FormatEventBodyOnlyTests(unittest.TestCase):
         text = TraderPanel._format_event(event)
         self.assertIn("BUY LIT qty=0.8070", text)
         self.assertIn("cost=$6.89", text)
+
+    def test_gate_line_shows_pool_resolution(self):
+        note = "(pool 0x79dd…fe72 → token KNDX 0x7ca5…efc1)"
+        text = TraderPanel._format_event({"type": "gate", "symbol": "KONDUX", "approved": True,
+                                          "resolution": note, "reason": "approved (level=low, score=10)"})
+        self.assertEqual(text, f"GATE [APPROVED] KONDUX {note} — approved (level=low, score=10)")
+
+    def test_gate_line_without_resolution_is_unchanged(self):
+        text = TraderPanel._format_event({"type": "gate", "symbol": "LIT", "approved": False, "reason": "blocked"})
+        self.assertEqual(text, "GATE [BLOCKED] LIT — blocked")
 
 
 class FeedTimestampTests(unittest.TestCase):
@@ -113,6 +131,108 @@ class SeraphLoginErrorTextTests(unittest.TestCase):
         text = TraderPanel._seraph_login_error_text(None, None)
         self.assertIsInstance(text, str)
         self.assertTrue(text.strip())
+
+
+class SeraphLoginFailureIsVisibleTests(unittest.TestCase):
+    """A failed "SIGN IN WITH SERAPH" must say why, on the card and in the feed.
+
+    User report: the click "failed silently and did not open the login
+    screen" — production Seraph refused the client registration with
+    HTTP 400 "redirect_uri not allowed", the browser was never opened, and
+    the card only showed a dim, generic "try signing in once more"."""
+
+    REASON = "Seraph answered HTTP 400: redirect_uri not allowed"
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        from ui import C
+        cls.app = QApplication.instance() or QApplication([])
+        cls.theme = C
+
+    def make_host(self):
+        overlay = McpKeySetupOverlay(self.theme)
+        self.addCleanup(overlay.deleteLater)
+        feed = []
+        host = SimpleNamespace(_login_in_flight=True, _mcp_key_overlay=overlay,
+                               _append_feed_text=feed.append)
+        host._on_seraph_login_done = lambda result: TraderPanel._on_seraph_login_done(host, result)
+        return host, overlay, feed
+
+    def assert_reported(self, overlay, feed, fragment, *, as_error=True):
+        label = overlay._status_lbl
+        self.assertFalse(label.isHidden())
+        self.assertIn(fragment, label.text())
+        self.assertEqual(self.theme.RED in label.styleSheet(), as_error)
+        self.assertTrue(overlay._sign_in_btn.isEnabled())
+        self.assertTrue(feed and fragment in feed[-1])
+
+    def test_registration_rejection_shows_the_reason_in_danger_colour(self):
+        host, overlay, feed = self.make_host()
+        overlay.set_waiting(True)
+        result = seraph_auth.AuthResult(ok=False, error="registration_failed", error_description=self.REASON)
+        with self.assertLogs("trader_panel", "WARNING"):
+            host._on_seraph_login_done(result)
+        self.assertFalse(host._login_in_flight)
+        self.assert_reported(overlay, feed, "redirect_uri not allowed")
+        self.assertIn("API key", overlay._status_lbl.text())
+        self.assertNotIn("Try signing in once more", overlay._status_lbl.text())
+
+    def test_worker_exception_text_is_not_swallowed(self):
+        host, overlay, feed = self.make_host()
+        host._on_seraph_login_done({"ok": False, "message": "loopback bind failed"})
+        self.assert_reported(overlay, feed, "loopback bind failed")
+
+    def test_cancel_is_reported_but_not_as_an_error(self):
+        host, overlay, feed = self.make_host()
+        host._on_seraph_login_done(seraph_auth.AuthResult(ok=False, error="cancelled"))
+        self.assert_reported(overlay, feed, "cancelled", as_error=False)
+
+    def test_status_text_can_be_selected_to_copy_a_link(self):
+        from PyQt6.QtCore import Qt
+        _host, overlay, _feed = self.make_host()
+        flags = overlay._status_lbl.textInteractionFlags()
+        self.assertTrue(flags & Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def test_progress_after_a_failure_returns_to_the_normal_colour(self):
+        _host, overlay, _feed = self.make_host()
+        overlay.set_status("failed", error=True)
+        overlay.set_status("Starting…")
+        self.assertNotIn(self.theme.RED, overlay._status_lbl.styleSheet())
+
+    def test_sign_in_click_with_rejected_registration_end_to_end(self):
+        """Real overlay click -> _start_seraph_login -> real SeraphAuth.login."""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        storage = {seraph_auth.SETTINGS_KEY: {}}
+
+        def update(mutate):
+            mutate(storage)
+
+        metadata = {name: seraph_auth.SERAPH_ISSUER + path
+                    for name, path in seraph_auth.DEFAULT_ENDPOINTS.items()}
+        metadata["issuer"] = seraph_auth.SERAPH_ISSUER
+        session = Mock(spec=["get", "post"])
+        session.get.return_value = Mock(status_code=200, json=Mock(return_value=metadata))
+        session.post.return_value = Mock(status_code=400,
+                                         json=Mock(return_value={"error": "redirect_uri not allowed"}))
+        opener = Mock(return_value=True)
+        auth = seraph_auth.SeraphAuth(session=session, opener=opener)
+        host, overlay, feed = self.make_host()
+        host._login_in_flight = False
+        host._run_on_gui_sig = SimpleNamespace(emit=lambda fn: fn())
+        host._background = lambda work, then: then(work())
+        overlay.sign_in_requested.connect(lambda: TraderPanel._start_seraph_login(host))
+        with patch.object(trader_panel, "get_default_auth", return_value=auth), \
+                patch.object(seraph_auth.settings_store, "load_settings",
+                             side_effect=lambda: deepcopy(storage)), \
+                patch.object(seraph_auth.settings_store, "update_settings", side_effect=update), \
+                patch.object(seraph_auth, "_LoopbackListener",
+                             side_effect=AssertionError("no listener before registration")):
+            QTest.mouseClick(overlay._sign_in_btn, Qt.MouseButton.LeftButton)
+        opener.assert_not_called()
+        self.assertFalse(host._login_in_flight)
+        self.assert_reported(overlay, feed, self.REASON)
 
 
 class WalletBlockTextTests(unittest.TestCase):

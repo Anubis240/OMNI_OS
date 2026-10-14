@@ -62,6 +62,23 @@ def _pkce_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
 
 
+def _registration_rejection(response) -> str:
+    """One short line saying why Seraph refused a client registration.
+
+    The server's error text is public (no credential is involved yet), so it
+    is shown to the user instead of a generic "try again" that cannot help."""
+    detail = None
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        body = None
+    if isinstance(body, dict):
+        detail = next((body[name] for name in ("error_description", "error")
+                       if isinstance(body.get(name), str) and body[name].strip()), None)
+    reason = f"Seraph answered HTTP {response.status_code}"
+    return f"{reason}: {' '.join(detail.split())[:120]}" if detail else reason
+
+
 class _LoopbackListener:
     """One-shot callback receiver. Wait without holding the SeraphAuth lock."""
 
@@ -186,6 +203,7 @@ class SeraphAuth:
         self._last_error: str | None = None
         # The future login implementation must reset this before each flow.
         self._registrations_this_login = 0
+        self._registration_error: str | None = None  # why the last registration failed
         # Separate flow locks serialize operations without blocking status/UI waits.
         self._login_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
@@ -210,13 +228,15 @@ class SeraphAuth:
             notify("Checking Seraph configuration…")
             with self._lock:
                 self._registrations_this_login = 0
+                self._registration_error = None
             try:
                 meta = self._discover_metadata()
             except Exception:
                 return AuthResult(ok=False, error="metadata_error")
             client_id = self._ensure_client(f"http://{LOOPBACK_HOST}{CALLBACK_PATH}")
             if not client_id:
-                return AuthResult(ok=False, error="registration_failed")
+                return AuthResult(ok=False, error="registration_failed",
+                                  error_description=self._registration_error)
             verifier, challenge = self._pkce_pair()
             state = self._new_state()
             listener = _LoopbackListener(state)
@@ -570,12 +590,20 @@ class SeraphAuth:
                     "response_types": ["code"],
                 }, timeout=HTTP_TIMEOUT_S, allow_redirects=False)
                 if response.status_code != 201:
+                    self._registration_error = _registration_rejection(response)
+                    logger.warning("oauth_registration_rejected status=%s", response.status_code)
                     return None
                 data = response.json()
                 client_id = data.get("client_id") if isinstance(data, dict) else None
                 if not isinstance(client_id, str) or not CLIENT_ID_RE.fullmatch(client_id):
+                    self._registration_error = "Seraph returned an unusable client registration"
+                    logger.warning("oauth_registration_invalid_client_id")
                     return None
-            except (requests.RequestException, ValueError, TypeError):
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                # requests' JSONDecodeError is also a ValueError: a bad body, not a bad network.
+                self._registration_error = ("Seraph returned an unusable client registration"
+                                            if isinstance(exc, (ValueError, TypeError))
+                                            else "Seraph could not be reached")
                 logger.warning("oauth_registration_failed")
                 return None
             self._persist(lambda block: block.update(

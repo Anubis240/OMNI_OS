@@ -340,6 +340,51 @@ class LoginTests(AuthTestCase):
         self.assertIsNone(self.auth._active_listener)
         self.assert_no_credentials()
 
+    def test_rejected_registration_reports_the_server_reason(self):
+        # Production Seraph answered exactly this to the loopback redirect URI;
+        # the reason used to be dropped, so the user saw only "try again".
+        def post(url, **kwargs):
+            if url.endswith("/register"):
+                return response(400, {"error": "redirect_uri not allowed"})
+            raise AssertionError("login must stop at the rejected registration: " + url)
+        self.session.post.side_effect = post
+        with self.assertLogs("trader.seraph_auth", "WARNING") as logs:
+            result = self.auth.login()
+        self.assertEqual(result.error, "registration_failed")
+        self.assertEqual(result.error_description, "Seraph answered HTTP 400: redirect_uri not allowed")
+        self.assertIn("oauth_registration_rejected status=400", "\n".join(logs.output))
+        self.opener.assert_not_called()
+        self.listener_factory.assert_not_called()
+        self.assertIsNone(self.block.get("client_id"))
+
+    def test_registration_reason_is_one_bounded_line_and_prefers_description(self):
+        long_text = "first line\n" + "x" * 500
+        self.session.post.side_effect = lambda *args, **kwargs: response(
+            400, {"error": "invalid_redirect_uri", "error_description": long_text})
+        description = self.auth.login().error_description
+        self.assertTrue(description.startswith("Seraph answered HTTP 400: first line x"))
+        self.assertNotIn("\n", description)
+        self.assertLessEqual(len(description), len("Seraph answered HTTP 400: ") + 120)
+
+    def test_registration_without_json_body_still_reports_the_status(self):
+        rejected = response(503)
+        rejected.json.side_effect = ValueError("not json")
+        self.session.post.side_effect = lambda *args, **kwargs: rejected
+        self.assertEqual(self.auth.login().error_description, "Seraph answered HTTP 503")
+
+    def test_registration_network_error_is_described(self):
+        self.session.post.side_effect = requests.ConnectionError("offline")
+        result = self.auth.login()
+        self.assertEqual((result.error, result.error_description),
+                         ("registration_failed", "Seraph could not be reached"))
+
+    def test_registration_reason_does_not_leak_into_the_next_login(self):
+        self.session.post.side_effect = lambda *args, **kwargs: response(400, {"error": "nope"})
+        self.assertIn("nope", self.auth.login().error_description)
+        self.session.post.side_effect = self.post_response
+        self.assertTrue(self.auth.login().ok)
+        self.assertIsNone(self.auth._registration_error)
+
     def test_browser_failure_includes_authorize_url(self):
         self.opener.return_value = False
         result = self.auth.login()

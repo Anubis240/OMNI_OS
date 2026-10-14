@@ -74,7 +74,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
       - name: Full test suite without application startup or credentials
         run: |
-          & $env:TEST_PYTHON -m unittest discover -s tests -v
+          & $env:TEST_PYTHON scripts/run_tests.py
           if ($LASTEXITCODE -ne 0) { throw 'Test suite failed' }
       - name: Workflow lint (pinned actionlint image, Ubuntu only)
         if: runner.os == 'Linux'

@@ -127,6 +127,8 @@ class McpKeySetupOverlay(QWidget):
 
         self._status_lbl = _lbl("", 8, color=C.TEXT_DIM)
         self._status_lbl.setWordWrap(True)
+        # Selectable: a failure may carry a reason the user needs to copy.
+        self._status_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self._status_lbl)
         self._status_lbl.hide()
 
@@ -222,7 +224,9 @@ class McpKeySetupOverlay(QWidget):
             return
         self.done.emit(key)
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, error: bool = False) -> None:
+        # A failure is drawn in the alert colour: dim grey text read as "nothing happened".
+        self._status_lbl.setStyleSheet(f"color: {self._C.RED if error else self._C.TEXT_DIM}; background: transparent;")
         self._status_lbl.setText(text)
         self._status_lbl.setVisible(bool(text))
 
@@ -486,12 +490,15 @@ class TraderPanel(QWidget):
             self._refresh_seraph_account_row()
             self._refresh_wallet_block()
         else:
-            message = TraderPanel._seraph_login_error_text(
-                getattr(result, "error", None), getattr(result, "error_description", None)
-            )
+            error = getattr(result, "error", None)
+            description = getattr(result, "error_description", None)
+            if isinstance(result, dict):  # _background turned an exception into a dict
+                description = result.get("message") or None
+            message = TraderPanel._seraph_login_error_text(error, description)
+            logging.getLogger(__name__).warning("Seraph sign-in failed (%s)", error or "unexpected error")
             if self._mcp_key_overlay is not None:
                 self._mcp_key_overlay.set_waiting(False)
-                self._mcp_key_overlay.set_status(message)
+                self._mcp_key_overlay.set_status(message, error=error != "cancelled")
             self._append_feed_text("SYS: " + message)
 
     def _set_panel_enabled(self, enabled: bool) -> None:
@@ -609,7 +616,10 @@ class TraderPanel(QWidget):
             return f"SYS: {event.get('text', '')}"
         if etype == "gate":
             verdict = "APPROVED" if event.get("approved") else "BLOCKED"
-            return f"GATE [{verdict}] {event.get('symbol')} — {event.get('reason', '')}"
+            # "(pool 0x79dd…fe72 → token KNDX 0x7ca5…efc1)" when the entry
+            # was a pool address that the engine resolved to its token.
+            resolution = f" {event['resolution']}" if event.get("resolution") else ""
+            return f"GATE [{verdict}] {event.get('symbol')}{resolution} — {event.get('reason', '')}"
         if etype == "buy":
             live = " (LIVE)" if event.get("live") else ""
             tx = event.get("txHash")
@@ -1232,7 +1242,7 @@ class TraderPanel(QWidget):
             "network_error": "Could not reach Seraph. Check your connection and try again.",
             "metadata_error": "Could not reach Seraph. Check your connection and try again.",
             "invalid_client": "This device needs to register with Seraph again. Try signing in once more.",
-            "registration_failed": "This device needs to register with Seraph again. Try signing in once more.",
+            "registration_failed": "Seraph did not accept this app's sign-in registration. Use an API key instead.",
             "token_exchange_failed": "Seraph refused the sign-in. Try again.",
             "api_key_mint_failed": "Signed in, but the Seraph API key could not be created. Try again.",
             "insufficient_scope": "Your Seraph account is missing permissions for this device. Contact support.",

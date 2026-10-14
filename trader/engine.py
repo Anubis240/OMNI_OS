@@ -1011,6 +1011,25 @@ class TraderEngine:
                 basis = (pos["costUsd"] - self.config["gasUsd"]) / pos["qty"]
         return (price_usd - basis) / basis * 100
 
+    def _record_resolved_scan_token(self, token: dict, snap: dict):
+        """A scanned entry's address was a pool that marketdata resolved to
+        its token. Say so in the feed and, for a watchlist entry, save the
+        token address in its place: later scans then cost one GeckoTerminal
+        request instead of three, and the discovery dedupe (which compares
+        addresses) matches the token. Done here rather than in add_watch,
+        which runs on the Qt GUI thread and must stay free of network calls."""
+        self._announce_resolution(token["symbol"], snap["resolution"])
+        if token.get("source") != "watchlist":
+            return
+        for entry in self.config["watchlist"]:
+            if entry["symbol"] == token["symbol"] and entry["address"].lower() == token["address"].lower():
+                entry["address"] = snap["address"]
+                self._save_config()
+                self._emit({"type": "log", "text": f"watchlist {token['symbol']}: saved token address {snap['address']} "
+                                                    f"in place of pool {token['address']}"})
+                self._emit({"type": "watchlist", "watchlist": self.config["watchlist"]})
+                return
+
     def _cycle(self):
         self._trades_today()
 
@@ -1108,9 +1127,13 @@ class TraderEngine:
             if not self.running:
                 return
             try:
-                snaps.append(market.snapshot(token, self.config["candleTimeframe"], self.config["candleLimit"]))
+                snap = market.snapshot(token, self.config["candleTimeframe"], self.config["candleLimit"])
             except Exception as err:
                 self._emit({"type": "log", "text": f"skip {token['symbol']}: {err}"})
+            else:
+                snaps.append(snap)
+                if snap.get("resolution"):
+                    self._record_resolved_scan_token(token, snap)
             time.sleep(4)
         if not snaps:
             self._emit({"type": "log", "text": "no market data this cycle"})
@@ -1186,8 +1209,9 @@ class TraderEngine:
                     self._emit({"type": "log", "text": f"live execution not enabled for {chains_mod.resolve(token['chain'])['name']} — skipping {token['symbol']}"})
                     continue
                 verdict = self._risk_check(token)
+                gate_extra = {"resolution": market.resolution_note(snap["resolution"])} if snap.get("resolution") else {}
                 self._emit({"type": "gate", "symbol": cand["symbol"], "address": snap["address"], "chain": token["chain"],
-                             "signalScore": cand["score"], "source": snap.get("source"), **verdict})
+                             "signalScore": cand["score"], "source": snap.get("source"), **gate_extra, **verdict})
                 if not verdict["approved"]:
                     continue
                 try:
@@ -1524,6 +1548,24 @@ class TraderEngine:
         except Exception as err:
             return {"ok": False, "message": f"take profit on {symbol} failed: {err}"}
 
+    def _announce_resolution(self, symbol: str, resolution: dict | None) -> tuple[str, str]:
+        """A pool/pair address was resolved to its token (marketdata). Put
+        that in the feed, the only place a windowed build can show it, and
+        return (" (pool … → token SYM …)", symbol-mismatch warning) for the
+        reply. The symbol the user typed is a free label, so a different
+        on-chain symbol only warns (KONDUX vs KNDX is a real case)."""
+        if not resolution:
+            return "", ""
+        note = f" {market.resolution_note(resolution)}"
+        found = resolution.get("symbol")
+        warning = ""
+        if found and found.upper() != symbol.upper():
+            warning = (f" ⚠ you entered {symbol}, but GeckoTerminal lists this token as {found} — "
+                       f"check it is the token you meant")
+        self._emit({"type": "log", "text": f"{symbol}{note}: {resolution['pool']} is a pool, so its token "
+                                            f"{resolution['token']} is used{warning}"})
+        return note, warning
+
     def buy_one(self, text: str) -> dict:
         raw = (text or "").strip()
         m = re.match(r"^(.*?)\s+force$", raw, re.I)
@@ -1537,16 +1579,21 @@ class TraderEngine:
         already_held = any(p["symbol"] == symbol for p in self._positions())
         if not already_held and len(self._positions()) >= self.config["maxOpenPositions"]:
             return {"ok": False, "message": f"at max open positions ({self.config['maxOpenPositions']}) — sell something first"}
-        token = {"symbol": symbol, "chain": chain, "address": address}
         try:
-            price_usd = market.current_price(address, chain)
+            # current_quote resolves a pool/pair address to its token, so the
+            # risk check, swap and ledger all reference the TOKEN.
+            quote = market.current_quote(address, chain)
+            price_usd, address = quote["priceUsd"], quote["address"]
+            token = {"symbol": symbol, "chain": chain, "address": address}
+            note, warning = self._announce_resolution(symbol, quote.get("resolution"))
+            gate_extra = {"resolution": note.strip()} if note else {}
             if bypass_gate:
                 verdict = {"approved": True, "level": None, "score": None}
-                self._emit({"type": "gate", "symbol": symbol, "address": address, "chain": chain, "source": "manual",
+                self._emit({"type": "gate", "symbol": symbol, "address": address, "chain": chain, "source": "manual", **gate_extra,
                              "approved": True, "bypassed": True, "reason": "BYPASSED — user overrode the local token risk check; the Seraph transaction gate still applies"})
             else:
                 verdict = self._risk_check(token)
-                self._emit({"type": "gate", "symbol": symbol, "address": address, "chain": chain, "source": "manual", **verdict})
+                self._emit({"type": "gate", "symbol": symbol, "address": address, "chain": chain, "source": "manual", **gate_extra, **verdict})
                 if not verdict["approved"]:
                     # The fail-closed/unavailable reason already says
                     # "Seraph MCP unavailable: ..." itself (see
@@ -1556,12 +1603,14 @@ class TraderEngine:
                     # already start with it.
                     reason = verdict["reason"]
                     prefix = "" if reason.lower().startswith("seraph") else "Seraph "
-                    return {"ok": False, "message": f"{prefix}{reason}"}
+                    return {"ok": False, "message": f"{prefix}{reason}{note}{warning}"}
             self._execute_buy(token, price_usd, {"riskLevel": verdict["level"], "riskScore": verdict["score"], "source": "manual", "bypassGate": bypass_gate})
             self._persist()
             self._emit({"type": "state", **self.public_state()})
             verb = "topped up" if already_held else "bought"
-            return {"ok": True, "message": f"{verb} {symbol} @ ${price_usd}" + (" — local risk check bypassed (Seraph gate still enforced)" if bypass_gate else "")}
+            return {"ok": True, "message": f"{verb} {symbol} @ ${price_usd}{note}"
+                                           + (" — local risk check bypassed (Seraph gate still enforced)" if bypass_gate else "")
+                                           + warning}
         except Exception as err:
             return {"ok": False, "message": f"buy {symbol} failed: {err}"}
 
@@ -1622,15 +1671,29 @@ class TraderEngine:
             detached = next((p for p in self.state["detachedLivePositions"]
                              if p["address"].lower() == address.lower() and (p.get("chain") or chains_mod.DEFAULT_CHAIN) == chain
                              and new_qty <= p["qty"] * 1.01), None)
+
+        # A pool/pair address is not a token. For a V2 pair the wallet can
+        # hold its LP token, which would otherwise be booked at the
+        # underlying token's price and later "sold" as LP→WETH. One lookup
+        # serves this check, the no-tx cost basis and the warning below.
+        # Other lookup failures don't block: a tx-hash adopt never needed a
+        # market price.
+        try:
+            market_price_usd, price_err = market.current_price(address, chain, allow_pool=False), None
+        except market.PoolAddressError as err:
+            return {"ok": False, "message": f"adopt {symbol} failed: {err}"}
+        except Exception as err:
+            market_price_usd, price_err = None, err
+
+        if not tx_hash:
             if detached:
                 entry_price_usd = detached["entryPriceUsd"]
                 fill_price_usd = detached.get("fillPriceUsd")
                 basis_note = "original entry price, carried over from the HELD ELSEWHERE entry"
             else:
-                try:
-                    entry_price_usd = market.current_price(address, chain)
-                except Exception as err:
-                    return {"ok": False, "message": f"adopt {symbol} failed: could not fetch a market price for cost basis: {err}"}
+                if market_price_usd is None:
+                    return {"ok": False, "message": f"adopt {symbol} failed: could not fetch a market price for cost basis: {price_err}"}
+                entry_price_usd = market_price_usd
                 fill_price_usd = entry_price_usd
                 basis_note = "approximate — no tx hash given, priced at today's market rate, not the real entry price"
             cost_usd = new_qty * entry_price_usd
@@ -1667,7 +1730,9 @@ class TraderEngine:
         warning = ""
         try:
             final_pos = next(p for p in self.state["livePositions"] if p["symbol"] == symbol)
-            current_price_usd = market.current_price(address, chain)
+            if market_price_usd is None:
+                raise RuntimeError(f"no market price: {price_err}")
+            current_price_usd = market_price_usd
             move_pct = (current_price_usd - final_pos["entryPriceUsd"]) / final_pos["entryPriceUsd"] * 100
             drop_pct = self._stop_loss_move_pct(final_pos, current_price_usd)
             if drop_pct <= -self.config["stopLossPct"]:

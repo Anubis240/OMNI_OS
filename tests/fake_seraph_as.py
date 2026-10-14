@@ -100,7 +100,15 @@ class FakeSeraph:
         self._thread: threading.Thread | None = None
         self._stats = dict.fromkeys(("registrations", "token_calls", "refreshes",
                                     "mints", "deletes", "gates", "executes",
-                                    "privy_calls", "mcp_401s"), 0)
+                                    "privy_calls", "mcp_401s", "mcp_requests",
+                                    "mcp_initializes", "mcp_404s", "mcp_410s",
+                                    "mcp_forced_failures", "mcp_400s",
+                                    "mcp_tool_executions"), 0)
+        # MCP session registry: session id -> expired flag. Knobs below are inert
+        # unless a test drives them through the /_test/*mcp* control routes.
+        self._mcp_sessions: dict[str, bool] = {}
+        self._mcp_expire_next_sessions = 0
+        self._mcp_fail_next: dict = {"status": 500, "count": 0}
         self._clients: dict[str, dict] = {}
         self._codes: dict[str, dict] = {}
         self._refresh_tokens: dict[str, dict] = {}
@@ -811,8 +819,21 @@ class FakeSeraph:
 
     # Fake guardian-proxy: JSON responses on the Streamable HTTP endpoint.
     def _install_mcp_routes(self) -> None:
-        names = ("guardian_pretrade_check", "guardian_pretrade_result",
-                 "guardian_execute", "guardian_wallet_status", "crypto_get_price")
+        base_names = ("guardian_pretrade_check", "guardian_pretrade_result",
+                      "guardian_execute", "guardian_wallet_status", "crypto_get_price")
+        self._check_token_tool = False
+
+        def tool_names() -> tuple:
+            # guardian_check_token is opt-in so the default catalogue stays at five.
+            return base_names + (("guardian_check_token",) if self._check_token_tool else ())
+
+        @self.app.post("/_test/check_token_tool")
+        async def check_token_tool(request: Request):
+            data = await request.json()
+            if type(data.get("enabled")) is not bool:
+                return self._error("invalid_request")
+            self._check_token_tool = data["enabled"]
+            return {"enabled": self._check_token_tool}
 
         @self.app.post("/_test/pretrade_pending")
         async def pretrade_pending(request: Request):
@@ -821,6 +842,51 @@ class FakeSeraph:
                 return self._error("invalid_request")
             self._pretrade_pending = data["enabled"]
             return {"enabled": self._pretrade_pending}
+
+        def target_sessions(data) -> list[str] | None:
+            sid = data.get("sessionId") if isinstance(data, dict) else None
+            if sid is None:
+                return list(self._mcp_sessions)
+            return [sid] if isinstance(sid, str) and sid in self._mcp_sessions else None
+
+        @self.app.post("/_test/expire_mcp_sessions")
+        async def expire_mcp_sessions(request: Request):
+            # Without "sessionId" every known session expires (410 afterwards).
+            targets = target_sessions(await request.json())
+            if targets is None:
+                return self._error("session_not_found", 404)
+            for sid in targets:
+                self._mcp_sessions[sid] = True
+            return {"expired": len(targets)}
+
+        @self.app.post("/_test/forget_mcp_sessions")
+        async def forget_mcp_sessions(request: Request):
+            # Forgotten ids become unknown to the server, so they answer 404.
+            targets = target_sessions(await request.json())
+            if targets is None:
+                return self._error("session_not_found", 404)
+            for sid in targets:
+                del self._mcp_sessions[sid]
+            return {"forgotten": len(targets)}
+
+        @self.app.post("/_test/expire_next_mcp_sessions")
+        async def expire_next_mcp_sessions(request: Request):
+            # One-shot: the next `count` sessions issued by initialize are born
+            # expired, so a test can force 410 on the retry as well.
+            data = await request.json()
+            if type(data.get("count")) is not int or data["count"] < 0:
+                return self._error("invalid_request")
+            self._mcp_expire_next_sessions = data["count"]
+            return {"count": self._mcp_expire_next_sessions}
+
+        @self.app.post("/_test/fail_next_mcp")
+        async def fail_next_mcp(request: Request):
+            data = await request.json()
+            if (type(data.get("count")) is not int or data["count"] < 0
+                    or type(data.get("status")) is not int or not 400 <= data["status"] <= 599):
+                return self._error("invalid_request")
+            self._mcp_fail_next = {"status": data["status"], "count": data["count"]}
+            return dict(self._mcp_fail_next)
 
         @self.app.post("/mcp")
         async def mcp(request: Request):
@@ -832,6 +898,31 @@ class FakeSeraph:
             if key is None or key["revoked"]:
                 self._stats["mcp_401s"] += 1
                 return self._error("unauthorized", 401)
+            self._stats["mcp_requests"] += 1
+            if self._mcp_fail_next["count"] > 0:
+                self._mcp_fail_next["count"] -= 1
+                self._stats["mcp_forced_failures"] += 1
+                return self._error("forced_failure", self._mcp_fail_next["status"])
+            # Streamable HTTP: an expired session answers 410, an unknown one 404.
+            # Both happen before any method runs, so no tool ever executes.
+            session_id = request.headers.get("mcp-session-id")
+            if session_id is None:
+                # guardian-proxy: only initialize may omit the session (400, never run).
+                try:
+                    peek = json.loads(await request.body())
+                except ValueError:
+                    peek = None
+                if not isinstance(peek, dict) or peek.get("method") != "initialize":
+                    self._stats["mcp_400s"] += 1
+                    return Response("Missing Mcp-Session-Id header", status_code=400,
+                                    media_type="text/plain")
+            else:
+                if session_id not in self._mcp_sessions:
+                    self._stats["mcp_404s"] += 1
+                    return Response("Session not found", status_code=404, media_type="text/plain")
+                if self._mcp_sessions[session_id]:
+                    self._stats["mcp_410s"] += 1
+                    return Response("Session expired", status_code=410, media_type="text/plain")
 
             def error(code, message, rid=None):
                 return JSONResponse({"jsonrpc": "2.0", "id": rid,
@@ -848,24 +939,31 @@ class FakeSeraph:
             if method == "initialize":
                 result = {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
                           "serverInfo": {"name": "fake-seraph", "version": "1.0.0"}}
-                headers["Mcp-Session-Id"] = secrets.token_urlsafe(24)
+                self._stats["mcp_initializes"] += 1
+                new_session = secrets.token_urlsafe(24)
+                born_expired = self._mcp_expire_next_sessions > 0
+                if born_expired:
+                    self._mcp_expire_next_sessions -= 1
+                self._mcp_sessions[new_session] = born_expired
+                headers["Mcp-Session-Id"] = new_session
             elif method == "notifications/initialized" and "id" not in data:
                 return Response(status_code=202)
             elif method == "tools/list":
                 result = {"tools": [{"name": name, "inputSchema": {
-                    "type": "object", "properties": {}}} for name in names]}
+                    "type": "object", "properties": {}}} for name in tool_names()]}
             elif method == "tools/call":
                 params = data.get("params", {})
                 if not isinstance(params, dict):
                     return error(-32602, "Invalid params", rid)
                 name = params.get("name")
-                if name not in names:
+                if name not in tool_names():
                     return error(-32601, "Unknown tool", rid)
                 if name == "guardian_execute" and "wallet:execute" not in key["scopes"]:
                     return self._error("insufficient_scope", 403)
                 args = params.get("arguments", {})
                 if not isinstance(args, dict):
                     return error(-32602, "Invalid arguments", rid)
+                self._stats["mcp_tool_executions"] += 1
                 try:
                     output = await self._mcp_tool(name, args, key)
                 except (ValueError, TypeError, KeyError, AttributeError):
@@ -879,6 +977,8 @@ class FakeSeraph:
     async def _mcp_tool(self, name: str, args: dict, key: dict) -> dict:
         if name == "crypto_get_price":
             return {"asset": args.get("asset", "ETH"), "priceUsd": 3000.0}
+        if name == "guardian_check_token":
+            return {"riskLevel": "low", "riskScore": 5}
         if name == "guardian_wallet_status":
             return {"ok": True, **self.signer_state(),
                     "chains": [{"chainId": chain, "nativeBalanceWei": "1000000000000000000"}

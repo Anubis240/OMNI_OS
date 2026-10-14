@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -44,6 +45,18 @@ def _app_api_keys_path() -> Path:
 class McpUnauthorized(RuntimeError):
     """HTTP 401 from the MCP endpoint. Separated from every other transport
     failure so only a genuine credential rejection can trigger a re-mint."""
+
+
+class McpSessionExpired(RuntimeError):
+    """HTTP 410, or 404 for a request that carried Mcp-Session-Id: the server
+    dropped the session. The server rejects these before running the method,
+    so re-initializing and retrying once can never duplicate a tool call.
+    `stale_session` is kept for the renewal compare and is never logged."""
+
+    def __init__(self, status: int, stale_session: str | None) -> None:
+        super().__init__("seraph_session_expired")
+        self.status = status
+        self.stale_session = stale_session
 
 
 def _load_guardian_api_key() -> str:
@@ -125,6 +138,10 @@ class McpClient:
         self._req_id = 1
         self._tools: list[dict] | None = None
         self._tools_at = 0.0
+        # Serializes session setup so concurrent expiries re-initialize once.
+        self._session_lock = threading.RLock()
+        # Per-thread id of the session the last request used, for stale compares.
+        self._local = threading.local()
 
     def _resolve_credential(self) -> tuple[str, str, str]:
         """Return (secret, mode, source), once per request. Empty means absent."""
@@ -155,24 +172,35 @@ class McpClient:
     def credential_mode(self) -> str:
         return self._resolve_credential()[1]
 
-    def _headers(self, secret: str) -> dict:
+    def _headers(self, secret: str, session: str | None) -> dict:
         h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
         if secret:
             h["Authorization"] = f"Bearer {secret}"
-        if self._session:
-            h["Mcp-Session-Id"] = self._session
+        if session:
+            h["Mcp-Session-Id"] = session
         return h
 
-    def _request(self, method: str, params: dict, secret: str, is_notification: bool = False):
+    def _request(self, method: str, params: dict, secret: str, is_notification: bool = False,
+                 session: str | None = None):
+        """`session` is the id the caller got from _ensure_ready, never a fresh
+        read of self._session: a concurrent renewal can clear that field, and a
+        sessionless non-initialize request is a 400 (not retried) at the proxy.
+        A replaced id instead gets 404/410, which the single retry handles."""
         body: dict[str, object] = {"jsonrpc": "2.0", "method": method, "params": params}
         if not is_notification:
             body["id"] = self._req_id
             self._req_id += 1
         timeout = 45 if method == "tools/call" else 15
-        res = requests.post(self.url, headers=self._headers(secret), json=body, timeout=timeout)
+        headers = self._headers(secret, session)
+        sent_session = headers.get("Mcp-Session-Id")
+        self._local.session = sent_session
+        res = requests.post(self.url, headers=headers, json=body, timeout=timeout)
+        if res.status_code == 410 or (res.status_code == 404 and sent_session):
+            raise McpSessionExpired(res.status_code, sent_session)
         sid = res.headers.get("mcp-session-id")
         if sid:
             self._session = sid
+            self._local.session = sid
         if res.status_code == 401:
             raise McpUnauthorized("unauthorized")
         res.raise_for_status()
@@ -188,20 +216,29 @@ class McpClient:
             raise RuntimeError(data["error"].get("message", "MCP error"))
         return data.get("result")
 
-    def _ensure_ready(self, secret: str):
-        if self._session:
-            return
-        self._request("initialize", {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {"name": "Seraph", "version": "1.0.0"},
-        }, secret)
-        try:
-            self._request("notifications/initialized", {}, secret, is_notification=True)
-        except McpUnauthorized:
-            raise
-        except Exception:
-            logger.debug("mcp_initialized_notification_failed")
+    def _ensure_ready(self, secret: str) -> str | None:
+        """Return the session id validated under the lock; callers send exactly it."""
+        with self._session_lock:
+            if self._session:
+                return self._session
+            self._request("initialize", {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "Seraph", "version": "1.0.0"},
+            }, secret)
+            session = self._session
+            try:
+                self._request("notifications/initialized", {}, secret, is_notification=True,
+                              session=session)
+            except McpUnauthorized:
+                raise
+            except Exception:
+                logger.debug("mcp_initialized_notification_failed")
+            return session
+
+    def _last_sent_session(self) -> str | None:
+        """Session this thread's latest request sent (or established)."""
+        return getattr(self._local, "session", None)
 
     def invalidate(self) -> None:
         """Drop session and cached tools; the next request resolves credentials anew."""
@@ -209,15 +246,46 @@ class McpClient:
         self._tools = None
         self._tools_at = 0.0
 
+    def _drop_stale_session(self, stale: str | None) -> bool:
+        """Clear session + tools only if `stale` is still current. Returns True
+        for the thread that cleared; a later thread sees a newer session."""
+        with self._session_lock:
+            if self._session != stale:
+                return False
+            self.invalidate()
+            return True
+
+    def _with_session_retry(self, operation: Callable[[str], dict], secret: str) -> dict:
+        """Run `operation`; on an expired session re-initialize and retry ONCE.
+        Only McpSessionExpired is retried (rejected before execution); 5xx,
+        timeouts and everything else propagate untouched."""
+        try:
+            return operation(secret)
+        except McpSessionExpired as err:
+            with self._session_lock:
+                if self._drop_stale_session(err.stale_session):
+                    logger.info("mcp_session_expired status=%s; reinitializing", err.status)
+                    self._ensure_ready(secret)
+                else:
+                    logger.info("mcp_session_expired status=%s; reusing renewed session", err.status)
+        try:
+            return operation(secret)
+        except McpSessionExpired as err:
+            self._drop_stale_session(err.stale_session)
+            logger.warning("mcp_session_expired_after_retry status=%s", err.status)
+            return {"ok": False, "error": "seraph_session_expired"}
+
     def _call_with_auth_retry(self, operation: Callable[[str], dict]) -> dict:
         secret, mode, _source = self._resolve_credential()
         if not secret:
             return {"ok": False, "error": "seraph_login_required"}
+        self._local.session = None
+        # Failure clears go through the stale compare so they never wipe a
+        # session another thread has just renewed.
         try:
-            return operation(secret)
+            return self._with_session_retry(operation, secret)
         except McpUnauthorized:
-            self._session = None
-            self._tools = None
+            self._drop_stale_session(self._last_sent_session())
             if mode != "api_key_oauth":
                 # User-owned keys must never be deleted automatically.
                 if self._on_unauthorized is not None:
@@ -247,38 +315,41 @@ class McpClient:
                 return {"ok": False, "error": "seraph_login_required"}
             self.invalidate()
             try:
-                return operation(fresh)
+                # The fresh-key attempt gets its own single session retry.
+                return self._with_session_retry(operation, fresh)
             except McpUnauthorized:
                 # A rejected fresh key means the OAuth session itself is dead.
-                self._session = None
-                self._tools = None
+                self._drop_stale_session(self._last_sent_session())
                 auth.invalidate_session()
                 return {"ok": False, "error": "seraph_login_required"}
             except Exception as err:
-                self._session = None
+                self._drop_stale_session(self._last_sent_session())
                 return {"ok": False, "error": str(err)}
         except Exception as err:
-            self._session = None
-            self._tools = None
+            self._drop_stale_session(self._last_sent_session())
             return {"ok": False, "error": str(err)}
 
     def tools(self) -> dict:
         def op(secret: str) -> dict:
-            if self._tools is None or (time.time() - self._tools_at) > TOOLS_CACHE_SECONDS:
-                self._ensure_ready(secret)
-                result = self._request("tools/list", {}, secret)
-                self._tools = [
+            # One snapshot: a concurrent invalidate() must not turn a cache hit
+            # into {"ok": True, "tools": None}.
+            tools, fetched_at = self._tools, self._tools_at
+            if tools is None or (time.time() - fetched_at) > TOOLS_CACHE_SECONDS:
+                session = self._ensure_ready(secret)
+                result = self._request("tools/list", {}, secret, session=session)
+                tools = [
                     {"name": t["name"], "description": t.get("description", ""), "schema": t.get("inputSchema", {})}
                     for t in (result.get("tools") or [])
                 ]
-                self._tools_at = time.time()
-            return {"ok": True, "tools": self._tools}
+                self._tools, self._tools_at = tools, time.time()
+            return {"ok": True, "tools": tools}
         return self._call_with_auth_retry(op)
 
     def call(self, name: str, args: dict | None = None) -> dict:
         def op(secret: str) -> dict:
-            self._ensure_ready(secret)
-            result = self._request("tools/call", {"name": name, "arguments": args or {}}, secret)
+            session = self._ensure_ready(secret)
+            result = self._request("tools/call", {"name": name, "arguments": args or {}}, secret,
+                                   session=session)
             text = "\n".join(c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text")
             return {"ok": True, "text": text[:6000], "isError": bool(result.get("isError"))}
         return self._call_with_auth_retry(op)
