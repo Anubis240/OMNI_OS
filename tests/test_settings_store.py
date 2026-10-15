@@ -106,7 +106,7 @@ class SettingsStoreTests(unittest.TestCase):
     def test_missing_settings_return_independent_defaults_without_writing(self):
         first = settings_store.load_settings()
         self.assertEqual(first["dashboard_port"], 8000)
-        self.assertFalse(first["trader"]["enabled"])
+        self.assertTrue(first["trader"]["enabled"])            # on by default since 1.12.13
         self.assertEqual(first["companions"], [])
         first["api_keys"]["openai"] = "test-only"
         first["skills"].append({"name": "test"})
@@ -116,6 +116,21 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(second["skills"], [])
         self.assertEqual(settings_store.DEFAULT_SETTINGS["api_keys"]["openai"], "")
         self.assertFalse(self.path.exists())
+
+    def test_settings_from_before_the_trader_default_switch_it_on_once(self):
+        # Pre-1.12.13 files hold the old default ("enabled": false) because
+        # save_settings writes every default, not because anyone chose it.
+        settings_store.save_settings({"trader": {"enabled": False}, "dashboard_port": 9000})
+        loaded = settings_store.load_settings()
+        self.assertTrue(loaded["trader"]["enabled"])
+        self.assertTrue(loaded["trader"]["defaultOnApplied"])
+        self.assertEqual(loaded["dashboard_port"], 9000)
+
+    def test_a_later_choice_to_switch_the_trader_off_is_kept(self):
+        settings_store.save_settings({"trader": {"enabled": False}})
+        settings_store.update_settings(lambda s: s["trader"].update(enabled=False))   # chosen in Settings
+        self.assertFalse(settings_store.load_settings()["trader"]["enabled"])
+        self.assertFalse(settings_store.load_settings()["trader"]["enabled"])
 
     def test_save_and_load_merge_partial_settings_and_ignore_unknown_keys(self):
         settings_store.save_settings({

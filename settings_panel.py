@@ -169,7 +169,7 @@ class SettingsPanel(QWidget):
 
         note = QLabel(
             "Optional built-in crypto trading panel, guarded by pre-trade risk checks. "
-            "Off by default. Trades only ever go through commands typed directly into "
+            "On by default. Trades only ever go through commands typed directly into "
             "the trader panel's own command bar — never by voice."
         )
         note.setFont(QFont("Segoe UI", 8))
@@ -187,7 +187,9 @@ class SettingsPanel(QWidget):
         return wrap
 
     def _on_save_trader(self):
-        self.settings["trader"] = {"enabled": self._trader_enabled.isChecked()}
+        # Update in place: replacing the dict would drop defaultOnApplied and
+        # let load_settings() switch the trader back on.
+        self.settings["trader"]["enabled"] = self._trader_enabled.isChecked()
         self._persist("Trader panel setting saved.")
 
     # ---------- Companions ----------

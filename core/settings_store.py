@@ -88,7 +88,10 @@ DEFAULT_SETTINGS = {
     "openhands_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},
     "grok_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},
     "blackbox_agent": {"enabled": False, "cliPath": "", "vaultDir": ""},
-    "trader": {"enabled": False},  # optional crypto trading panel add-on, off by default
+    # Optional crypto trading panel add-on, on by default since 1.12.13.
+    # defaultOnApplied marks a settings file that has had the one-time
+    # switch-on below, so a later "off" in Settings is kept.
+    "trader": {"enabled": True, "defaultOnApplied": True},
     "live_model": "",   # Gemini Live model override for the default "Omni" identity
                         # (a companion's own "model" field still wins over this — see
                         # main.py::_build_config()); empty means use the hardcoded
@@ -331,6 +334,13 @@ def load_settings() -> dict:
                 merged[key].update(data[key])
             else:
                 merged[key] = data[key]
+    saved_trader = data.get("trader")
+    if isinstance(saved_trader, dict) and "defaultOnApplied" not in saved_trader:
+        # Settings saved before 1.12.13 hold "enabled": false only because
+        # save_settings writes every default (the trader used to be off by
+        # default), not because anyone chose it. Switch it on once; the
+        # marker, saved with the next write, keeps any later choice.
+        merged["trader"]["enabled"] = True
     if "companions" not in data:
         # Fresh install (or a pre-companion-registry settings.json) — seed the
         # built-in personas so companion switching has something to show on
